@@ -258,7 +258,7 @@ try {
     try {
         $qc = (& sc.exe qc SplitPlay) -join "`n"
         Write-Host $qc
-        if ($qc -notmatch 'AUTO_START\s+\(DELAYED\)') { throw 'service is not delayed auto start' }
+        if ($qc -notmatch 'AUTO_START' -or $qc -match 'DELAYED') { throw 'service is not plain auto start' }
         if ($qc -notmatch 'SplitPlay Host Service') { throw 'unexpected display name' }
         if ($qc -notmatch 'LocalSystem') { throw 'service does not run as LocalSystem' }
         $qf = (& sc.exe qfailure SplitPlay) -join "`n"

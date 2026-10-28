@@ -45,5 +45,7 @@ Rules:
 - `id` unique, `[a-z0-9-]{1,32}`; `user` unique, a local Windows account name (created by the service if missing).
 - `basePort` unique; if omitted the service picks `basePortStart + stride * k` with the lowest free `k ≥ 0`. A desk occupies `basePort-5 … basePort+21`.
 - `gpu`: `"auto"` or an adapter LUID string `"0x…"`.
+- `profile` may also carry `gpuLuid` and `cpuSet` (array of logical CPU indices), passed to the worker as in ipc.md.
+- Desk port ranges may not overlap each other or contain `host.webPort`; `basePortStride` must be at least 27.
 - `profile.fps` 10–500, `codec` one of `h264`, `hevc`, `av1`; `gpuPriority` `normal`, `high`, `realtime`.
 - `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz).

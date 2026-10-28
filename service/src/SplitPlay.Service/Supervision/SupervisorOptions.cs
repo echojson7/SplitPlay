@@ -12,8 +12,11 @@ public sealed class SupervisorOptions
     /// <summary><c>process</c> (start <see cref="ChildExecutable"/>) or <c>fake</c> (in-memory fake child). Empty = by OS.</summary>
     public string Launcher { get; set; } = "";
 
-    /// <summary>Child executable; relative paths resolve against the service directory.</summary>
-    public string ChildExecutable { get; set; } = "splitplay-stubworker.exe";
+    /// <summary>
+    /// Child executable; relative paths resolve against the service directory. The default matches the installed
+    /// layout (<c>%ProgramFiles%\SplitPlay\service</c> next to <c>native</c>).
+    /// </summary>
+    public string ChildExecutable { get; set; } = @"..\native\splitplay-stubworker.exe";
 
     /// <summary>Arguments placed before <c>--pipe … --desk …</c>, separated by spaces.</summary>
     public string ChildArguments { get; set; } = "";

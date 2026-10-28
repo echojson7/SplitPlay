@@ -26,10 +26,11 @@ Compilation fails with a clear error if a required staged file is missing.
 <StageDir>\
   service\                    dotnet publish output of SplitPlay.Service (self-contained), plus:
     SplitPlay.Service.exe     Windows service (name SplitPlay, display name "SplitPlay Host Service")
-    splitplay.exe             CLI; the installer runs `splitplay.exe service install` / `service uninstall`
-    SplitPlay.Tray.exe        tray / GUI (WebView2)
-    ...                       their DLLs, runtimeconfig, etc.
+    splitplay.exe             CLI (single-file, self-contained); the installer runs `splitplay.exe service install` / `service uninstall`
+    ...                       the service's DLLs, runtime, runtimeconfig, etc.
     wwwroot\                  contents of web/dist (`npm run build` in web/); index.html must exist
+  tray\                       dotnet publish output of SplitPlay.Tray (self-contained, own WindowsDesktop runtime)
+    SplitPlay.Tray.exe        tray / GUI (WebView2)
   native\
     splitplay-seat.exe
     splitplay-rdsprov.dll
@@ -42,7 +43,7 @@ Compilation fails with a clear error if a required staged file is missing.
 ```
 
 Required files (checked at compile time): `service\SplitPlay.Service.exe`, `service\splitplay.exe`,
-`service\SplitPlay.Tray.exe`, `service\wwwroot\index.html`, the three files in `native\`,
+`tray\SplitPlay.Tray.exe`, `service\wwwroot\index.html`, the three files in `native\`,
 `worker\splitplay-worker.exe` and `worker\COPYING`. The repository's `LICENSE` and `NOTICE.md` are added by the script.
 
 ## What the installer does
@@ -54,7 +55,7 @@ Required files (checked at compile time): `service\SplitPlay.Service.exe`, `serv
    English and Russian.
 3. Components: the SplitPlay host (fixed) and a **disabled TermWrap placeholder**: TermWrap is not bundled
    yet and Remote Desktop Services are not modified by this build.
-4. Installs to `%ProgramFiles%\SplitPlay\{service,native,worker,drivers}`.
+4. Installs to `%ProgramFiles%\SplitPlay\{service,tray,native,worker,drivers}`.
 5. Creates `%ProgramData%\SplitPlay` (with `desks\` and `logs\`) and replaces its ACL with full control for
    SYSTEM and Administrators only, inherited by everything below.
 6. Adds the firewall rule `SplitPlay Web UI` (TCP 38299 inbound, local subnet, private/domain profiles,

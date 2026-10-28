@@ -46,7 +46,7 @@ function Get-Rule { Get-NetFirewallRule -DisplayName $ruleName -ErrorAction Sile
 
 function Test-Installed([string] $label) {
     Write-Host "== $label"
-    foreach ($f in 'service\SplitPlay.Service.exe', 'service\splitplay.exe', 'service\SplitPlay.Tray.exe',
+    foreach ($f in 'service\SplitPlay.Service.exe', 'service\splitplay.exe', 'tray\SplitPlay.Tray.exe',
                    'service\wwwroot\index.html', 'native\splitplay-seat.exe', 'native\splitplay-rdsprov.dll',
                    'native\splitplay-stubworker.exe', 'worker\splitplay-worker.exe', 'worker\COPYING',
                    'LICENSE.txt', 'NOTICE.md', 'unins000.exe') {

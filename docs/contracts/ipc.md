@@ -18,7 +18,7 @@ Protocol version: **1**.
 1. Child connects and sends `hello`.
 2. Service answers with `welcome` carrying the initial profile.
 3. Child sends `ready` once it is fully up (worker: ports listening; seat: RDP session logged on).
-4. Child sends `heartbeat` every 1000 ms. The service treats 3 missed heartbeats as a hang, kills the child's job object and restarts it with backoff.
+4. Child sends `heartbeat` every 1000 ms, starting right after `welcome` (heartbeats may arrive before `ready`). The service treats 3 missed heartbeats as a hang, kills the child's job object and restarts it with backoff.
 5. Service sends `shutdown`; the child answers `result` and exits within 5 s, otherwise it is killed.
 6. If the pipe breaks, the child exits (it never runs unsupervised).
 
@@ -34,7 +34,17 @@ Protocol version: **1**.
 {"type":"event","name":"client_connected","data":{"client":"Living room PC"}}
 ```
 
-`role` is `worker`, `seat` or `stubworker`. `state` is a free-form short string for the UI (`idle`, `streaming`, `connecting`, `logged_on`).
+`role` is `worker`, `seat` or `stubworker`. The worker pipe accepts `worker` and `stubworker`; the seat pipe accepts `seat`.
+
+`ready` payloads by role:
+
+| Role | Fields |
+|---|---|
+| `worker` | `ports.base`: the HTTP port Moonlight connects to (the other ports follow from it, see config.md) |
+| `stubworker` | none (it opens no network ports) |
+| `seat` | `input_ring` (section name, input_ring.h), `connector` (`null` or `freerdp`), `session` (Windows session id, once known) |
+
+`state` is a free-form short string for the UI (`idle`, `streaming`, `connecting`, `logged_on`).
 `metrics` keys are optional; the service passes unknown keys through to the Web API unchanged.
 
 ### service → child
@@ -48,6 +58,13 @@ Protocol version: **1**.
 {"type":"send_sas","id":9}
 {"type":"shutdown","id":10}
 ```
+
+Answers with data:
+
+- `list_clients` → `{"clients":[{"uuid":"…","name":"Laptop","paired_at":"2026-10-28T12:00:00Z"}]}`. `paired_at` is optional;
+  the service also accepts `id` for `uuid` and a bare array.
+- `pair` fails with `pair_failed` when no Moonlight client is waiting for a PIN or the PIN does not match; `unpair` fails with
+  `not_found` for an unknown uuid.
 
 `pair`, `list_clients` and `unpair` are worker-only; `send_sas` is seat-only. A child that does not support a request answers `unsupported`.
 

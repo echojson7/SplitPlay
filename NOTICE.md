@@ -10,7 +10,9 @@ SplitPlay's own code is MIT-licensed (see `LICENSE`). The worker in `worker/` is
 | TermWrap | installer (from Stage 3) | MIT |
 | libvirtualgamepad | pad driver (from Stage 4) | MIT |
 | HidHide | installer (from Stage 4) | MIT |
-| Vue, Vite | web UI | MIT |
+| nlohmann/json 3.11.3 | native (common library, seat, stub worker) | MIT |
+| Vue, Vue Router, Vite | web UI | MIT |
+| Inno Setup | installer (build tool, not redistributed as a library) | Inno Setup licence |
 | .NET runtime and ASP.NET Core | service, CLI, tray | MIT |
 | Microsoft WebView2 | tray | Microsoft software licence (redistributable runtime) |
 

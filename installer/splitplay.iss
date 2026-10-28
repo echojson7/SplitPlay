@@ -39,8 +39,8 @@
 #if !FileExists(AddBackslash(StageDir) + "service\splitplay.exe")
   #error Missing staged file service\splitplay.exe (check /DStageDir, see installer/README.md)
 #endif
-#if !FileExists(AddBackslash(StageDir) + "service\SplitPlay.Tray.exe")
-  #error Missing staged file service\SplitPlay.Tray.exe (check /DStageDir, see installer/README.md)
+#if !FileExists(AddBackslash(StageDir) + "tray\SplitPlay.Tray.exe")
+  #error Missing staged file tray\SplitPlay.Tray.exe (check /DStageDir, see installer/README.md)
 #endif
 #if !FileExists(AddBackslash(StageDir) + "service\wwwroot\index.html")
   #error Missing staged file service\wwwroot\index.html (check /DStageDir, see installer/README.md)
@@ -88,7 +88,7 @@ WizardStyle=modern
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayName=SplitPlay
-UninstallDisplayIcon={app}\service\SplitPlay.Tray.exe
+UninstallDisplayIcon={app}\tray\SplitPlay.Tray.exe
 SetupLogging=yes
 ChangesEnvironment=no
 
@@ -159,6 +159,8 @@ Name: "{commonappdata}\SplitPlay\logs"; Flags: uninsneveruninstall
 
 [Files]
 Source: "{#StageDir}\service\*"; DestDir: "{app}\service"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
+; The tray carries its own self-contained runtime (with WindowsDesktop), so it cannot share the service folder.
+Source: "{#StageDir}\tray\*"; DestDir: "{app}\tray"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\native\*"; DestDir: "{app}\native"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\worker\*"; DestDir: "{app}\worker"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Driver packages are shipped but not installed in Stage 2 (pnputil comes with the drivers in Stage 4).
@@ -170,14 +172,14 @@ Source: "..\NOTICE.md"; DestDir: "{app}"; Components: core; Flags: ignoreversion
 Filename: "{group}\{cm:WebUiShortcut}.url"; Section: "InternetShortcut"; Key: "URL"; String: "http://127.0.0.1:{#WebPort}/"
 
 [Icons]
-Name: "{group}\SplitPlay"; Filename: "{app}\service\SplitPlay.Tray.exe"; WorkingDir: "{app}\service"
+Name: "{group}\SplitPlay"; Filename: "{app}\tray\SplitPlay.Tray.exe"; WorkingDir: "{app}\tray"
 Name: "{group}\{cm:UninstallProgram,SplitPlay}"; Filename: "{uninstallexe}"
 
 [Registry]
-Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SplitPlayTray"; ValueData: """{app}\service\SplitPlay.Tray.exe"""; Flags: uninsdeletevalue; Tasks: trayautostart
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SplitPlayTray"; ValueData: """{app}\tray\SplitPlay.Tray.exe"""; Flags: uninsdeletevalue; Tasks: trayautostart
 
 [Run]
-Filename: "{app}\service\SplitPlay.Tray.exe"; Description: "{cm:LaunchTray}"; Flags: postinstall nowait skipifsilent runasoriginaluser
+Filename: "{app}\tray\SplitPlay.Tray.exe"; Description: "{cm:LaunchTray}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallDelete]
 Type: files; Name: "{group}\{cm:WebUiShortcut}.url"

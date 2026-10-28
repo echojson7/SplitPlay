@@ -1,0 +1,3 @@
+# Local agent worktrees and the integration build output (ci.yml stages into build/).
+.claude/
+/build/

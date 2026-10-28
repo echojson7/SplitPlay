@@ -15,12 +15,13 @@ on:
       - 'drivers/**'
       - '.github/workflows/drivers.yml'
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: drivers-${{ github.ref }}
+  group: ${{ github.workflow }}-drivers-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

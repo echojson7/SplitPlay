@@ -21,12 +21,13 @@ on:
       - 'NOTICE.md'
       - '.github/workflows/web-installer.yml'
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: web-installer-${{ github.ref }}
+  group: ${{ github.workflow }}-web-installer-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

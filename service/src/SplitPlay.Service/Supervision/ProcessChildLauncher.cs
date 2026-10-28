@@ -17,7 +17,7 @@ public sealed class ProcessChildLauncher(IOptions<SupervisorOptions> options, IL
         var o = options.Value;
         var executable = Path.IsPathRooted(o.ChildExecutable)
             ? o.ChildExecutable
-            : Path.Combine(AppContext.BaseDirectory, o.ChildExecutable);
+            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, o.ChildExecutable));
 
         if (!File.Exists(executable))
         {

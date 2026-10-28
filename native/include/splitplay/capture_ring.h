@@ -12,17 +12,25 @@
 // A "generation" changes whenever the textures are recreated (mode change, adapter change, HDR toggle).
 // The consumer re-opens textures and the fence when it sees a new generation.
 //
+// Opening the shared objects (consumer): textures with ID3D11Device1::OpenSharedResourceByName; the fence with
+// ID3D12Device::OpenSharedHandleByName (any D3D12 device on the same adapter) followed by
+// ID3D11Device5::OpenSharedFence on that handle. The producer creates every object with a DACL that lets the SYSTEM
+// worker open it (section, textures: read; event, fence: synchronize + modify); WUDFHost runs as LocalService.
+//
 // Publishing (producer):
-//   1. pick a slot whose consumer_busy == 0 (none free -> drop the frame, increment frames_dropped)
+//   1. pick a slot whose consumer_busy == 0, never the current latest_slot (the consumer may be about to claim it);
+//      none free -> drop the frame, increment frames_dropped
 //   2. GPU-copy the DWM surface into the slot texture, signal the fence with ++fence_value
-//   3. fill SpCaptureSlot (frame_id, qpc stamps, fence_value, cursor, ...)
+//   3. fill SpCaptureSlot (fence_value, qpc stamps, cursor, ...), then store frame_id with release semantics
 //   4. store latest_slot / latest_frame_id with release semantics, SetEvent(FrameReady)
 //
 // Consuming (worker):
 //   1. wait on FrameReady (encode on arrival; never poll on a timer)
-//   2. read latest_slot with acquire semantics, set that slot's consumer_busy = 1
+//   2. read latest_frame_id / latest_slot with acquire semantics, store consumer_busy = 1 (seq_cst), then re-read
+//      latest_frame_id and the slot's frame_id; if either changed, store consumer_busy = 0 and retry from the top
 //   3. GPU-wait on the fence for fence_value, convert + composite cursor + encode
-//   4. set consumer_busy = 0 once the GPU no longer reads the texture
+//   4. set consumer_busy = 0 (release) once the GPU no longer reads the texture
+// The reference implementation is native/common/src/capture_ring.cpp (Producer / Consumer).
 //
 // All integers are little-endian; the layout is identical for x64 and ARM64 builds.
 #pragma once

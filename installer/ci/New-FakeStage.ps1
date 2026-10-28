@@ -16,7 +16,7 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { throw "csc.exe not found at $csc" }
 
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
-foreach ($d in 'service\wwwroot', 'native', 'worker', 'drivers') {
+foreach ($d in 'service\wwwroot', 'tray', 'native', 'worker', 'drivers') {
     New-Item -ItemType Directory -Force -Path (Join-Path $Stage $d) | Out-Null
 }
 $Stage = (Resolve-Path $Stage).Path
@@ -28,7 +28,7 @@ if ($LASTEXITCODE -ne 0) { throw "csc failed with exit code $LASTEXITCODE" }
 $exes = @(
     'service\SplitPlay.Service.exe',
     'service\splitplay.exe',
-    'service\SplitPlay.Tray.exe',
+    'tray\SplitPlay.Tray.exe',
     'native\splitplay-seat.exe',
     'native\splitplay-stubworker.exe',
     'worker\splitplay-worker.exe'

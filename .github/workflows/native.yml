@@ -84,11 +84,14 @@ jobs:
             vcpkg-bin-
 
       - name: Configure (installs FreeRDP through vcpkg)
+        id: configure
         working-directory: native
         run: cmake --preset windows-x64
 
+      # Saved right after the vcpkg install (even if a later step fails), and only when it completed, so a cancelled
+      # run never stores a partial cache under the final key.
       - name: Save vcpkg binary cache
-        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true' && steps.vcpkg.outcome == 'success'
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true' && steps.configure.outcome == 'success'
         uses: actions/cache/save@v4
         with:
           path: ${{ steps.vcpkg.outputs.cache }}
@@ -163,24 +166,6 @@ jobs:
           if ($bad) { exit 1 }
           Get-ChildItem $out | Format-Table Name, Length
 
-      - name: TermWrap release .reg files (reference for native/termwrap/README.md)
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          $rel = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } https://api.github.com/repos/llccd/TermWrap/releases/tags/v0.7
-          $dir = Join-Path $env:RUNNER_TEMP 'termwrap-release'
-          New-Item -ItemType Directory -Force $dir | Out-Null
-          foreach ($a in $rel.assets) {
-            Write-Host "asset: $($a.name) ($($a.size) bytes)"
-            $f = Join-Path $dir $a.name
-            Invoke-WebRequest -Uri $a.browser_download_url -OutFile $f
-            if ($a.name -like '*.zip') { Expand-Archive $f -DestinationPath (Join-Path $dir ($a.name + '.d')) -Force }
-          }
-          foreach ($r in Get-ChildItem $dir -Recurse -Filter *.reg) {
-            Write-Host "===== $($r.FullName.Substring($dir.Length + 1))"
-            Get-Content $r.FullName | ForEach-Object { Write-Host $_ }
-          }
-
       # ---- artifact ---------------------------------------------------------------------------------------------------
       - name: Stage native-win-x64
         run: |
@@ -201,6 +186,68 @@ jobs:
           path: native/build/artifact/
           if-no-files-found: error
           retention-days: 30
+
+      # ---- real session ------------------------------------------------------------------------------------------------
+      # windows-2022 runners allow two "Remote Desktop for Administration" sessions. This opens one over RDP loopback
+      # exactly as the service will: a local user in Remote Desktop Users, splitplay-seat with the FreeRDP connector,
+      # credentials passed in `welcome` over the pipe. It fails (never skips) if the runner cannot host the session.
+      - name: Real RDP-loopback session (seat + fake service)
+        timeout-minutes: 15
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $user = 'sp-ci-desk'
+          $alphabet = [char[]]'abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!#%+-=?@_ '
+          $bytes = [byte[]]::new(28)
+          [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          # Spaces and symbols on purpose (Duo shipped a bug with special characters); the suffix meets complexity rules.
+          $pw = (-join ($bytes | ForEach-Object { $alphabet[$_ % $alphabet.Length] })) + 'aZ7!'
+          Write-Host "::add-mask::$pw"
+          $secure = ConvertTo-SecureString $pw -AsPlainText -Force
+          if (Get-LocalUser -Name $user -ErrorAction SilentlyContinue) { Remove-LocalUser -Name $user }
+          New-LocalUser -Name $user -Password $secure -PasswordNeverExpires -AccountNeverExpires -Description 'SplitPlay CI desk' | Out-Null
+          Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $user   # Users
+          Add-LocalGroupMember -SID 'S-1-5-32-555' -Member $user   # Remote Desktop Users
+
+          # Enable RDP with NLA (what `splitplay host prepare` does on the real PC, minus TermWrap).
+          $ts = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+          Set-ItemProperty $ts -Name fDenyTSConnections -Value 0 -Type DWord
+          Set-ItemProperty "$ts\WinStations\RDP-Tcp" -Name UserAuthentication -Value 1 -Type DWord
+          Set-Service TermService -StartupType Automatic
+          Start-Service TermService
+          $port = (Get-ItemProperty "$ts\WinStations\RDP-Tcp").PortNumber
+          $listening = $false
+          for ($i = 0; $i -lt 60 -and -not $listening; $i++) {
+            try { $c = [Net.Sockets.TcpClient]::new('127.0.0.2', $port); $c.Close(); $listening = $true } catch { Start-Sleep -Seconds 1 }
+          }
+          Get-Service TermService | Format-Table Name, Status, StartType
+          if (-not $listening) {
+            Write-Host "::error title=RDP session test::The runner cannot host RDP sessions: nothing listens on 127.0.0.2:$port after enabling TermService."
+            exit 1
+          }
+          Write-Host "RDP listener on 127.0.0.2:$port"
+
+          $bin = 'native/build/windows-x64/bin/Release'
+          $env:SP_TEST_RDP_PASSWORD = $pw
+          & "$bin/sp_fake_service.exe" --child "$bin/splitplay-seat.exe" --role seat --scenario rdp --rdp-user $user
+          $rc = $LASTEXITCODE
+          Remove-Item Env:SP_TEST_RDP_PASSWORD
+          try { query user 2>&1 | Out-Host } catch { }
+          if ($rc -ne 0) {
+            Write-Host '--- TerminalServices / RemoteDesktopServices events (last 15 min) ---'
+            $since = (Get-Date).AddMinutes(-15)
+            foreach ($log in 'Microsoft-Windows-TerminalServices-LocalSessionManager/Operational',
+                             'Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational',
+                             'Microsoft-Windows-RemoteDesktopServices-RdpCoreTS/Operational') {
+              Get-WinEvent -LogName $log -ErrorAction SilentlyContinue |
+                Where-Object TimeCreated -ge $since | Select-Object -First 40 |
+                Format-Table TimeCreated, Id, LevelDisplayName, Message -Wrap | Out-Host
+            }
+            Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4625; StartTime = $since } -ErrorAction SilentlyContinue |
+              Select-Object -First 10 | Format-List TimeCreated, Message | Out-Host
+            Write-Host "::error title=RDP session test::splitplay-seat could not open, verify or log off a real RDP-loopback session (exit $rc); see the log above."
+            exit 1
+          }
+          Remove-LocalUser -Name $user
 
       - name: Upload test and vcpkg logs
         if: failure()

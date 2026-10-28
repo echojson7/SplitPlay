@@ -1,12 +1,15 @@
 # SPDX-License-Identifier: MIT
 # Silent install / upgrade / uninstall smoke test for SplitPlay-Setup-*.exe built from the fake stage
-# (installer/ci/New-FakeStage.ps1). Needs an elevated shell; GitHub-hosted Windows runners are.
+# (installer/ci/New-FakeStage.ps1), or with -RealStage from the real component artifacts (ci.yml), where the stub's
+# record of splitplay.exe calls is not available and the host preparation is checked by its result instead.
+# Needs an elevated shell; GitHub-hosted Windows runners are.
 #
 #   pwsh installer/ci/Test-Installer.ps1 -Setup build/installer/SplitPlay-Setup-0.1.0-ci.exe -LogDir build/logs
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)] [string] $Setup,
-    [Parameter(Mandatory)] [string] $LogDir
+    [Parameter(Mandatory)] [string] $LogDir,
+    [switch] $RealStage
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -77,11 +80,15 @@ function Test-Installed([string] $label, [bool] $termWrap = $true) {
     }
 
     # Post-install host preparation, always with --skip-termwrap here (the parameter or the deselected component).
-    $calls = @(Get-StubCalls)
-    Check 'setup ran "splitplay host prepare --skip-termwrap"' (@($calls | Where-Object { $_ -eq 'splitplay.exe host prepare --skip-termwrap' }).Count -eq 1)
-    Check 'host prepare ran before the service was started' (
-        [array]::IndexOf($calls, 'splitplay.exe host prepare --skip-termwrap') -ge 0 -and
-        [array]::IndexOf($calls, 'splitplay.exe host prepare --skip-termwrap') -lt [array]::IndexOf($calls, 'SplitPlay.Service.exe --stub-service'))
+    if ($RealStage) {
+        Check 'setup prepared the host (host-tuning.json written)' (Test-Path (Join-Path $data 'host-tuning.json'))
+    } else {
+        $calls = @(Get-StubCalls)
+        Check 'setup ran "splitplay host prepare --skip-termwrap"' (@($calls | Where-Object { $_ -eq 'splitplay.exe host prepare --skip-termwrap' }).Count -eq 1)
+        Check 'host prepare ran before the service was started' (
+            [array]::IndexOf($calls, 'splitplay.exe host prepare --skip-termwrap') -ge 0 -and
+            [array]::IndexOf($calls, 'splitplay.exe host prepare --skip-termwrap') -lt [array]::IndexOf($calls, 'SplitPlay.Service.exe --stub-service'))
+    }
     Test-TermServiceUntouched
     $svc = Get-Service -Name SplitPlay -ErrorAction SilentlyContinue
     Check 'service SplitPlay exists' ($null -ne $svc)
@@ -128,8 +135,11 @@ function New-DeskRule {
 function Test-Removed([string] $label, [bool] $dataKept) {
     Write-Host "== $label"
     Wait-Until { -not (Test-Path $app) }
-    $calls = @(Get-StubCalls)
-    Check 'uninstaller ran "splitplay host revert"' (@($calls | Where-Object { $_ -eq 'splitplay.exe host revert' }).Count -eq 1)
+    if (-not $RealStage) {
+        # With the real CLI the revert itself is checked by Test-EndToEnd.ps1.
+        $calls = @(Get-StubCalls)
+        Check 'uninstaller ran "splitplay host revert"' (@($calls | Where-Object { $_ -eq 'splitplay.exe host revert' }).Count -eq 1)
+    }
     Test-TermServiceUntouched
     Check 'service removed' ($null -eq (Get-Service -Name SplitPlay -ErrorAction SilentlyContinue))
     Check 'firewall rule removed' ($null -eq (Get-Rule))

@@ -98,7 +98,7 @@ jobs:
           Get-ChildItem build/installer | ForEach-Object { '{0} {1:N1} MB' -f $_.Name, ($_.Length / 1MB) }
 
       - name: Smoke test (silent install, upgrade, uninstall)
-        run: ./installer/ci/Test-Installer.ps1 -Setup (Get-Item build/installer/SplitPlay-Setup-*.exe).FullName -LogDir build/logs
+        run: ./installer/ci/Test-Installer.ps1 -Setup (Get-Item build/installer/SplitPlay-Setup-*.exe).FullName -LogDir build/logs -RealStage
 
       - name: End-to-end test (installed service runs a desk with the stub worker)
         run: ./installer/ci/Test-EndToEnd.ps1 -Setup (Get-Item build/installer/SplitPlay-Setup-*.exe).FullName -LogDir build/logs

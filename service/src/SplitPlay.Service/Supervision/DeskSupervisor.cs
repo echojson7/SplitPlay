@@ -135,12 +135,12 @@ public sealed class DeskSupervisor : IHostedService
             _lastCpuAt = now;
         }
 
-        var memory = GC.GetGCMemoryInfo();
+        var (memoryUsedMb, memoryTotalMb) = GpuInventory.PhysicalMemory();
         var composeMs = _config.Snapshot().Host.ComposeIntervalMs;
         var host = new HostMetricsDto(
             Math.Round(Math.Clamp(cpuPercent, 0, 100), 1),
-            memory.MemoryLoadBytes > 0 ? Math.Round(memory.MemoryLoadBytes / 1024.0 / 1024.0) : null,
-            memory.TotalAvailableMemoryBytes > 0 ? Math.Round(memory.TotalAvailableMemoryBytes / 1024.0 / 1024.0) : null,
+            memoryUsedMb,
+            memoryTotalMb,
             composeMs > 0 ? Math.Round(1000.0 / composeMs, 1) : null,
             _gpus.Get());
         var desks = List().Select(d => new DeskMetricsEntryDto(d.Id, d.Metrics.Fps, d.Metrics.BitrateKbps, d.Metrics.EncodeMsP99, d.Metrics.Clients)).ToList();

@@ -51,6 +51,41 @@ public sealed class GpuInventory
         }
     }
 
+    /// <summary>Physical memory (used, total) in MB, or nulls when unknown.</summary>
+    public static (double? UsedMb, double? TotalMb) PhysicalMemory()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var status = new MemoryStatusEx { Length = (uint)Marshal.SizeOf<MemoryStatusEx>() };
+            if (GlobalMemoryStatusEx(ref status))
+            {
+                return (Math.Round((status.TotalPhys - status.AvailPhys) / 1024.0 / 1024.0), Math.Round(status.TotalPhys / 1024.0 / 1024.0));
+            }
+        }
+
+        var info = GC.GetGCMemoryInfo();
+        return (info.MemoryLoadBytes > 0 ? Math.Round(info.MemoryLoadBytes / 1024.0 / 1024.0) : null,
+            info.TotalAvailableMemoryBytes > 0 ? Math.Round(info.TotalAvailableMemoryBytes / 1024.0 / 1024.0) : null);
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MemoryStatusEx
+    {
+        public uint Length;
+        public uint MemoryLoad;
+        public ulong TotalPhys;
+        public ulong AvailPhys;
+        public ulong TotalPageFile;
+        public ulong AvailPageFile;
+        public ulong TotalVirtual;
+        public ulong AvailVirtual;
+        public ulong AvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
+
     /// <summary>Formats an adapter LUID like the config's <c>gpu</c> field: <c>0x</c> + 16 hex digits.</summary>
     public static string FormatLuid(uint low, int high) =>
         "0x" + (((ulong)(uint)high << 32) | low).ToString("X16", CultureInfo.InvariantCulture);
@@ -83,7 +118,9 @@ public sealed class GpuInventory
                     var getDesc1 = (delegate* unmanaged[Stdcall]<IntPtr, DxgiAdapterDesc1*, int>)adapterVtable[10];
                     DxgiAdapterDesc1 desc;
                     Marshal.ThrowExceptionForHR(getDesc1(adapter, &desc));
-                    if ((desc.Flags & DxgiAdapterFlagSoftware) != 0)
+                    // Skip software adapters, including the Microsoft Basic Render Driver (VEN_1414 DEV_008C),
+                    // which does not always carry the software flag.
+                    if ((desc.Flags & DxgiAdapterFlagSoftware) != 0 || (desc.VendorId == 0x1414 && desc.DeviceId == 0x8C))
                     {
                         continue;
                     }

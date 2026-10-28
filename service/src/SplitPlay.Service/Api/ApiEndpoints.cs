@@ -392,7 +392,11 @@ public static partial class ApiEndpoints
 
             var id = item.TryGetProperty("id", out var idProp) ? idProp.ToString() : (item.TryGetProperty("uuid", out var uuid) ? uuid.ToString() : "");
             var name = item.TryGetProperty("name", out var nameProp) ? nameProp.ToString() : "";
-            list.Add(new ClientDto(id, name));
+            DateTimeOffset? pairedAt = (item.TryGetProperty("paired_at", out var paired) || item.TryGetProperty("pairedAt", out paired))
+                                       && paired.ValueKind == JsonValueKind.String && paired.TryGetDateTimeOffset(out var at)
+                ? at
+                : null;
+            list.Add(new ClientDto(id, name, pairedAt));
         }
 
         return list;

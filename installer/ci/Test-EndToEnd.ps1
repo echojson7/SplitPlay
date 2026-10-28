@@ -67,7 +67,9 @@ try {
     if (-not $session.setupRequired) { throw 'a fresh install should report setupRequired' }
 
     Step 'desk lifecycle with the real stub worker (service as LocalSystem)'
-    Invoke-Cli desk create e2e-1 --name "End to end" --fps 120
+    # The stub worker renders and checks synthetic frames on the CPU (WARP); keep it light so that it does not starve
+    # the service on a 4-core runner.
+    Invoke-Cli desk create e2e-1 --name "End to end" --fps 15 --width 640 --height 360
     Invoke-Cli desk start e2e-1 --wait --timeout 90
     $desk = Get-Desk 'e2e-1'
     Write-Host "desk: $($desk | ConvertTo-Json -Compress -Depth 5)"
@@ -104,6 +106,11 @@ try {
     Invoke-Cli desk delete e2e-1
     $ok = $true
 } finally {
+    if (-not $ok) {
+        Write-Host '--- service log (tail) ---'
+        Get-Content (Join-Path $data 'logs\service.log') -Tail 120 -ErrorAction SilentlyContinue
+        Get-Process -Name 'splitplay-*', 'SplitPlay.*' -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, CPU, WorkingSet64 | Out-String | Write-Host
+    }
     Copy-Item -Recurse -Force -Path (Join-Path $data 'logs') -Destination (Join-Path $LogDir 'programdata-logs') -ErrorAction SilentlyContinue
     Step 'uninstall (purge)'
     $uninstaller = Join-Path $app 'unins000.exe'

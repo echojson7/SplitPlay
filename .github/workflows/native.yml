@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: MIT
+# Native components (native/): splitplay_common, splitplay-seat.exe, splitplay-rdsprov.dll,
+# splitplay-stubworker.exe and their tests. MSVC x64 Release on windows-2022; the stub pipeline self-test runs on
+# WARP, so no GPU is needed.
+name: native
+
+on:
+  push:
+    branches: ["stage2/**", "main"]
+    paths:
+      - "native/**"
+      - ".github/workflows/native.yml"
+  pull_request:
+    paths:
+      - "native/**"
+      - ".github/workflows/native.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: MSVC x64 build and tests
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Licence guard (no LizardByte Source-Available files)
+        run: |
+          # The identifier is assembled at runtime so this workflow does not match itself. Markdown under docs/
+          # names it when stating the policy, and workflow files may carry the same guard; both are excluded.
+          $id = 'LicenseRef-' + 'LizardByte-SAL'
+          $hits = @(git grep -l -F -e $id -- . ':(glob,exclude)docs/**/*.md' ':(glob,exclude).github/workflows/**')
+          if ($hits.Count -gt 0) {
+            foreach ($f in $hits) { Write-Host "::error file=$f::contains $id" }
+            exit 1
+          }
+          Write-Host "No file contains $id"
+          exit 0
+
+      - name: Configure
+        working-directory: native
+        run: cmake --preset windows-x64
+
+      - name: Build (Release x64)
+        working-directory: native
+        run: cmake --build --preset windows-x64-release --parallel
+
+      - name: Test
+        working-directory: native
+        run: ctest --preset windows-x64-release
+
+      - name: Stub pipeline latency report (WARP)
+        working-directory: native
+        run: |
+          .\build\windows-x64\bin\Release\splitplay-stubworker.exe --self-test 600 --adapter warp --fps 240
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload test log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-test-log
+          path: native/build/windows-x64/Testing/Temporary/LastTest*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload native-win-x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-win-x64
+          path: |
+            native/build/windows-x64/bin/Release/splitplay-seat.exe
+            native/build/windows-x64/bin/Release/splitplay-seat.pdb
+            native/build/windows-x64/bin/Release/splitplay-stubworker.exe
+            native/build/windows-x64/bin/Release/splitplay-stubworker.pdb
+            native/build/windows-x64/bin/Release/splitplay-rdsprov.dll
+            native/build/windows-x64/bin/Release/splitplay-rdsprov.pdb
+          if-no-files-found: error
+          retention-days: 30

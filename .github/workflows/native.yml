@@ -212,6 +212,8 @@ jobs:
           $ts = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
           Set-ItemProperty $ts -Name fDenyTSConnections -Value 0 -Type DWord
           Set-ItemProperty "$ts\WinStations\RDP-Tcp" -Name UserAuthentication -Value 1 -Type DWord
+          # The server default (ColorDepth=3, fInheritColorDepth=0) forces 16 bpp; take the client's 32 bpp instead.
+          Set-ItemProperty "$ts\WinStations\RDP-Tcp" -Name fInheritColorDepth -Value 1 -Type DWord
           Set-Service TermService -StartupType Automatic
           Start-Service TermService
           $port = (Get-ItemProperty "$ts\WinStations\RDP-Tcp").PortNumber

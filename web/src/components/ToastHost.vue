@@ -8,7 +8,7 @@ import AppIcon from './AppIcon.vue'
   <div class="toasts" aria-live="polite">
     <TransitionGroup name="toast">
       <div v-for="item in toasts" :key="item.id" :class="['toast', item.kind]" :role="item.kind === 'error' ? 'alert' : 'status'">
-        <AppIcon :name="item.kind === 'error' ? 'close' : 'check'" :size="16" />
+        <AppIcon :name="item.kind === 'error' ? 'close' : 'check'" :size="22" />
         <span class="text">{{ item.text }}</span>
         <button type="button" class="btn-ghost x" aria-label="×" @click="dismissToast(item.id)">
           <AppIcon name="close" :size="12" />
@@ -38,25 +38,30 @@ import AppIcon from './AppIcon.vue'
   align-items: center;
   gap: 10px;
   max-width: 420px;
-  padding: 10px 8px 10px 14px;
-  border-radius: 3px;
-  background: linear-gradient(90deg, #2a3f55, #22344a);
-  color: #fff;
+  padding: 10px 8px 10px 12px;
+  border-radius: var(--radius);
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
   font-size: 13px;
-  box-shadow: 0 10px 28px rgb(0 0 0 / 50%);
-  border-left: 3px solid var(--ok);
+  box-shadow: var(--shadow-md);
 }
 
-.toast.ok .icon {
-  color: var(--ok);
+.toast > .icon {
+  width: 22px;
+  height: 22px;
+  padding: 4px;
+  border-radius: 50%;
 }
 
-.toast.error {
-  border-left-color: var(--bad);
+.toast.ok > .icon {
+  background: var(--success-soft);
+  color: var(--success-ink);
 }
 
-.toast.error .icon {
-  color: #ff7a66;
+.toast.error > .icon {
+  background: var(--danger-soft);
+  color: var(--danger-ink);
 }
 
 .text {
@@ -68,18 +73,19 @@ import AppIcon from './AppIcon.vue'
   width: 24px;
   height: 24px;
   padding: 0;
+  border-radius: 50%;
 }
 
 .toast-enter-active,
 .toast-leave-active {
   transition:
-    opacity 0.2s ease,
-    transform 0.2s ease;
+    opacity 0.18s var(--ease),
+    transform 0.18s var(--ease);
 }
 
 .toast-enter-from,
 .toast-leave-to {
   opacity: 0;
-  transform: translateX(16px);
+  transform: translateY(8px);
 }
 </style>

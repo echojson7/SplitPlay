@@ -91,9 +91,8 @@ function onPaired(name: string): void {
 <template>
   <section class="library">
     <header class="shelf">
-      <span class="label">{{ t('library.all') }}</span>
+      <h1>{{ t('library.all') }}</h1>
       <span class="count">{{ s.desks.length }}</span>
-      <span class="rule" />
     </header>
 
     <p v-if="!s.desksLoaded" class="muted">{{ t('common.loading') }}</p>
@@ -108,7 +107,7 @@ function onPaired(name: string): void {
         @pair="pairId = d.id"
       />
       <RouterLink to="/desks/new" class="add" data-add-desk>
-        <span class="add-icon"><AppIcon name="plus" :size="30" /></span>
+        <span class="add-icon"><AppIcon name="plus" :size="24" /></span>
         <span class="add-label">{{ t('library.add') }}</span>
       </RouterLink>
     </div>
@@ -138,75 +137,91 @@ function onPaired(name: string): void {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 18px;
+  margin-bottom: 20px;
+}
+
+.shelf h1 {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
 }
 
 .count {
+  min-width: 26px;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  display: inline-grid;
+  place-items: center;
+  background: var(--fill);
+  color: var(--muted);
   font-size: 12px;
-  font-weight: 700;
-  color: var(--dim);
-}
-
-.rule {
-  flex: 1;
-  height: 1px;
-  background: linear-gradient(90deg, rgb(255 255 255 / 10%), transparent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 22px;
+  gap: 20px;
 }
 
 .add {
-  min-height: 260px;
-  border-radius: 4px;
-  border: 2px dashed rgb(102 192 244 / 22%);
-  background: rgb(33 50 68 / 35%);
+  min-height: 236px;
+  border-radius: var(--radius-lg);
+  border: 2px dashed var(--border-strong);
+  background: transparent;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 14px;
+  gap: 12px;
   color: var(--muted);
   transition:
-    border-color 0.18s ease,
-    background 0.18s ease,
-    color 0.18s ease,
-    box-shadow 0.18s ease;
+    border-color 0.18s var(--ease),
+    background 0.18s var(--ease),
+    color 0.18s var(--ease);
 }
 
 .add:hover {
-  border-color: var(--accent);
-  background: rgb(102 192 244 / 8%);
-  color: #fff;
-  box-shadow: 0 0 22px rgb(102 192 244 / 15%);
+  border-color: var(--primary);
+  background: var(--primary-soft);
+  color: var(--primary-ink);
 }
 
 .add-icon {
-  width: 64px;
-  height: 64px;
+  width: 52px;
+  height: 52px;
   border-radius: 50%;
   display: grid;
   place-items: center;
-  background: rgb(102 192 244 / 12%);
-  color: var(--accent);
+  background: var(--fill);
+  color: var(--text-2);
   transition:
-    background 0.18s ease,
-    transform 0.18s ease;
+    background 0.18s var(--ease),
+    color 0.18s var(--ease),
+    transform 0.18s var(--ease);
 }
 
 .add:hover .add-icon {
-  background: var(--accent);
-  color: #10202e;
+  background: var(--primary);
+  color: #fff;
   transform: scale(1.05);
 }
 
 .add-label {
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+@media (width <= 600px) {
+  .grid {
+    gap: 14px;
+  }
+
+  .add {
+    min-height: 120px;
+  }
 }
 </style>

@@ -29,17 +29,17 @@ function deskName(id: string): string {
     <template v-else>
       <div class="tiles">
         <div class="panel tile">
-          <span class="label">{{ t('metrics.cpu') }}</span>
+          <span class="k">{{ t('metrics.cpu') }}</span>
           <span class="big">{{ host.cpuPercent == null ? t('common.none') : t('unit.percent', { value: host.cpuPercent }) }}</span>
           <div class="meter"><span :style="{ width: `${host.cpuPercent ?? 0}%` }" /></div>
         </div>
         <div class="panel tile">
-          <span class="label">{{ t('metrics.memory') }}</span>
+          <span class="k">{{ t('metrics.memory') }}</span>
           <span class="big">{{ gb(host.memoryUsedMb) }} <small class="muted">/ {{ gb(host.memoryTotalMb) }}</small></span>
           <div class="meter"><span :style="{ width: `${pct(host.memoryUsedMb, host.memoryTotalMb) ?? 0}%` }" /></div>
         </div>
         <div class="panel tile">
-          <span class="label">{{ t('metrics.compose') }}</span>
+          <span class="k">{{ t('metrics.compose') }}</span>
           <span class="big">{{ host.composeHz == null ? t('common.none') : `${host.composeHz} Hz` }}</span>
         </div>
       </div>
@@ -112,10 +112,17 @@ function deskName(id: string): string {
   gap: 8px;
 }
 
+.k {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+}
+
 .big {
   font-size: 28px;
-  font-weight: 700;
-  color: #fff;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
@@ -125,20 +132,22 @@ function deskName(id: string): string {
 }
 
 .meter {
-  height: 4px;
-  border-radius: 2px;
-  background: rgb(0 0 0 / 35%);
+  height: 6px;
+  border-radius: 3px;
+  background: var(--fill);
   overflow: hidden;
 }
 
 .meter span {
   display: block;
   height: 100%;
-  background: linear-gradient(90deg, #06bfff, #2d73ff);
-  transition: width 0.5s ease;
+  border-radius: 3px;
+  background: var(--primary);
+  transition: width 0.5s var(--ease);
 }
 
 .strong {
-  color: #fff;
+  color: var(--text);
+  font-weight: 500;
 }
 </style>

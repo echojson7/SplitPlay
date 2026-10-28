@@ -31,6 +31,11 @@ const ICONS = {
   logout: { stroke: 'M10 4H5v16h5 M14.5 8l4 4-4 4 M18.5 12H9' },
   trash: { stroke: 'M4.5 7h15 M9.5 7V4.5h5V7 M6.5 7l1 13h9l1-13' },
   laptop: { stroke: 'M5 5.5h14v10H5z M2.5 18.5h19' },
+  sun: {
+    stroke:
+      'M16 12a4 4 0 1 1-8 0a4 4 0 1 1 8 0z M12 2.5v2 M12 19.5v2 M2.5 12h2 M19.5 12h2 M5.3 5.3l1.4 1.4 M17.3 17.3l1.4 1.4 M5.3 18.7l1.4-1.4 M17.3 6.7l1.4-1.4',
+  },
+  moon: { stroke: 'M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z' },
 } as const
 
 export type IconName = keyof typeof ICONS

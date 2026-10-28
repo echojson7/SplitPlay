@@ -1,14 +1,21 @@
 <!-- SPDX-License-Identifier: MIT -->
-<!-- SplitPlay logo: one screen split in two panes with a play sign across the split. -->
+<!-- SplitPlay logo: a rounded tile with one screen split in two panes and a play sign across the split. -->
 <script setup lang="ts">
 withDefaults(defineProps<{ size?: number }>(), { size: 28 })
 </script>
 
 <template>
   <svg class="mark" :width="size" :height="size" viewBox="0 0 32 32" aria-hidden="true">
-    <rect x="2" y="5" width="13" height="22" rx="3" fill="#66c0f4" />
-    <rect x="17" y="5" width="13" height="22" rx="3" fill="#1a6fd8" />
-    <path d="M12.5 10.5 L23 16 L12.5 21.5 Z" fill="#fff" />
+    <defs>
+      <linearGradient id="splitplay-mark" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#338ef7" />
+        <stop offset="1" stop-color="#006fee" />
+      </linearGradient>
+    </defs>
+    <rect width="32" height="32" rx="9" fill="url(#splitplay-mark)" />
+    <rect x="6.5" y="9" width="8.5" height="14" rx="2.2" fill="#fff" fill-opacity="0.5" />
+    <rect x="17" y="9" width="8.5" height="14" rx="2.2" fill="#fff" fill-opacity="0.92" />
+    <path d="M13.2 12.4 L20.4 16 L13.2 19.6 Z" fill="#006fee" stroke="#fff" stroke-width="1.2" stroke-linejoin="round" />
   </svg>
 </template>
 
@@ -16,6 +23,7 @@ withDefaults(defineProps<{ size?: number }>(), { size: 28 })
 .mark {
   flex: none;
   display: block;
-  filter: drop-shadow(0 0 6px rgb(102 192 244 / 35%));
+  border-radius: 9px;
+  box-shadow: 0 1px 2px rgb(0 111 238 / 25%);
 }
 </style>

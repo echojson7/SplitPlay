@@ -89,6 +89,10 @@ watch(follow, schedule)
   gap: 10px;
 }
 
+.filters select {
+  width: auto;
+}
+
 .inline-msg {
   margin: 0;
 }
@@ -99,7 +103,6 @@ watch(follow, schedule)
   max-height: calc(100vh - 250px);
   min-height: 200px;
   overflow: auto;
-  background: rgb(10 15 21 / 70%);
   padding: 12px 16px;
 }
 
@@ -109,11 +112,12 @@ watch(follow, schedule)
   gap: 12px;
   white-space: pre-wrap;
   word-break: break-word;
-  padding: 2px 0;
+  padding: 3px 0;
+  color: var(--text-2);
 }
 
 .time {
-  color: var(--dim);
+  color: var(--faint);
 }
 
 .lvl {
@@ -122,16 +126,16 @@ watch(follow, schedule)
 }
 
 .comp {
-  color: var(--accent);
+  color: var(--primary-ink);
 }
 
 .lvl-warn .lvl {
-  color: var(--warn);
+  color: var(--warning-ink);
 }
 
 .lvl-error .lvl,
 .lvl-fatal .lvl {
-  color: #ff7a66;
+  color: var(--danger-ink);
 }
 
 @media (width <= 640px) {

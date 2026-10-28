@@ -57,36 +57,43 @@ defineExpose({ focus: () => input.value?.focus() })
 }
 
 .box {
-  height: 52px;
-  border-radius: 3px;
-  background: var(--input);
-  border: 1px solid var(--line-strong);
+  height: 56px;
+  border-radius: var(--radius);
+  background: var(--fill);
+  border: 2px solid transparent;
   display: grid;
   place-items: center;
-  font-family: var(--mono);
-  font-size: 26px;
-  font-weight: 700;
-  color: #fff;
+  font-variant-numeric: tabular-nums;
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--text);
   transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease;
+    border-color 0.16s var(--ease),
+    box-shadow 0.16s var(--ease),
+    background 0.16s var(--ease);
 }
 
-.box.filled {
-  border-color: #4f7ea3;
+.pin:hover:not(.disabled) .box:not(.current) {
+  background: var(--fill-hover);
 }
 
 .box.current {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgb(102 192 244 / 22%);
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-soft);
+  background: var(--fill);
 }
 
 .invalid .box {
-  border-color: var(--bad);
+  background: var(--danger-soft);
+}
+
+.invalid .box.current {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-soft);
 }
 
 .disabled .box {
-  opacity: 0.45;
+  opacity: 0.5;
 }
 
 input {

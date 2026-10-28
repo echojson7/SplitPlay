@@ -8,6 +8,7 @@ import AppIcon from '../components/AppIcon.vue'
 import { errorText } from '../composables'
 import { fmtDuration, locale, setLocale, t, type Locale } from '../i18n'
 import { store } from '../store'
+import { setTheme, themeMode, type ThemeMode } from '../theme'
 import { toast } from '../toast'
 
 const s = store.state
@@ -21,6 +22,11 @@ const LANGUAGES: ReadonlyArray<{ value: Locale; label: string }> = [
   { value: 'ru', label: 'Русский' },
   { value: 'en', label: 'English' },
 ]
+const THEMES = [
+  { value: 'light', label: 'settings.themeLight', icon: 'sun' },
+  { value: 'dark', label: 'settings.themeDark', icon: 'moon' },
+  { value: 'system', label: 'settings.themeSystem', icon: 'monitor' },
+] as const satisfies ReadonlyArray<{ value: ThemeMode; label: string; icon: string }>
 
 const currentPassword = ref('')
 const newPassword = ref('')
@@ -128,12 +134,31 @@ function importConfig(): Promise<void> {
       </form>
 
       <div class="panel">
-        <h2>{{ t('settings.language') }}</h2>
-        <div class="field">
-          <label for="lang" class="sr-only">{{ t('settings.language') }}</label>
-          <select id="lang" :value="locale" @change="onLanguage">
-            <option v-for="l in LANGUAGES" :key="l.value" :value="l.value">{{ l.label }}</option>
-          </select>
+        <h2>{{ t('settings.appearance') }}</h2>
+        <div class="stack">
+          <div class="field">
+            <span class="field-label">{{ t('settings.theme') }}</span>
+            <div class="segmented theme" role="radiogroup" :aria-label="t('settings.theme')">
+              <button
+                v-for="m in THEMES"
+                :key="m.value"
+                type="button"
+                role="radio"
+                :aria-checked="themeMode === m.value"
+                :class="{ selected: themeMode === m.value }"
+                :data-theme-mode="m.value"
+                @click="setTheme(m.value)"
+              >
+                <AppIcon :name="m.icon" :size="15" />{{ t(m.label) }}
+              </button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="lang">{{ t('settings.language') }}</label>
+            <select id="lang" :value="locale" @change="onLanguage">
+              <option v-for="l in LANGUAGES" :key="l.value" :value="l.value">{{ l.label }}</option>
+            </select>
+          </div>
         </div>
         <p v-if="s.health" class="about muted">
           {{ t('settings.version', { version: s.health.version }) }} ·
@@ -145,7 +170,7 @@ function importConfig(): Promise<void> {
     <details class="more">
       <summary><AppIcon name="gear" :size="16" />{{ t('common.more') }}<span class="spacer" /><AppIcon class="chev" name="chevronDown" :size="16" /></summary>
       <div class="more-body">
-        <h3 class="label sub">{{ t('settings.service') }}</h3>
+        <h3 class="sub">{{ t('settings.service') }}</h3>
         <form v-if="host" class="stack" @submit.prevent="saveHost">
           <div class="fields">
             <div class="field">
@@ -186,7 +211,7 @@ function importConfig(): Promise<void> {
         <p v-else-if="unsupported" class="muted">{{ t('common.notSupported') }}</p>
         <p v-else class="muted">{{ t('common.loading') }}</p>
 
-        <h3 class="label sub">{{ t('settings.backup') }}</h3>
+        <h3 class="sub">{{ t('settings.backup') }}</h3>
         <div class="backup">
           <label class="switch">
             <input v-model="includeSecrets" type="checkbox" />
@@ -254,7 +279,27 @@ function importConfig(): Promise<void> {
 }
 
 .sub {
-  margin: 14px 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 6px 0 14px;
+}
+
+.sub + form,
+.sub + p {
+  margin-bottom: 22px;
+}
+
+.theme {
+  align-self: flex-start;
+}
+
+.theme button {
+  gap: 6px;
+}
+
+.settings-page > h1 {
+  font-size: 22px;
 }
 
 .backup {

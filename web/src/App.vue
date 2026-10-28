@@ -36,30 +36,33 @@ async function logout(): Promise<void> {
 <template>
   <div :class="['shell', { bare }]">
     <header v-if="!bare" class="topbar">
-      <RouterLink to="/" class="brand" :aria-label="t('app.title')">
-        <BrandMark :size="26" />
-        <span class="wordmark">SPLITPLAY</span>
-      </RouterLink>
-      <nav class="tabs" aria-label="main">
-        <RouterLink to="/" :class="{ active: section === 'library' }">{{ t('nav.library') }}</RouterLink>
-        <RouterLink to="/settings" :class="{ active: section === 'settings' }">{{ t('nav.settings') }}</RouterLink>
-      </nav>
-      <span class="spacer" />
-      <RouterLink to="/diagnostics" :class="['diag-link', { active: section === 'diagnostics' }]">{{ t('nav.diagnostics') }}</RouterLink>
-      <button
-        v-if="s.session?.authenticated && !s.session.setupRequired"
-        type="button"
-        class="btn-ghost logout"
-        :title="t('nav.logout')"
-        :aria-label="t('nav.logout')"
-        @click="logout"
-      >
-        <AppIcon name="logout" :size="18" />
-      </button>
+      <div class="topbar-inner">
+        <RouterLink to="/" class="brand" :aria-label="t('app.title')">
+          <BrandMark :size="28" />
+          <span class="wordmark">SplitPlay</span>
+        </RouterLink>
+        <nav class="tabs segmented" aria-label="main">
+          <RouterLink to="/" :class="{ active: section === 'library' }">{{ t('nav.library') }}</RouterLink>
+          <RouterLink to="/settings" :class="{ active: section === 'settings' }">{{ t('nav.settings') }}</RouterLink>
+        </nav>
+        <span class="spacer" />
+        <RouterLink to="/diagnostics" :class="['diag-link', { active: section === 'diagnostics' }]">{{ t('nav.diagnostics') }}</RouterLink>
+        <button
+          v-if="s.session?.authenticated && !s.session.setupRequired"
+          type="button"
+          class="btn-icon btn-ghost logout"
+          :title="t('nav.logout')"
+          :aria-label="t('nav.logout')"
+          @click="logout"
+        >
+          <AppIcon name="logout" :size="18" />
+        </button>
+      </div>
     </header>
 
-    <div v-if="!s.online" class="strip bad" role="alert">{{ t('app.offline') }}</div>
+    <div v-if="!s.online" class="strip bad" role="alert"><span class="strip-dot" />{{ t('app.offline') }}</div>
     <div v-else-if="!bare && s.session?.setupRequired" class="strip warn">
+      <span class="strip-dot" />
       <span>{{ t('app.noPassword') }}</span>
       <RouterLink to="/settings">{{ t('app.setPassword') }}</RouterLink>
     </div>
@@ -76,116 +79,117 @@ async function logout(): Promise<void> {
   position: sticky;
   top: 0;
   z-index: 20;
+  background: color-mix(in srgb, var(--card) 78%, transparent);
+  backdrop-filter: saturate(1.6) blur(14px);
+  border-bottom: 1px solid var(--border);
+}
+
+.topbar-inner {
   display: flex;
   align-items: center;
-  gap: 28px;
-  height: 56px;
-  padding: 0 24px;
-  background: var(--topbar);
-  box-shadow: 0 2px 12px rgb(0 0 0 / 45%);
+  gap: 24px;
+  max-width: 1320px;
+  height: 60px;
+  margin: 0 auto;
+  padding: 0 32px;
 }
 
 .brand {
   display: flex;
   align-items: center;
   gap: 10px;
-  color: #dcdedf;
+  color: var(--text);
 }
 
 .wordmark {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 700;
-  letter-spacing: 0.14em;
+  letter-spacing: -0.01em;
 }
 
 .brand:hover {
-  color: #fff;
+  color: var(--text);
+  opacity: 0.85;
 }
 
-.tabs {
-  display: flex;
-  align-self: stretch;
-  gap: 4px;
-}
-
-.tabs a {
-  display: flex;
-  align-items: center;
-  padding: 0 14px;
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #dcdedf;
-  border-bottom: 3px solid transparent;
-  border-top: 3px solid transparent;
-  transition:
-    color 0.15s ease,
-    border-color 0.15s ease;
-}
-
-.tabs a:hover {
-  color: #fff;
-}
-
-.tabs a.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
+.tabs > a {
+  min-width: 96px;
 }
 
 .diag-link {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--muted);
+  transition:
+    color 0.15s var(--ease),
+    background 0.15s var(--ease);
 }
 
-.diag-link:hover,
+.diag-link:hover {
+  color: var(--text);
+  background: var(--fill);
+}
+
 .diag-link.active {
-  color: var(--accent);
+  color: var(--primary-ink);
+  background: var(--primary-soft);
 }
 
 .logout {
   width: 36px;
   height: 36px;
-  padding: 0;
   margin-right: -8px;
+  color: var(--muted);
 }
 
 .strip {
   display: flex;
   justify-content: center;
   align-items: center;
-  gap: 14px;
-  padding: 7px 16px;
+  gap: 10px;
+  padding: 9px 16px;
   font-size: 13px;
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+
+.strip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentcolor;
+  flex: none;
 }
 
 .strip.bad {
-  background: rgb(226 83 63 / 85%);
-  color: #fff;
+  background: var(--danger-soft);
+  color: var(--danger-ink);
 }
 
 .strip.warn {
-  background: rgb(229 177 67 / 12%);
-  color: #f0c869;
+  background: var(--warning-soft);
+  color: var(--warning-ink);
 }
 
 .strip.warn a {
-  font-weight: 700;
-  color: #fff;
+  font-weight: 600;
+  color: var(--primary);
 }
 
 .page {
   max-width: 1320px;
   margin: 0 auto;
-  padding: 28px 32px 48px;
+  padding: 32px 32px 56px;
 }
 
 @media (width <= 720px) {
-  .topbar {
-    gap: 14px;
+  .topbar-inner {
+    gap: 12px;
     padding: 0 16px;
   }
 
@@ -193,9 +197,13 @@ async function logout(): Promise<void> {
     display: none;
   }
 
-  .tabs a {
+  .tabs > a {
+    min-width: 0;
+    padding: 0 12px;
+  }
+
+  .diag-link {
     padding: 0 8px;
-    font-size: 13px;
   }
 
   .page {

@@ -56,16 +56,16 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
   display: grid;
   place-items: center;
   padding: 16px;
-  background: rgb(8 12 18 / 72%);
-  backdrop-filter: blur(2px);
+  background: rgb(0 0 0 / 28%);
+  backdrop-filter: blur(6px);
   overflow-y: auto;
 }
 
 .modal {
-  background: linear-gradient(180deg, #2a3f55 0%, #1e2d3d 60%, #1b2838 100%);
-  border: 1px solid rgb(102 192 244 / 18%);
-  border-radius: 4px;
-  box-shadow: 0 20px 60px rgb(0 0 0 / 60%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-lg);
   max-height: calc(100vh - 32px);
   display: flex;
   flex-direction: column;
@@ -75,35 +75,35 @@ header {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 16px 16px 0 24px;
+  padding: 18px 16px 0 24px;
 }
 
 header h2 {
   flex: 1;
-  font-size: 20px;
-  font-weight: 700;
-  color: #fff;
+  font-size: 18px;
+  font-weight: 600;
 }
 
 .close {
   width: 32px;
   height: 32px;
   padding: 0;
+  border-radius: 50%;
 }
 
 .body {
-  padding: 18px 24px 24px;
+  padding: 16px 24px 24px;
   overflow-y: auto;
 }
 
 .modal-enter-active,
 .modal-leave-active {
-  transition: opacity 0.18s ease;
+  transition: opacity 0.18s var(--ease);
 }
 
 .modal-enter-active .modal,
 .modal-leave-active .modal {
-  transition: transform 0.18s ease;
+  transition: transform 0.18s var(--ease);
 }
 
 .modal-enter-from,
@@ -111,7 +111,8 @@ header h2 {
   opacity: 0;
 }
 
-.modal-enter-from .modal {
+.modal-enter-from .modal,
+.modal-leave-to .modal {
   transform: translateY(8px) scale(0.98);
 }
 </style>

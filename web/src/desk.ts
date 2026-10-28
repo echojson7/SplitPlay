@@ -92,15 +92,15 @@ export function stateTone(state: DeskState): StateTone {
   }
 }
 
-/** Cover art colours: a stable pick per desk id. */
+/** Cover colours (soft gradient start, end, and the glyph colour): a stable pick per desk id. */
 const COVERS: ReadonlyArray<readonly [string, string, string]> = [
-  ['#1f4e79', '#2a8bc9', '#7fd3ff'],
-  ['#3b2a6b', '#6a4bc4', '#c3a6ff'],
-  ['#0f4d4a', '#1c8f7f', '#7ef0d5'],
-  ['#5a2a3c', '#b04a62', '#ffb3c4'],
-  ['#4a3a14', '#b5832a', '#ffd88a'],
-  ['#1b3a5c', '#3f6fb5', '#a9c8ff'],
-  ['#2b2f67', '#4a5fc1', '#9fb4ff'],
+  ['#dbeafe', '#e0e7ff', '#006fee'],
+  ['#ede9fe', '#fae8ff', '#7828c8'],
+  ['#d1fae5', '#ccfbf1', '#12a150'],
+  ['#ffe4e6', '#fce7f3', '#c20e4d'],
+  ['#fef3c7', '#ffedd5', '#c4841d'],
+  ['#e0f2fe', '#cffafe', '#0e7490'],
+  ['#e0e7ff', '#f3e8ff', '#4f46e5'],
 ]
 
 export function coverColors(id: string): readonly [string, string, string] {
@@ -114,8 +114,8 @@ export function coverColors(id: string): readonly [string, string, string] {
 }
 
 export function coverStyle(id: string): Record<string, string> {
-  const [dark, mid, light] = coverColors(id)
-  return { '--cover-dark': dark, '--cover-mid': mid, '--cover-light': light }
+  const [a, b, ink] = coverColors(id)
+  return { '--cover-a': a, '--cover-b': b, '--cover-ink': ink }
 }
 
 /** Builds the config for a new desk from the wizard's three answers. */

@@ -19,7 +19,7 @@ const emit = defineEmits<{ confirm: []; close: [] }>()
         <button type="button" class="btn-ghost" @click="emit('close')">{{ t('common.cancel') }}</button>
         <button
           type="button"
-          :class="[danger ? 'btn-stop' : 'btn-primary', 'primary-action']"
+          :class="[danger ? 'btn-danger-solid' : 'btn-primary', 'primary-action']"
           :disabled="busy"
           data-confirm
           @click="emit('confirm')"
@@ -45,9 +45,6 @@ const emit = defineEmits<{ confirm: []; close: [] }>()
 }
 
 .actions button {
-  height: 38px;
-  font-size: 14px;
-  text-transform: none;
-  letter-spacing: 0;
+  min-width: 110px;
 }
 </style>

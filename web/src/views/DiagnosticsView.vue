@@ -11,7 +11,7 @@ defineProps<{ tab: 'metrics' | 'logs' }>()
 
 <template>
   <section class="diag-page">
-    <nav class="tabs" :aria-label="t('nav.diagnostics')">
+    <nav class="tabs segmented" :aria-label="t('nav.diagnostics')">
       <RouterLink to="/diagnostics/metrics" :class="{ active: tab === 'metrics' }">{{ t('diag.metrics') }}</RouterLink>
       <RouterLink to="/diagnostics/logs" :class="{ active: tab === 'logs' }">{{ t('diag.logs') }}</RouterLink>
     </nav>
@@ -28,31 +28,10 @@ defineProps<{ tab: 'metrics' | 'logs' }>()
 }
 
 .tabs {
-  display: flex;
-  gap: 4px;
-  border-bottom: 1px solid rgb(255 255 255 / 8%);
+  align-self: flex-start;
 }
 
-.tabs a {
-  padding: 10px 16px;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  transition:
-    color 0.15s ease,
-    border-color 0.15s ease;
-}
-
-.tabs a:hover {
-  color: #fff;
-}
-
-.tabs a.active {
-  color: var(--accent);
-  border-color: var(--accent);
+.tabs > a {
+  min-width: 96px;
 }
 </style>

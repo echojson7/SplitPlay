@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: MIT -->
-<!-- Library card of one desk: cover, status, picture settings and the Play / Stop button. -->
+<!-- Library card of one desk: soft cover with the desk icon, state chip, picture settings and Start / Stop. -->
 <script setup lang="ts">
 import { computed } from 'vue'
 import { RouterLink } from 'vue-router'
@@ -9,6 +9,7 @@ import { coverStyle, deskProgress, stateTone } from '../desk'
 import { t } from '../i18n'
 import AppIcon from './AppIcon.vue'
 import CoverArt from './CoverArt.vue'
+import DeskGlyph from './DeskGlyph.vue'
 import StateBadge from './StateBadge.vue'
 
 const props = withDefaults(defineProps<{ desk: Desk; busy?: boolean }>(), { busy: false })
@@ -24,24 +25,34 @@ const link = computed(() => `/desks/${encodeURIComponent(props.desk.id)}`)
   <article :class="['card', tone]" :style="coverStyle(desk.id)" :data-desk="desk.id">
     <RouterLink :to="link" class="cover" :aria-label="desk.name">
       <CoverArt />
-      <span class="cover-name">{{ desk.name }}</span>
     </RouterLink>
+    <div class="glyph-wrap"><DeskGlyph :size="48" /></div>
 
     <div class="info">
-      <div class="line">
+      <div class="title-row">
+        <RouterLink :to="link" class="name">{{ desk.name }}</RouterLink>
         <StateBadge :state="desk.state" />
-        <span class="spec">{{ desk.profile.width }}×{{ desk.profile.height }} · {{ desk.profile.fps }} FPS</span>
       </div>
-      <div class="line sub">
-        <span class="who" :title="t('desk.user')"><AppIcon name="user" :size="14" />{{ desk.user }}</span>
-        <span v-if="desk.metrics.clients > 0" class="who" :title="t('desk.devices')">
-          <AppIcon name="laptop" :size="14" />{{ desk.metrics.clients }}
-        </span>
+      <div class="meta">
+        <span class="who" :title="t('desk.user')"><AppIcon name="user" :size="14" /><span class="ell">{{ desk.user }}</span></span>
+        <span class="dotsep" />
+        <span class="spec">{{ desk.profile.width }}×{{ desk.profile.height }} · {{ desk.profile.fps }} FPS</span>
+        <template v-if="desk.metrics.clients > 0">
+          <span class="dotsep" />
+          <span class="who" :title="t('desk.devices')"><AppIcon name="laptop" :size="14" />{{ desk.metrics.clients }}</span>
+        </template>
       </div>
       <p v-if="desk.state === 'Faulted' && desk.lastError" class="fault" :title="desk.lastError">{{ desk.lastError }}</p>
 
       <div class="actions">
-        <div v-if="progress" class="progress" role="progressbar" :aria-valuenow="Math.round(progress.value * 100)" aria-valuemin="0" aria-valuemax="100">
+        <div
+          v-if="progress"
+          class="progress"
+          role="progressbar"
+          :aria-valuenow="Math.round(progress.value * 100)"
+          aria-valuemin="0"
+          aria-valuemax="100"
+        >
           <div class="progress-top">
             <span>{{ t(`state.${progress.state}`) }}</span>
             <span class="pct">{{ Math.round(progress.value * 100) }}%</span>
@@ -51,15 +62,15 @@ const link = computed(() => `/desks/${encodeURIComponent(props.desk.id)}`)
         <button
           v-else-if="canStart(desk)"
           type="button"
-          class="btn-play main"
+          class="btn-success main"
           data-action="start"
           :disabled="busy"
           @click="emit('start')"
         >
-          <AppIcon name="play" :size="16" />{{ t('desk.start') }}
+          <AppIcon name="play" :size="15" />{{ t('desk.start') }}
         </button>
-        <button v-else type="button" class="btn-stop main" data-action="stop" :disabled="busy" @click="emit('stop')">
-          <AppIcon name="stop" :size="14" />{{ t('desk.stop') }}
+        <button v-else type="button" class="btn-danger main" data-action="stop" :disabled="busy" @click="emit('stop')">
+          <AppIcon name="stop" :size="13" />{{ t('desk.stop') }}
         </button>
 
         <button
@@ -96,86 +107,53 @@ const link = computed(() => `/desks/${encodeURIComponent(props.desk.id)}`)
 
 <style scoped>
 .card {
+  position: relative;
   display: flex;
   flex-direction: column;
-  border-radius: 4px;
+  border-radius: var(--radius-lg);
   overflow: hidden;
-  background: linear-gradient(180deg, #24384d 0%, #1d2d3e 100%);
-  box-shadow: 0 4px 14px rgb(0 0 0 / 30%);
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-sm);
   transition:
-    transform 0.18s ease,
-    box-shadow 0.18s ease;
+    transform 0.18s var(--ease),
+    box-shadow 0.18s var(--ease),
+    border-color 0.18s var(--ease);
   min-width: 0;
 }
 
 .card:hover {
-  transform: translateY(-3px);
-  box-shadow:
-    0 0 0 1px rgb(102 192 244 / 35%),
-    0 12px 30px rgb(0 0 0 / 45%);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+  border-color: var(--border-strong);
 }
 
 .cover {
   position: relative;
   display: block;
-  height: 148px;
+  height: 88px;
   overflow: hidden;
-  color: #fff;
-  transition: filter 0.25s ease;
 }
 
 .idle .cover {
-  filter: saturate(0.45) brightness(0.82);
+  filter: saturate(0.5);
 }
 
-.card:hover .cover {
-  filter: none;
-}
-
-.ok .cover::after {
-  content: '';
+.glyph-wrap {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 3px;
-  background: var(--ok);
-  box-shadow: 0 0 12px var(--ok);
-}
-
-.bad .cover::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 3px;
-  background: var(--bad);
-}
-
-.cover-name {
-  position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: 12px;
-  font-size: 22px;
-  font-weight: 700;
-  line-height: 1.15;
-  text-shadow: 0 2px 8px rgb(0 0 0 / 55%);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  top: 60px;
+  left: 18px;
 }
 
 .info {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  padding: 14px 16px 16px;
+  gap: 6px;
+  padding: 28px 18px 18px;
   flex: 1;
 }
 
-.line {
+.title-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -183,34 +161,63 @@ const link = computed(() => `/desks/${encodeURIComponent(props.desk.id)}`)
   min-width: 0;
 }
 
-.spec {
-  font-size: 13px;
+.name {
+  font-size: 17px;
+  font-weight: 600;
   color: var(--text);
-  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.sub {
-  justify-content: flex-start;
-  gap: 16px;
+.name:hover {
+  color: var(--primary);
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   color: var(--muted);
   font-size: 13px;
+  min-width: 0;
+}
+
+.dotsep {
+  flex: none;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: var(--faint);
 }
 
 .who {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.ell {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.spec {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .fault {
   margin: 0;
   font-size: 12px;
-  color: #ff8a7a;
+  color: var(--danger-ink);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -221,7 +228,7 @@ const link = computed(() => `/desks/${encodeURIComponent(props.desk.id)}`)
   align-items: center;
   gap: 8px;
   margin-top: auto;
-  padding-top: 6px;
+  padding-top: 12px;
 }
 
 .main {
@@ -243,10 +250,8 @@ const link = computed(() => `/desks/${encodeURIComponent(props.desk.id)}`)
   display: flex;
   justify-content: space-between;
   font-size: 12px;
-  font-weight: 700;
-  color: var(--accent);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-weight: 500;
+  color: var(--primary-ink);
 }
 
 .pct {
@@ -257,23 +262,35 @@ const link = computed(() => `/desks/${encodeURIComponent(props.desk.id)}`)
 .bar {
   height: 6px;
   border-radius: 3px;
-  background: rgb(0 0 0 / 35%);
+  background: var(--fill);
   overflow: hidden;
 }
 
 .bar span {
+  position: relative;
   display: block;
   height: 100%;
   border-radius: 3px;
-  background: repeating-linear-gradient(-45deg, #1a9fff 0 8px, #47bfff 8px 16px);
-  background-size: 22.6px 22.6px;
-  animation: stripes 0.8s linear infinite;
-  transition: width 0.5s ease;
+  background: var(--primary);
+  overflow: hidden;
+  transition: width 0.5s var(--ease);
 }
 
-@keyframes stripes {
+.bar span::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 45%), transparent);
+  animation: shimmer 1.4s linear infinite;
+}
+
+@keyframes shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+
   to {
-    background-position: 22.6px 0;
+    transform: translateX(100%);
   }
 }
 </style>

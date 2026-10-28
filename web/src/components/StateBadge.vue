@@ -21,50 +21,69 @@ const tone = computed(() => stateTone(props.state))
 .state {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
-  font-weight: 700;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
   white-space: nowrap;
+  transition:
+    background 0.18s ease,
+    color 0.18s ease;
 }
 
 .dot {
-  width: 9px;
-  height: 9px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: currentcolor;
   flex: none;
 }
 
 .ok {
-  color: var(--ok);
+  background: var(--success-soft);
+  color: var(--success-ink);
 }
 
 .ok .dot {
-  box-shadow: 0 0 8px rgb(139 197 63 / 80%);
+  background: var(--success);
 }
 
 .busy {
-  color: var(--busy);
+  background: var(--primary-soft);
+  color: var(--primary-ink);
 }
 
 .busy .dot {
+  background: var(--primary);
   animation: pulse 1.2s ease-in-out infinite;
 }
 
 .warn {
-  color: var(--warn);
+  background: var(--warning-soft);
+  color: var(--warning-ink);
+}
+
+.warn .dot {
+  background: var(--warning);
 }
 
 .bad {
-  color: #ff7a66;
+  background: var(--danger-soft);
+  color: var(--danger-ink);
 }
 
 .bad .dot {
-  box-shadow: 0 0 8px rgb(226 83 63 / 70%);
+  background: var(--danger);
 }
 
 .idle {
-  color: var(--muted);
+  background: var(--idle-soft);
+  color: var(--idle-ink);
+}
+
+.idle .dot {
+  background: var(--faint);
 }
 
 @keyframes pulse {

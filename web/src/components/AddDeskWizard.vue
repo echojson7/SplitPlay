@@ -132,7 +132,7 @@ function initial(name: string): string {
   <ModalDialog :open="open" :title="t('wizard.title')" :width="620" @close="emit('close')">
     <ol class="steps">
       <li v-for="(key, i) in STEPS" :key="key" :class="{ active: i === step, done: i < step }">
-        <span class="num"><AppIcon v-if="i < step" name="check" :size="14" /><template v-else>{{ i + 1 }}</template></span>
+        <span class="num"><AppIcon v-if="i < step" name="check" :size="13" /><template v-else>{{ i + 1 }}</template></span>
         <span class="step-label">{{ t(key) }}</span>
       </li>
     </ol>
@@ -220,7 +220,7 @@ function initial(name: string): string {
       <!-- 3. Resolution and FPS -->
       <section v-else class="pane" data-step="display">
         <h3>{{ t('wizard.displayTitle') }}</h3>
-        <div class="field-label label">{{ t('wizard.resolution') }}</div>
+        <div class="sub-label">{{ t('wizard.resolution') }}</div>
         <div class="res-grid" role="radiogroup" :aria-label="t('wizard.resolution')">
           <button
             v-for="p in RESOLUTION_PRESETS"
@@ -253,7 +253,7 @@ function initial(name: string): string {
           <input v-model.number="customH" name="height" type="number" min="240" max="4320" :aria-label="t('desk.height')" />
         </div>
 
-        <div class="field-label label fps-label">{{ t('wizard.fps') }}</div>
+        <div class="sub-label fps-label">{{ t('wizard.fps') }}</div>
         <div class="segmented" role="radiogroup" :aria-label="t('wizard.fps')">
           <button
             v-for="f in FPS_PRESETS"
@@ -279,7 +279,7 @@ function initial(name: string): string {
         </button>
         <span class="spacer" />
         <button v-if="step < 2" type="submit" class="btn-primary next" data-next>{{ t('common.next') }}</button>
-        <button v-else type="submit" class="btn-play create" data-create :disabled="busy">
+        <button v-else type="submit" class="btn-success create" data-create :disabled="busy">
           <AppIcon name="play" :size="16" />{{ t('wizard.create') }}
         </button>
       </footer>
@@ -293,36 +293,46 @@ function initial(name: string): string {
   margin: 0 0 22px;
   padding: 0;
   display: flex;
+  align-items: center;
   gap: 8px;
-  counter-reset: none;
 }
 
 .steps li {
-  flex: 1;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding-bottom: 10px;
-  border-bottom: 2px solid rgb(255 255 255 / 8%);
-  color: var(--dim);
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px 0 4px;
+  border-radius: 999px;
+  color: var(--muted);
   font-size: 13px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  font-weight: 500;
   min-width: 0;
   transition:
-    color 0.2s ease,
-    border-color 0.2s ease;
+    color 0.18s var(--ease),
+    background 0.18s var(--ease);
+}
+
+.steps li + li::before {
+  content: '';
+  width: 20px;
+  height: 1px;
+  margin-left: -12px;
+  background: var(--border-strong);
+  flex: none;
+}
+
+.steps li + li {
+  margin-left: 4px;
 }
 
 .steps li.active {
-  color: #fff;
-  border-color: var(--accent);
+  background: var(--primary-soft);
+  color: var(--primary-ink);
 }
 
 .steps li.done {
-  color: var(--accent);
-  border-color: rgb(102 192 244 / 45%);
+  color: var(--text-2);
 }
 
 .num {
@@ -332,17 +342,21 @@ function initial(name: string): string {
   display: grid;
   place-items: center;
   flex: none;
-  background: rgb(255 255 255 / 8%);
+  background: var(--fill);
+  color: var(--muted);
   font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 .active .num {
-  background: var(--accent);
-  color: #0e1a26;
+  background: var(--primary);
+  color: #fff;
 }
 
 .done .num {
-  background: rgb(102 192 244 / 20%);
+  background: var(--success-soft);
+  color: var(--success-ink);
 }
 
 .step-label {
@@ -365,9 +379,15 @@ function initial(name: string): string {
 }
 
 .pane h3 {
-  font-size: 18px;
-  font-weight: 400;
-  color: #fff;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sub-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
 }
 
 .users {
@@ -382,47 +402,57 @@ function initial(name: string): string {
   align-items: center;
   gap: 12px;
   height: auto;
-  min-height: 58px;
+  min-height: 60px;
   padding: 10px 12px;
   text-align: left;
-  background: rgb(0 0 0 / 20%);
-  border: 1px solid rgb(255 255 255 / 6%);
-  border-radius: 3px;
+  background: var(--card);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
   white-space: normal;
   justify-content: flex-start;
+  color: var(--text);
+  transition:
+    border-color 0.15s var(--ease),
+    background 0.15s var(--ease);
+}
+
+.account {
+  background: var(--fill);
+  border-color: transparent;
 }
 
 .user:hover:not(:disabled) {
-  background: rgb(102 192 244 / 10%);
-  border-color: rgb(102 192 244 / 35%);
+  background: var(--card);
+  border-color: var(--border-strong);
+  transform: none;
 }
 
-.user.selected {
-  background: rgb(102 192 244 / 16%);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset;
+.user.selected,
+.user.selected:hover:not(:disabled) {
+  background: var(--primary-soft);
+  border-color: var(--primary);
 }
 
 .user:disabled {
-  opacity: 0.4;
+  opacity: 0.5;
 }
 
 .avatar {
   width: 36px;
   height: 36px;
   flex: none;
-  border-radius: 3px;
+  border-radius: 50%;
   display: grid;
   place-items: center;
-  background: linear-gradient(135deg, #2a8bc9, #1f4e79);
+  background: linear-gradient(135deg, #338ef7, #7828c8);
   color: #fff;
-  font-weight: 700;
-  font-size: 16px;
+  font-weight: 600;
+  font-size: 15px;
 }
 
 .avatar.plus {
-  background: rgb(255 255 255 / 8%);
-  color: var(--accent);
+  background: var(--fill);
+  color: var(--primary);
 }
 
 .who {
@@ -433,8 +463,8 @@ function initial(name: string): string {
 }
 
 .name {
-  color: #fff;
-  font-weight: 700;
+  color: var(--text);
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -450,15 +480,13 @@ function initial(name: string): string {
 
 .tag {
   align-self: flex-start;
-  margin-top: 2px;
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  padding: 1px 6px;
-  border-radius: 2px;
-  background: rgb(229 177 67 / 18%);
-  color: var(--warn);
+  margin-top: 3px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--warning-soft);
+  color: var(--warning-ink);
 }
 
 .res-grid {
@@ -472,38 +500,42 @@ function initial(name: string): string {
   flex-direction: column;
   gap: 2px;
   padding: 0 6px;
-  background: rgb(0 0 0 / 20%);
-  border: 1px solid rgb(255 255 255 / 6%);
-  border-radius: 3px;
+  background: var(--card);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  transition:
+    border-color 0.15s var(--ease),
+    background 0.15s var(--ease);
 }
 
 .tile:hover:not(:disabled) {
-  background: rgb(102 192 244 / 10%);
-  border-color: rgb(102 192 244 / 35%);
+  background: var(--card);
+  border-color: var(--border-strong);
+  transform: none;
 }
 
-.tile.selected {
-  background: rgb(102 192 244 / 16%);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent) inset;
+.tile.selected,
+.tile.selected:hover:not(:disabled) {
+  background: var(--primary-soft);
+  border-color: var(--primary);
 }
 
 .tile-main {
-  color: #fff;
-  font-weight: 700;
+  color: var(--text);
+  font-weight: 600;
   font-size: 14px;
   font-variant-numeric: tabular-nums;
 }
 
 .tile-tag {
-  font-size: 11px;
+  font-size: 12px;
   color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
 }
 
+.selected .tile-main,
 .selected .tile-tag {
-  color: var(--accent);
+  color: var(--primary-ink);
 }
 
 .custom {
@@ -521,30 +553,12 @@ function initial(name: string): string {
 }
 
 .segmented {
-  display: inline-flex;
-  background: rgb(0 0 0 / 25%);
-  border-radius: 3px;
-  padding: 3px;
-  gap: 3px;
   align-self: flex-start;
 }
 
 .segmented button {
-  height: 34px;
   min-width: 64px;
-  background: transparent;
-  color: var(--muted);
-  font-weight: 700;
   font-variant-numeric: tabular-nums;
-}
-
-.segmented button:hover:not(:disabled) {
-  background: rgb(255 255 255 / 6%);
-}
-
-.segmented button.selected {
-  background: linear-gradient(90deg, #06bfff 0%, #2d73ff 100%);
-  color: #fff;
 }
 
 .inline-msg {
@@ -556,16 +570,15 @@ footer {
   align-items: center;
   gap: 10px;
   padding-top: 16px;
-  border-top: 1px solid rgb(255 255 255 / 6%);
+  border-top: 1px solid var(--border);
 }
 
 .next {
   min-width: 130px;
-  height: 40px;
 }
 
 .create {
-  min-width: 220px;
+  min-width: 200px;
 }
 
 @media (width <= 560px) {
@@ -573,8 +586,12 @@ footer {
     grid-template-columns: repeat(3, 1fr);
   }
 
-  .steps .step-label {
+  .steps li:not(.active) .step-label {
     display: none;
+  }
+
+  .steps li:not(.active) {
+    padding-right: 4px;
   }
 
   .create {

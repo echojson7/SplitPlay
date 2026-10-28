@@ -55,7 +55,7 @@ async function submit(): Promise<void> {
     <form class="pair" novalidate @submit.prevent="submit">
       <div v-if="address" class="addr">
         <span class="label">{{ t('desk.address') }}</span>
-        <span class="mono">{{ address }}</span>
+        <span class="value">{{ address }}</span>
       </div>
       <div class="field center">
         <span class="field-label">{{ t('desk.pairPin') }}</span>
@@ -87,19 +87,26 @@ async function submit(): Promise<void> {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 10px 14px;
-  background: rgb(0 0 0 / 22%);
-  border-radius: 3px;
+  padding: 12px 14px;
+  background: var(--fill);
+  border-radius: var(--radius);
 }
 
-.addr .mono {
-  color: var(--accent);
+.addr .label {
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.addr .value {
+  font-variant-numeric: tabular-nums;
+  color: var(--primary-ink);
   font-size: 15px;
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .center {
   align-items: center;
+  padding: 4px 0;
 }
 
 .inline-msg {
@@ -109,11 +116,10 @@ async function submit(): Promise<void> {
 .actions {
   display: flex;
   justify-content: flex-end;
-  gap: 10px;
+  gap: 8px;
 }
 
 .actions .btn-primary {
-  min-width: 140px;
-  height: 38px;
+  min-width: 130px;
 }
 </style>

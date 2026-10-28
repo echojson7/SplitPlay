@@ -63,7 +63,7 @@ function skip(): void {
   <section class="login">
     <div class="brand">
       <BrandMark :size="44" />
-      <span class="wordmark">SPLITPLAY</span>
+      <span class="wordmark">SplitPlay</span>
     </div>
     <form class="box" novalidate @submit.prevent="submit">
       <h1 class="title">{{ setup ? t('setup.title') : t('login.title') }}</h1>
@@ -96,21 +96,21 @@ function skip(): void {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 28px;
+  gap: 24px;
   padding: 24px 16px;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 14px;
-  color: #fff;
+  gap: 12px;
+  color: var(--text);
 }
 
 .wordmark {
-  font-size: 30px;
+  font-size: 24px;
   font-weight: 700;
-  letter-spacing: 0.12em;
+  letter-spacing: -0.01em;
 }
 
 .box {
@@ -119,17 +119,16 @@ function skip(): void {
   flex-direction: column;
   gap: 16px;
   padding: 32px;
-  border-radius: 4px;
-  background: linear-gradient(180deg, rgb(42 71 94 / 70%) 0%, rgb(23 26 33 / 85%) 100%);
-  box-shadow: 0 20px 50px rgb(0 0 0 / 45%);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-md);
 }
 
 .title {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--accent);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text);
 }
 
 .err {

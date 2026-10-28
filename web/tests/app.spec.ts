@@ -8,8 +8,9 @@ import { store } from '../src/store'
 import { MockBackend, mockFetch } from '../mock/backend'
 
 async function settle(): Promise<void> {
-  // Lazy route components load through dynamic imports; give them a few macrotasks.
-  for (let i = 0; i < 10; i++) {
+  // Lazy route components load through dynamic imports; give them a few macrotasks
+  // (a cold transform of a view on a busy machine can take more than 100 ms).
+  for (let i = 0; i < 30; i++) {
     await flushPromises()
     await new Promise((r) => setTimeout(r, 10))
   }

@@ -8,6 +8,7 @@ import type { DeskConfig, PairedClient } from '../api/types'
 import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import CoverArt from '../components/CoverArt.vue'
+import DeskGlyph from '../components/DeskGlyph.vue'
 import DeskSettings from '../components/DeskSettings.vue'
 import PinField from '../components/PinField.vue'
 import StateBadge from '../components/StateBadge.vue'
@@ -201,65 +202,67 @@ async function remove(): Promise<void> {
     <p v-if="notFound" class="inline-msg">{{ t('desk.notFound') }}</p>
     <p v-else-if="!desk" class="muted">{{ t('common.loading') }}</p>
     <template v-else>
-      <header class="hero">
-        <CoverArt fit="meet" />
-        <div class="hero-text">
-          <h1>{{ desk.name }}</h1>
-          <span class="hero-user"><AppIcon name="user" :size="15" />{{ desk.user }}</span>
+      <header class="head">
+        <div class="cover"><CoverArt /></div>
+        <div class="glyph-wrap"><DeskGlyph :size="72" /></div>
+        <div class="head-body">
+          <div class="title-block">
+            <h1>{{ desk.name }}</h1>
+            <div class="props">
+              <StateBadge :state="desk.state" />
+              <span class="prop" :title="t('desk.user')"><AppIcon name="user" :size="14" />{{ desk.user }}</span>
+              <span class="prop" :title="t('desk.resolution')"><AppIcon name="monitor" :size="14" />{{ desk.profile.width }}×{{ desk.profile.height }}</span>
+              <span class="prop" :title="t('desk.fps')">{{ desk.profile.fps }} FPS</span>
+              <span class="prop" :title="t('desk.devices')"><AppIcon name="laptop" :size="14" />{{ clients.length }}</span>
+            </div>
+          </div>
+
+          <div class="head-actions">
+            <div
+              v-if="progress"
+              class="progress"
+              role="progressbar"
+              :aria-valuenow="Math.round(progress.value * 100)"
+              aria-valuemin="0"
+              aria-valuemax="100"
+            >
+              <div class="progress-top">
+                <span>{{ t(`state.${progress.state}`) }}</span>
+                <span class="pct">{{ Math.round(progress.value * 100) }}%</span>
+              </div>
+              <div class="bar"><span :style="{ width: `${progress.value * 100}%` }" /></div>
+            </div>
+            <button v-else-if="canStart(desk)" type="button" class="btn-success btn-lg big" data-action="start" :disabled="busy" @click="lifecycle('start')">
+              <AppIcon name="play" :size="18" />{{ t('desk.start') }}
+            </button>
+            <button v-else type="button" class="btn-danger btn-lg big" data-action="stop" :disabled="busy" @click="lifecycle('stop')">
+              <AppIcon name="stop" :size="14" />{{ t('desk.stop') }}
+            </button>
+            <button
+              v-if="progress && desk.state !== 'Stopping'"
+              type="button"
+              class="btn-icon btn-lg-icon"
+              :title="t('desk.stop')"
+              :aria-label="t('desk.stop')"
+              :disabled="busy"
+              @click="lifecycle('stop')"
+            >
+              <AppIcon name="close" :size="18" />
+            </button>
+            <button
+              v-else-if="running"
+              type="button"
+              class="btn-icon btn-lg-icon"
+              :title="t('desk.restart')"
+              :aria-label="t('desk.restart')"
+              :disabled="busy"
+              @click="lifecycle('restart')"
+            >
+              <AppIcon name="restart" :size="18" />
+            </button>
+          </div>
         </div>
       </header>
-
-      <div class="playbar">
-        <div v-if="progress" class="progress" role="progressbar" :aria-valuenow="Math.round(progress.value * 100)" aria-valuemin="0" aria-valuemax="100">
-          <div class="bar"><span :style="{ width: `${progress.value * 100}%` }" /></div>
-        </div>
-        <button v-else-if="canStart(desk)" type="button" class="btn-play big" data-action="start" :disabled="busy" @click="lifecycle('start')">
-          <AppIcon name="play" :size="18" />{{ t('desk.start') }}
-        </button>
-        <button v-else type="button" class="btn-stop big" data-action="stop" :disabled="busy" @click="lifecycle('stop')">
-          <AppIcon name="stop" :size="15" />{{ t('desk.stop') }}
-        </button>
-
-        <div class="stat">
-          <span class="label">{{ t('desk.status') }}</span>
-          <StateBadge :state="desk.state" />
-        </div>
-        <div class="stat">
-          <span class="label">{{ t('desk.resolution') }}</span>
-          <span class="val">{{ desk.profile.width }}×{{ desk.profile.height }}</span>
-        </div>
-        <div class="stat">
-          <span class="label">{{ t('desk.fps') }}</span>
-          <span class="val">{{ desk.profile.fps }}</span>
-        </div>
-        <div class="stat">
-          <span class="label">{{ t('desk.devices') }}</span>
-          <span class="val">{{ clients.length }}</span>
-        </div>
-        <span class="spacer" />
-        <button
-          v-if="progress && desk.state !== 'Stopping'"
-          type="button"
-          class="btn-icon"
-          :title="t('desk.stop')"
-          :aria-label="t('desk.stop')"
-          :disabled="busy"
-          @click="lifecycle('stop')"
-        >
-          <AppIcon name="close" :size="18" />
-        </button>
-        <button
-          v-else-if="running"
-          type="button"
-          class="btn-icon"
-          :title="t('desk.restart')"
-          :aria-label="t('desk.restart')"
-          :disabled="busy"
-          @click="lifecycle('restart')"
-        >
-          <AppIcon name="restart" :size="18" />
-        </button>
-      </div>
 
       <div v-if="desk.state === 'Faulted' && desk.lastError" class="inline-msg" role="alert">{{ desk.lastError }}</div>
       <div v-if="desk.resolutionPendingRestart" class="inline-msg warn">
@@ -276,7 +279,7 @@ async function remove(): Promise<void> {
           <section class="panel connection">
             <h2>{{ t('desk.connection') }}</h2>
             <div class="address">
-              <span class="label">{{ t('desk.address') }}</span>
+              <span class="k">{{ t('desk.address') }}</span>
               <template v-if="addresses.length">
                 <div v-for="(a, i) in addresses" :key="a" :class="['addr-row', { primary: i === 0 }]">
                   <code class="addr" data-address>{{ a }}</code>
@@ -317,7 +320,7 @@ async function remove(): Promise<void> {
             <p v-if="clients.length === 0" class="muted empty">{{ t('desk.noDevices') }}</p>
             <ul v-else class="devices">
               <li v-for="c in clients" :key="c.id">
-                <span class="device-icon"><AppIcon name="laptop" :size="20" /></span>
+                <span class="device-icon"><AppIcon name="laptop" :size="18" /></span>
                 <span class="device">
                   <span class="device-name">{{ c.name }}</span>
                   <span v-if="c.pairedAt" class="device-date">{{ t('desk.pairedAt', { date: fmtDateTime(c.pairedAt) }) }}</span>
@@ -410,112 +413,156 @@ async function remove(): Promise<void> {
   gap: 16px;
 }
 
-.hero {
+.head {
   position: relative;
-  height: 160px;
-  border-radius: 4px 4px 0 0;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-sm);
   overflow: hidden;
-  margin-bottom: -16px;
 }
 
-.hero-text {
+.cover {
+  position: relative;
+  height: 112px;
+}
+
+.glyph-wrap {
   position: absolute;
+  top: 72px;
   left: 28px;
-  right: 28px;
-  bottom: 22px;
+}
+
+.head-body {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 16px 24px;
+  padding: 44px 28px 24px;
+}
+
+.title-block {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 10px;
 }
 
-.hero h1 {
-  font-size: 38px;
-  line-height: 1.05;
-  text-shadow: 0 3px 14px rgb(0 0 0 / 55%);
+.head h1 {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.01em;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.hero-user {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: rgb(255 255 255 / 80%);
-  font-size: 14px;
-  text-shadow: 0 1px 4px rgb(0 0 0 / 60%);
-}
-
-.playbar {
-  position: relative;
+.props {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 14px 32px;
-  padding: 16px 24px;
-  background: linear-gradient(90deg, rgb(14 20 27 / 92%) 0%, rgb(22 32 45 / 92%) 100%);
-  border-radius: 0 0 4px 4px;
-  box-shadow: 0 6px 18px rgb(0 0 0 / 30%);
+  gap: 8px;
+}
+
+.prop {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--fill);
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.prop :deep(svg) {
+  color: var(--muted);
+}
+
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .big {
+  min-width: 180px;
+  font-size: 16px;
+}
+
+.btn-lg-icon {
+  width: 48px;
   height: 48px;
-  min-width: 200px;
-  font-size: 17px;
 }
 
 .progress {
-  width: 200px;
+  width: 220px;
   height: 48px;
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  justify-content: center;
+  gap: 6px;
+}
+
+.progress-top {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--primary-ink);
+}
+
+.pct {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
 }
 
 .bar {
   width: 100%;
   height: 8px;
   border-radius: 4px;
-  background: rgb(255 255 255 / 8%);
+  background: var(--fill);
   overflow: hidden;
 }
 
 .bar span {
+  position: relative;
   display: block;
   height: 100%;
   border-radius: 4px;
-  background: repeating-linear-gradient(-45deg, #1a9fff 0 8px, #47bfff 8px 16px);
-  background-size: 22.6px 22.6px;
-  animation: stripes 0.8s linear infinite;
-  transition: width 0.5s ease;
+  background: var(--primary);
+  overflow: hidden;
+  transition: width 0.5s var(--ease);
 }
 
-@keyframes stripes {
+.bar span::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgb(255 255 255 / 45%), transparent);
+  animation: shimmer 1.4s linear infinite;
+}
+
+@keyframes shimmer {
+  from {
+    transform: translateX(-100%);
+  }
+
   to {
-    background-position: 22.6px 0;
+    transform: translateX(100%);
   }
 }
 
-.stat {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-width: 0;
-}
-
-.stat .label {
-  font-size: 11px;
-}
-
-.val {
-  color: #fff;
-  font-size: 15px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
 .small-btn {
-  height: 28px;
-  padding: 0 10px;
+  height: 30px;
+  padding: 0 12px;
   font-size: 13px;
 }
 
@@ -541,33 +588,38 @@ async function remove(): Promise<void> {
 .address {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   padding-bottom: 18px;
   margin-bottom: 18px;
-  border-bottom: 1px solid rgb(255 255 255 / 6%);
+  border-bottom: 1px solid var(--border);
+}
+
+.k {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
 }
 
 .addr-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
 }
 
 .addr {
-  font-family: var(--mono);
-  font-size: 18px;
-  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-size: 16px;
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .addr-row.primary .addr {
-  font-size: 30px;
-  font-weight: 700;
-  color: var(--accent);
-  letter-spacing: 0.01em;
-  text-shadow: 0 0 18px rgb(102 192 244 / 25%);
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--primary-ink);
+  letter-spacing: -0.01em;
 }
 
 .pair {
@@ -583,12 +635,12 @@ async function remove(): Promise<void> {
 }
 
 .pair .grow input {
-  height: 52px;
+  height: 56px;
   font-size: 15px;
 }
 
 .pair-btn {
-  height: 52px;
+  height: 56px;
   min-width: 140px;
   font-size: 15px;
 }
@@ -608,26 +660,27 @@ async function remove(): Promise<void> {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
 }
 
 .devices li {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 10px;
-  border-radius: 3px;
-  background: rgb(0 0 0 / 18%);
+  padding: 10px 0;
+}
+
+.devices li + li {
+  border-top: 1px solid var(--border);
 }
 
 .device-icon {
-  width: 38px;
-  height: 38px;
-  border-radius: 3px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   display: grid;
   place-items: center;
-  background: rgb(102 192 244 / 12%);
-  color: var(--accent);
+  background: var(--primary-soft);
+  color: var(--primary);
   flex: none;
 }
 
@@ -639,8 +692,8 @@ async function remove(): Promise<void> {
 }
 
 .device-name {
-  color: #fff;
-  font-weight: 700;
+  color: var(--text);
+  font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -676,7 +729,7 @@ async function remove(): Promise<void> {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding-top: 8px;
+  padding-top: 4px;
 }
 
 @media (width <= 860px) {
@@ -686,27 +739,37 @@ async function remove(): Promise<void> {
 }
 
 @media (width <= 600px) {
-  .hero {
-    height: 140px;
+  .cover {
+    height: 88px;
   }
 
-  .hero h1 {
-    font-size: 28px;
+  .glyph-wrap {
+    top: 56px;
+    left: 18px;
   }
 
-  .playbar {
-    gap: 12px 20px;
-    padding: 14px 16px;
+  .head-body {
+    padding: 40px 18px 18px;
   }
 
+  .head h1 {
+    font-size: 24px;
+  }
+
+  .head-actions,
   .big,
   .progress {
     width: 100%;
     min-width: 0;
   }
 
+  .head-actions .big,
+  .head-actions .progress {
+    flex: 1;
+  }
+
   .addr-row.primary .addr {
-    font-size: 22px;
+    font-size: 20px;
   }
 }
 </style>

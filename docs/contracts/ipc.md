@@ -27,8 +27,10 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 - The service passes the worker's recommended settings by default (`sunshine_name=<HOST>-<id>`, `min_log_level=info`,
   `nvenc_preset=1`, `nvenc_twopass=disabled`, `hevc_mode=0`, `av1_mode=0`); a desk's `workerSettings` (config.md)
   override or extend them. `port` is always set by the service.
-- The worker runs as SYSTEM with `TokenSessionId` = the desk session, `lpDesktop` `winsta0\default`, in the desk's job
-  object. The seat runs as SYSTEM in session 0.
+- The worker runs as SYSTEM with `TokenSessionId` = the desk session, `lpDesktop` `winsta0\default`,
+  `CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT`, in the desk's job object. Diagnostics only:
+  `splitplay-worker.exe --desk-dir <dir> --self-test <seconds>` (not with `--pipe`) checks capture, input and audio in
+  the session and writes `<desk-dir>\self-test.json`. The full settings list is in worker/README.md. The seat runs as SYSTEM in session 0.
 - Exit codes: 0 after `shutdown`, 2 invalid command line, 3 handshake failed or pipe lost, 4 (seat) gave up reconnecting
   the RDP session; anything else is a crash.
 

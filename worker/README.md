@@ -31,6 +31,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0002` control client | child side of [`ipc.md`](../docs/contracts/ipc.md), role `worker`: `--pipe`/`--desk`, hello/welcome/ready, 1 s heartbeats, `shutdown`, `pair`/`list_clients`/`unpair`, exit when the pipe breaks |
 | `0003` session targeting | the user token for launched apps comes from the worker's own session instead of `WTSGetActiveConsoleSessionId()` |
 | `0004` ViGEm off | CMake option `SUNSHINE_ENABLE_VIGEM` (default `OFF`); gamepads arrive with SplitPlay's own pad driver in Stage 4 |
+| `0005` build fix | the NVENC object libraries link `${Boost_LIBRARIES}`, so they find Boost.Log when Boost 1.89 comes from FetchContent (MSYS2 now ships a newer Boost than the pinned tree accepts) |
 
 ### Changing a patch or adding one
 
@@ -51,8 +52,10 @@ worker/scripts/fetch.sh                      # proves the queue applies to a cle
 Change `commit=` in `upstream.lock`, run `fetch.sh`, rebase the queue onto the new commit, export, build. The pin must
 stay at or before upstream `cf52f4b6`, the last commit before libvirtualhid (687e12d0) brought in files under the
 LizardByte Source-Available License, unless every such file is removed from the build. `scripts/check-licenses.sh`
-fails the build if any file in the patched tree, the npm packages or the downloaded dependencies carries that
-licence's SPDX identifier.
+fails the build if any file in `worker/` (patch queue, scripts and the patched tree), the npm packages or the
+downloaded dependencies carries that licence's SPDX identifier. As in the repository-wide check of `native.yml`,
+Markdown under a scanned root's `docs/` and files under its `.github/workflows/` are exempt, since they may name the
+identifier when stating the policy.
 
 ## Building
 

@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:04:00 +0000
+Subject: [PATCH] build(windows): give the NVENC objects Boost's include
+ directories
+
+The per-SDK NVENC object libraries (nvenc_sdk_1100/1200/1300) include
+src/logging.h, which needs Boost.Log headers, but they never link a Boost
+target. With the MSYS2 Boost package this goes unnoticed because all Boost
+headers sit in the compiler's system include directory. The pinned tree
+requires exactly Boost 1.89; MSYS2 now ships a newer Boost, so CMake
+builds 1.89 through FetchContent, where every Boost library has its own
+include directory, and the build stops with:
+
+  src/logging.h:15:10: fatal error: boost/log/common.hpp: No such file or directory
+
+Link the object libraries privately to ${Boost_LIBRARIES} (the same
+targets the sunshine executable links) so that they get the include
+directories and compile definitions of the Boost libraries in use. With
+the system package nothing changes.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index 86345805390a283e8743404a9fc304b9cc1bc219..5811c107e83abe7c448cb2efff455a5af6732b9d 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -93,6 +93,9 @@ if(WIN32)
+                 NVENC_SDK_VERSION=${sdk_version}
+         )
+         target_compile_options(${target_name} PRIVATE ${SUNSHINE_COMPILE_OPTIONS})
++        # SplitPlay: with Boost from FetchContent every Boost library has its own include directory, so the
++        # NVENC objects (which include src/logging.h) need the Boost targets' usage requirements.
++        target_link_libraries(${target_name} PRIVATE ${Boost_LIBRARIES})
+     endfunction()
+ 
+     add_nvenc_sdk_implementation(nvenc_sdk_1100 1100 "${NV_CODEC_HEADERS_11_INCLUDE_DIR}")

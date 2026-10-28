@@ -89,8 +89,8 @@ jobs:
       - name: Fetch upstream and apply patches
         run: worker/scripts/fetch.sh
 
-      - name: Licence check (patched tree)
-        run: worker/scripts/check-licenses.sh worker/build/src
+      - name: Licence check (worker/ with the patch queue and the patched tree)
+        run: worker/scripts/check-licenses.sh worker
 
       - name: Restore ccache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0

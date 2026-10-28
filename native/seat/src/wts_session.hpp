@@ -35,6 +35,9 @@ std::optional<SessionInfo> query_session(uint32_t id);
 // WTSLogoffSession without waiting. False with `error` set on failure.
 bool logoff(uint32_t id, std::string* error);
 
+// WTSDisconnectSession without waiting (tests use it to simulate a lost connection).
+bool disconnect(uint32_t id, std::string* error);
+
 const char* state_name(int state) noexcept;
 
 }  // namespace splitplay::seat::wts

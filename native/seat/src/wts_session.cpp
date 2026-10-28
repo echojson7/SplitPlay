@@ -18,6 +18,7 @@ struct Api {
   decltype(&::WTSQuerySessionInformationW) query_information = nullptr;
   decltype(&::WTSFreeMemory) free_memory = nullptr;
   decltype(&::WTSLogoffSession) logoff_session = nullptr;
+  decltype(&::WTSDisconnectSession) disconnect_session = nullptr;
   bool ok = false;
 };
 
@@ -35,7 +36,8 @@ const Api& api() {
     a.query_information = proc<decltype(a.query_information)>(m, "WTSQuerySessionInformationW");
     a.free_memory = proc<decltype(a.free_memory)>(m, "WTSFreeMemory");
     a.logoff_session = proc<decltype(a.logoff_session)>(m, "WTSLogoffSession");
-    a.ok = a.enumerate_sessions && a.query_information && a.free_memory && a.logoff_session;
+    a.disconnect_session = proc<decltype(a.disconnect_session)>(m, "WTSDisconnectSession");
+    a.ok = a.enumerate_sessions && a.query_information && a.free_memory && a.logoff_session && a.disconnect_session;
     return a;
   }();
   return instance;
@@ -120,6 +122,16 @@ bool logoff(uint32_t id, std::string* error) {
   }
   if (api().logoff_session(WTS_CURRENT_SERVER_HANDLE, id, FALSE)) return true;
   if (error) *error = "WTSLogoffSession: " + win::last_error_message();
+  return false;
+}
+
+bool disconnect(uint32_t id, std::string* error) {
+  if (!api().ok) {
+    if (error) *error = "wtsapi32.dll is not available";
+    return false;
+  }
+  if (api().disconnect_session(WTS_CURRENT_SERVER_HANDLE, id, FALSE)) return true;
+  if (error) *error = "WTSDisconnectSession: " + win::last_error_message();
   return false;
 }
 

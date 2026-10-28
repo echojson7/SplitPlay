@@ -75,6 +75,7 @@ class FreeRdpConnector final : public IRdpConnector {
   bool should_stop() const { return stop_.load() || no_reconnect_.load(); }
 
   Options options_;
+  bool winsock_ = false;
   RdpConnectParams params_;  // holds the password until the connector is destroyed (needed for reconnects)
   std::wstring user_w_;
   std::string client_name_;

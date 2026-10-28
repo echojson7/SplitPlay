@@ -184,11 +184,16 @@ FreeRdpConnector::FreeRdpConnector() : FreeRdpConnector(Options{}) {}
 FreeRdpConnector::FreeRdpConnector(Options options) : options_(options) {
   wake_.reset(CreateEventW(nullptr, FALSE, FALSE, nullptr));
   stop_event_.reset(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+  // libfreerdp uses Winsock directly but leaves WSAStartup to the application (getaddrinfo fails without it).
+  WSADATA wsa{};
+  winsock_ = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+  if (!winsock_) log_error("RDP: WSAStartup failed");
 }
 
 FreeRdpConnector::~FreeRdpConnector() {
   disconnect();
   ipc::secure_wipe(params_.password);
+  if (winsock_) WSACleanup();
 }
 
 bool FreeRdpConnector::connect(RdpConnectParams& params, std::string* error) {

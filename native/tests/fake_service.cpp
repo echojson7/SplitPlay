@@ -382,9 +382,9 @@ int run_rdp(const std::string& exe, const RdpScenario& sc) {
     auto ready = inbox.next_of("ready", std::chrono::seconds(sc.ready_timeout_s));
     if (!ready) {
       dump_sessions();
-      if (auto code = wait_exit(child, 0ms))
+      if (auto code = wait_exit(child, 5s))
         fail(std::format("the seat exited with code {} before ready (4 = RDP connection given up)", *code));
-      fail(std::format("no ready within {} s", sc.ready_timeout_s));
+      fail(std::format("no ready within {} s (or the pipe closed)", sc.ready_timeout_s));
     }
     std::fprintf(stderr, "fake-service: ready %s\n", ready->body.dump().c_str());
     expect(ipc::get_string(ready->body, "connector") == std::string("freerdp"), "ready.connector is not freerdp");
@@ -426,6 +426,28 @@ int run_rdp(const std::string& exe, const RdpScenario& sc) {
         [](const ipc::Message& m) { return m.type == "event" && ipc::get_string(m.body, "name") == std::string("session_lost"); },
         0ms);
     expect(!lost.has_value(), "unexpected session_lost: " + (lost ? lost->body.dump() : std::string()));
+
+    // Connection loss: the server drops the RDP connection (WTSDisconnectSession). The seat must report
+    // session_lost, reconnect on its own and report session_restored with the same session.
+    expect(seat::wts::disconnect(sid, &err), err);
+    std::fprintf(stderr, "fake-service: disconnected session %u from the server side\n", sid);
+    auto is_event = [](const char* name) {
+      return [name](const ipc::Message& m) {
+        return m.type == "event" && ipc::get_string(m.body, "name") == std::string(name);
+      };
+    };
+    lost = inbox.next_where(is_event("session_lost"), 30s);
+    expect(lost.has_value(), "no session_lost within 30 s of WTSDisconnectSession");
+    std::fprintf(stderr, "fake-service: %s\n", lost->body.dump().c_str());
+    auto restored = inbox.next_where(is_event("session_restored"), 120s);
+    if (!restored) dump_sessions();
+    expect(restored.has_value(), "no session_restored within 120 s");
+    std::fprintf(stderr, "fake-service: %s\n", restored->body.dump().c_str());
+    const json* rdata = ipc::get_object(restored->body, "data");
+    expect(rdata && ipc::get_int(*rdata, "session") == static_cast<int64_t>(sid),
+           "session_restored does not carry the same session: " + restored->body.dump());
+    info = seat::wts::query_session(sid);
+    expect(info && info->active(), std::format("session {} is not active after the reconnect", sid));
 
     // shutdown: the seat logs the session off and exits.
     send(*transport, ipc::make_request("shutdown", 100));

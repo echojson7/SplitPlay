@@ -133,6 +133,105 @@ function Get-FakeChildren {
     @(Get-CimInstance Win32_Process -Filter "Name = 'SplitPlay.Service.exe'" | Where-Object { $_.CommandLine -match '\.exe"?\s+fake-child\s' })
 }
 
+# Steam isolation checks read a user's hives from disk (the user is not logged on): NTUSER.DAT under
+# HKU\SplitPlaySmoke and, once the profile has one, UsrClass.dat (Software\Classes) under HKU\SplitPlaySmoke_Classes.
+function Invoke-WithHive([string]$profileDir, [scriptblock]$action) {
+    $mounts = @(@{ Name = 'SplitPlaySmoke'; File = Join-Path $profileDir 'NTUSER.DAT' })
+    $classesFile = Join-Path $profileDir 'AppData\Local\Microsoft\Windows\UsrClass.dat'
+    if (Test-Path -LiteralPath $classesFile) { $mounts += @{ Name = 'SplitPlaySmoke_Classes'; File = $classesFile } }
+    $loaded = @()
+    $keys = @()
+    try {
+        foreach ($m in $mounts) {
+            & reg.exe load "HKU\$($m.Name)" $m.File | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "reg load $($m.File) failed ($LASTEXITCODE)" }
+            $loaded += $m.Name
+            $keys += [Microsoft.Win32.Registry]::Users.OpenSubKey($m.Name, $true)
+        }
+        & $action $keys[0] $(if ($keys.Count -gt 1) { $keys[1] } else { $null })
+    } finally {
+        foreach ($k in $keys) { $k.Dispose() }
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+        foreach ($name in $loaded) {
+            & reg.exe unload "HKU\$name" | Out-Host
+            if ($LASTEXITCODE -ne 0) { throw "reg unload HKU\$name failed ($LASTEXITCODE)" }
+        }
+    }
+}
+
+function Get-HiveValue($root, [string]$key, [string]$name) {
+    if ($null -eq $root) { return $null }
+    $k = $root.OpenSubKey($key)
+    if ($null -eq $k) { return $null }
+    try {
+        $value = $k.GetValue($name, $null, 'DoNotExpandEnvironmentNames')
+        if ($null -ne $value -and $k.GetValueKind($name) -ne 'String') { return "unexpected kind $($k.GetValueKind($name))" }
+        return $value
+    } finally {
+        $k.Dispose()
+    }
+}
+
+# The three Steam isolation values: from the profile on disk, or from the loaded hives (-Sid, user logged on).
+function Get-SteamHiveValues([string]$profileDir, [string]$sid) {
+    $read = {
+        param($root, $classes)
+        [pscustomobject]@{
+            Env     = Get-HiveValue $root 'Environment' 'steam_master_ipc_name_override'
+            Run     = Get-HiveValue $root 'Software\Microsoft\Windows\CurrentVersion\Run' 'Steam'
+            Handler = Get-HiveValue $classes 'steam\Shell\Open\Command' ''
+            Classes = $null -ne $classes
+        }
+    }
+    if ($sid) {
+        $root = [Microsoft.Win32.Registry]::Users.OpenSubKey($sid)
+        $classes = [Microsoft.Win32.Registry]::Users.OpenSubKey("${sid}_Classes")
+        try { & $read $root $classes } finally { if ($root) { $root.Dispose() }; if ($classes) { $classes.Dispose() } }
+    } else {
+        Invoke-WithHive $profileDir $read
+    }
+}
+
+# A profile without a logon (userenv!CreateProfile): NTUSER.DAT copied from the default profile.
+function New-UserProfile([string]$sid, [string]$user) {
+    if (-not ('SplitPlaySmoke.UserEnv' -as [type])) {
+        Add-Type -Namespace SplitPlaySmoke -Name UserEnv -MemberDefinition @'
+[DllImport("userenv.dll", CharSet = CharSet.Unicode)]
+public static extern int CreateProfile(string sid, string userName, System.Text.StringBuilder profilePath, uint size);
+'@
+    }
+    $path = New-Object System.Text.StringBuilder 260
+    $hr = [SplitPlaySmoke.UserEnv]::CreateProfile($sid, $user, $path, 260)
+    if ($hr -ne 0) { throw ('CreateProfile({0}) failed: 0x{1:X8}' -f $user, $hr) }
+    return $path.ToString()
+}
+
+# What Steam's installer puts into HKLM (steam:// handler, InstallPath with a stand-in steam.exe; Steam itself is
+# never run in CI). Returns the keys it created, for Remove-MachineSteam.
+$steamHandler = '"C:\Program Files (x86)\Steam\steam.exe" -- "%1"'
+$fakeSteam = Join-Path $Work 'fake-steam'
+function Add-MachineSteam {
+    $created = @()
+    $hklm = [Microsoft.Win32.Registry]::LocalMachine
+    if (-not $hklm.OpenSubKey('SOFTWARE\Classes\steam')) {
+        $created += 'SOFTWARE\Classes\steam'
+        $k = $hklm.CreateSubKey('SOFTWARE\Classes\steam\Shell\Open\Command'); $k.SetValue('', $steamHandler); $k.Dispose()
+        $k = $hklm.CreateSubKey('SOFTWARE\Classes\steam'); $k.SetValue('', 'URL:steam protocol'); $k.SetValue('URL Protocol', ''); $k.Dispose()
+    }
+    New-Item -ItemType Directory -Path $fakeSteam -Force | Out-Null
+    Set-Content -Path (Join-Path $fakeSteam 'steam.exe') -Value 'stand-in'
+    if (-not $hklm.OpenSubKey('SOFTWARE\WOW6432Node\Valve')) {
+        $created += 'SOFTWARE\WOW6432Node\Valve'
+        $k = $hklm.CreateSubKey('SOFTWARE\WOW6432Node\Valve\Steam'); $k.SetValue('InstallPath', $fakeSteam); $k.Dispose()
+    }
+    return , $created
+}
+
+function Remove-MachineSteam([string[]]$keys) {
+    foreach ($key in $keys) { [Microsoft.Win32.Registry]::LocalMachine.DeleteSubKeyTree($key, $false) }
+}
+
 function Set-ServiceEnvironment([string[]]$values) {
     Set-ItemProperty -Path $serviceKey -Name Environment -Type MultiString -Value $values
 }
@@ -212,7 +311,21 @@ try {
         $existingPassword = 'Sm0ke-' + [guid]::NewGuid().ToString('N').Substring(0, 16) + '!'
         Get-LocalUser -Name $existing -ErrorAction SilentlyContinue | Remove-LocalUser
         New-LocalUser -Name $existing -Password (ConvertTo-SecureString $existingPassword -AsPlainText -Force) -Description 'owner account' | Out-Null
+        $existingSid = (Get-LocalUser -Name $existing).SID.Value
+        $machineSteamKeys = @()
         try {
+            # Steam isolation: the owner's account has a profile (never logged on) with Steam's autostart, and the
+            # machine has Steam's steam:// handler and InstallPath.
+            $machineSteamKeys = Add-MachineSteam
+            $profileDir = New-UserProfile $existingSid $existing
+            $steamRun = '"C:\Program Files (x86)\Steam\steam.exe" -silent'
+            Invoke-WithHive $profileDir {
+                param($root)
+                $k = $root.CreateSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
+                $k.SetValue('Steam', $steamRun)
+                $k.Dispose()
+            }
+
             $before = Get-LocalUser -Name $existing
             # A wrong password is refused (400 validation_failed) and nothing is created.
             'wrong-password' | & $cli desk create smoke-4 --user $existing --password-stdin
@@ -231,13 +344,43 @@ try {
                 throw 'SplitPlay changed the existing account'
             }
             if (-not @(Get-LocalGroupMember -SID 'S-1-5-32-555' | Where-Object { $_.SID -eq $after.SID })) { throw 'not added to Remote Desktop Users' }
+            if ($desk.steamIsolation -ne $true) { throw "steamIsolation is not on by default: $($desk | ConvertTo-Json -Compress)" }
+            if ($machineSteamKeys -contains 'SOFTWARE\WOW6432Node\Valve') {
+                $apps = Get-Content (Join-Path $consoleData 'desks\smoke-4\apps.json') -Raw | ConvertFrom-Json
+                $steamApp = @($apps.apps | Where-Object { $_.name -eq 'Steam' })
+                $expectedApp = "`"$fakeSteam\steam.exe`" -master_ipc_name_override SplitPlay_smoke_4 -gamepadui"
+                if ($steamApp.Count -ne 1 -or $steamApp[0].cmd -ne $expectedApp) { throw "apps.json has no isolated Steam entry: $($apps | ConvertTo-Json -Compress -Depth 4)" }
+            }
             Invoke-Cli desk stop smoke-4 --wait --timeout 30
+
+            Step 'console mode: Steam isolation values in the desk user''s hive'
+            # Written before logon with the profile's NTUSER.DAT mounted by the service (and unloaded again).
+            $values = Get-SteamHiveValues $profileDir
+            Write-Host "  hive: $($values | ConvertTo-Json -Compress)"
+            if ($values.Env -ne 'SplitPlay_smoke_4') { throw "steam_master_ipc_name_override is '$($values.Env)'" }
+            if ($values.Run -ne '"C:\Program Files (x86)\Steam\steam.exe" -master_ipc_name_override SplitPlay_smoke_4 -silent') { throw "Run\Steam is '$($values.Run)'" }
+            # The steam:// handler lives in UsrClass.dat, which a profile only gets at its first logon.
+            if ($values.Classes -and $machineSteamKeys -contains 'SOFTWARE\Classes\steam' -and
+                $values.Handler -ne '"C:\Program Files (x86)\Steam\steam.exe" -master_ipc_name_override SplitPlay_smoke_4 -- "%1"') {
+                throw "the per-user steam:// handler is '$($values.Handler)'"
+            }
+            if (-not (Test-Path (Join-Path $consoleData 'desks\smoke-4\steam-isolation.json'))) { throw 'steam-isolation.json not written' }
             & $cli desk delete smoke-4 --delete-user
             if ($LASTEXITCODE -eq 0) { throw 'delete --delete-user removed an account SplitPlay did not create' }
             if (-not (Get-LocalUser -Name $existing -ErrorAction SilentlyContinue)) { throw 'the existing account was deleted' }
+            if ((Get-SteamHiveValues $profileDir).Env -ne 'SplitPlay_smoke_4') { throw 'the refused delete reverted Steam isolation' }
             Invoke-Cli desk delete smoke-4
             $global:LASTEXITCODE = 0
+
+            # Deleting the desk restores the hive: no variable, Steam's own autostart, no per-user handler.
+            $values = Get-SteamHiveValues $profileDir
+            Write-Host "  hive after delete: $($values | ConvertTo-Json -Compress)"
+            if ($null -ne $values.Env) { throw "steam_master_ipc_name_override still set: '$($values.Env)'" }
+            if ($values.Run -ne $steamRun) { throw "Run\Steam not restored: '$($values.Run)'" }
+            if ($null -ne $values.Handler) { throw "per-user steam:// handler still present: '$($values.Handler)'" }
         } finally {
+            Remove-MachineSteam $machineSteamKeys
+            Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $existingSid } | Remove-CimInstance -ErrorAction SilentlyContinue
             Remove-LocalUser -Name $existing -ErrorAction SilentlyContinue
         }
 
@@ -312,6 +455,7 @@ try {
         if ($seatExe -and (Test-Path $seatExe)) {
             # The native seat comes from another branch's latest build and may lag behind: a failure here is
             # reported as a warning (and in the step summary) instead of failing the service build.
+            $seatSteamKeys = @()
             try {
                 Step "service: real seat from $Native"
                 Invoke-Cli service stop --timeout 60
@@ -324,6 +468,7 @@ try {
                 )
                 Invoke-Cli service start --timeout 90
                 Wait-Health 60 | Out-Null
+                $seatSteamKeys = Add-MachineSteam
                 Invoke-Cli desk create smoke-3 --user splitplay-smoke3
                 & $cli desk start smoke-3 --wait --timeout 240
                 $desk = Get-Desk 'smoke-3'
@@ -342,6 +487,16 @@ try {
                     if ($sessions -notmatch 'splitplay-smoke3') { throw 'no RDP session for splitplay-smoke3' }
                     Write-Host "real seat: desk session $($desk.sessionId) (runner session $consoleSession), worker inside it"
 
+                    # Steam isolation in the logged-on hives (written at the first logon, applied by the relogon).
+                    $seatSid = (Get-LocalUser -Name 'splitplay-smoke3').SID.Value
+                    $live = Get-SteamHiveValues -sid $seatSid
+                    Write-Host "  live hive: $($live | ConvertTo-Json -Compress)"
+                    if ($live.Env -ne 'SplitPlay_smoke_3') { throw "steam_master_ipc_name_override is '$($live.Env)' in the desk session" }
+                    if ($seatSteamKeys -contains 'SOFTWARE\Classes\steam' -and
+                        $live.Handler -ne '"C:\Program Files (x86)\Steam\steam.exe" -master_ipc_name_override SplitPlay_smoke_3 -- "%1"') {
+                        throw "the per-user steam:// handler is '$($live.Handler)'"
+                    }
+
                     Invoke-Cli desk stop smoke-3 --wait --timeout 60
                     $deadline = (Get-Date).AddSeconds(60)
                     do {
@@ -349,6 +504,14 @@ try {
                         $sessions = (& quser.exe 2>&1) -join "`n"
                     } until ($sessions -notmatch 'splitplay-smoke3' -or (Get-Date) -gt $deadline)
                     if ($sessions -match 'splitplay-smoke3') { throw 'the desk session was not logged off on stop' }
+
+                    # Turning the option off reverts both hives from disk (NTUSER.DAT and UsrClass.dat mounted).
+                    Invoke-RestMethod -Method Put -Uri "$base/desks/smoke-3" -ContentType 'application/json' -Body '{"steamIsolation":false}' | Out-Null
+                    $seatProfile = (Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $seatSid }).LocalPath
+                    # (Windows may keep a logged-off user's hive loaded for a while: then it is read where it is.)
+                    $after = if (Test-Path "Registry::HKEY_USERS\$seatSid") { Get-SteamHiveValues -sid $seatSid } else { Get-SteamHiveValues $seatProfile }
+                    Write-Host "  hive after steamIsolation=false: $($after | ConvertTo-Json -Compress)"
+                    if ($null -ne $after.Env -or $null -ne $after.Handler) { throw 'steamIsolation=false did not revert the desk user''s hives' }
                 }
                 Invoke-Cli desk delete smoke-3 --delete-user
             } catch {
@@ -359,6 +522,8 @@ try {
                 & $cli desk stop smoke-3 --wait --timeout 60 2>&1 | Out-Host
                 & $cli desk delete smoke-3 --delete-user 2>&1 | Out-Host
                 $global:LASTEXITCODE = 0
+            } finally {
+                Remove-MachineSteam $seatSteamKeys
             }
         } else {
             Write-Warning 'no native build with splitplay-seat.exe given (-Native): real-seat check skipped'

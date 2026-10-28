@@ -4,19 +4,62 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using Microsoft.Win32;
+using SplitPlay.Core.Steam;
 
 namespace SplitPlay.Core.Host;
 
-/// <summary><see cref="IHostRegistry"/> over the real HKLM (64-bit view).</summary>
+/// <summary>
+/// <see cref="IHostRegistry"/> over the real registry (64-bit view): HKLM by default, or a user hive
+/// (<c>HKEY_USERS\&lt;root&gt;</c>) as <see cref="IUserHive"/>.
+/// </summary>
 [SupportedOSPlatform("windows")]
-public sealed class WindowsHostRegistry : IHostRegistry
+public sealed class WindowsHostRegistry : IUserHive
 {
-    private static RegistryKey Hklm() => RegistryKey.OpenBaseKey(RegistryHive.LocalMachine, RegistryView.Registry64);
+    private readonly RegistryHive _hive;
+    private readonly string _root;
+
+    /// <summary>HKLM.</summary>
+    public WindowsHostRegistry()
+        : this(RegistryHive.LocalMachine, "")
+    {
+    }
+
+    /// <summary>Keys relative to <c>&lt;hive&gt;\&lt;root&gt;</c> (e.g. <c>HKEY_USERS\S-1-5-21-…</c>).</summary>
+    public WindowsHostRegistry(RegistryHive hive, string root)
+    {
+        _hive = hive;
+        _root = root.TrimEnd('\\');
+    }
+
+    private RegistryKey Base() => RegistryKey.OpenBaseKey(_hive, RegistryView.Registry64);
+
+    private string Full(string key) => _root.Length == 0 ? key : key.Length == 0 ? _root : _root + "\\" + key;
+
+    public bool KeyExists(string key)
+    {
+        using var hklm = Base();
+        using var k = hklm.OpenSubKey(Full(key));
+        return k is not null;
+    }
+
+    public void DeleteKeyIfEmpty(string key)
+    {
+        using var hklm = Base();
+        using (var k = hklm.OpenSubKey(Full(key)))
+        {
+            if (k is null || k.ValueCount > 0 || k.SubKeyCount > 0)
+            {
+                return;
+            }
+        }
+
+        hklm.DeleteSubKey(Full(key), throwOnMissingSubKey: false);
+    }
 
     public RegValue? Get(string key, string name)
     {
-        using var hklm = Hklm();
-        using var k = hklm.OpenSubKey(key);
+        using var hklm = Base();
+        using var k = hklm.OpenSubKey(Full(key));
         if (k is null || k.GetValue(name, null, RegistryValueOptions.DoNotExpandEnvironmentNames) is not { } value)
         {
             return null;
@@ -34,8 +77,8 @@ public sealed class WindowsHostRegistry : IHostRegistry
 
     public void Set(string key, string name, RegValue value)
     {
-        using var hklm = Hklm();
-        using var k = hklm.CreateSubKey(key, writable: true);
+        using var hklm = Base();
+        using var k = hklm.CreateSubKey(Full(key), writable: true);
         switch (value.Kind)
         {
             case RegKind.DWord:
@@ -52,8 +95,8 @@ public sealed class WindowsHostRegistry : IHostRegistry
 
     public void Delete(string key, string name)
     {
-        using var hklm = Hklm();
-        using var k = hklm.OpenSubKey(key, writable: true);
+        using var hklm = Base();
+        using var k = hklm.OpenSubKey(Full(key), writable: true);
         k?.DeleteValue(name, throwOnMissingValue: false);
     }
 }

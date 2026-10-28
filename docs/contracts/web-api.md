@@ -56,6 +56,7 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
   "userManaged": true,
   "hasPassword": true,
   "resolutionPendingRestart": false,
+  "steamIsolation": true,
   "state": "Stopped",
   "sessionId": null,
   "basePort": 48089,
@@ -69,6 +70,8 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.
+`steamIsolation` (config.md) is always present in responses; POST/PUT accept it, and a PUT without it keeps the current
+value. Changing it on a running desk is `409 invalid_state`.
 
 `state` is one of the lifecycle states in ARCHITECTURE.md §4:
 `Defined, Provisioning, Connecting, SessionReady, DisplayReady, Ready, Streaming, Recovering, Faulted, Stopping, Stopped`.

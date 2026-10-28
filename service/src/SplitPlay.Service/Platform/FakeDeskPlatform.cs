@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
 using SplitPlay.Core.Platform;
+using SplitPlay.Core.Steam;
 using SplitPlay.Service.Hosting;
 
 namespace SplitPlay.Service.Platform;
@@ -15,11 +16,30 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 {
     private readonly ConcurrentDictionary<string, FakeAccount> _accounts = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentQueue<string> _actions = new();
+    private readonly ConcurrentDictionary<string, MemoryUserHive> _hives = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, bool> _profiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly DataPaths _paths;
 
     public FakeDeskPlatform(DataPaths paths)
     {
+        _paths = paths;
         Secrets = new DeskSecretStore(paths.Root, new PlainTestProtector());
     }
+
+    /// <summary>The fake SID of a user (Steam isolation records it).</summary>
+    public static string SidOf(string user) => "S-1-5-21-fake-" + user.ToLowerInvariant();
+
+    /// <summary>The machine's <c>steam://</c> handler; <see cref="SteamMachineInfo.None"/> for a PC without Steam.</summary>
+    public SteamMachineInfo SteamMachine { get; set; } = new(@"""C:\Program Files (x86)\Steam\steam.exe"" -- ""%1""", "URL:steam protocol");
+
+    /// <summary>What <see cref="SteamExecutable"/> returns (null: Steam not installed).</summary>
+    public string? SteamExe { get; set; } = @"C:\Program Files (x86)\Steam\steam.exe";
+
+    /// <summary>The registry hive of <paramref name="user"/> (created empty on first use).</summary>
+    public MemoryUserHive Hive(string user) => _hives.GetOrAdd(user, _ => new MemoryUserHive());
+
+    /// <summary>True once the user has a profile (first logon, or an existing account).</summary>
+    public bool HasProfile(string user) => _profiles.ContainsKey(user);
 
     /// <summary>A fake local account.</summary>
     public sealed record FakeAccount(string Password, bool CreatedBySplitPlay, bool PasswordNeverExpires, bool RemoteDesktopUser = false);
@@ -43,10 +63,32 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     public IReadOnlyDictionary<string, FakeAccount> Accounts => _accounts;
 
     /// <summary>Adds an account that SplitPlay did not create (the owner's own user).</summary>
-    public void AddExistingAccount(string user, string password, bool passwordNeverExpires = false) =>
+    public void AddExistingAccount(string user, string password, bool passwordNeverExpires = false, bool hasProfile = true)
+    {
         _accounts[user] = new FakeAccount(password, CreatedBySplitPlay: false, passwordNeverExpires);
+        if (hasProfile)
+        {
+            _profiles[user] = true;
+        }
+    }
 
     public DeskCredentials Provision(DeskConfig desk)
+    {
+        var credentials = EnsureAccount(desk);
+        if (desk.SteamIsolationEnabled)
+        {
+            // Like Windows: an existing profile's hive is mounted and changed before the session logs on.
+            TrySteamIsolation(desk, credentials.User, loggedOn: false);
+        }
+        else
+        {
+            RevertSteamIsolation(desk.Id);
+        }
+
+        return credentials;
+    }
+
+    private DeskCredentials EnsureAccount(DeskConfig desk)
     {
         ArgumentNullException.ThrowIfNull(desk);
         _actions.Enqueue($"provision {desk.Id}");
@@ -126,10 +168,13 @@ public sealed class FakeDeskPlatform : IDeskPlatform
             throw new DeskUserNotManagedException($"Windows account '{desk.User}' was not created by SplitPlay");
         }
 
+        RevertSteamIsolation(desk.Id);
         Secrets.Delete(desk.Id);
         if (account is not null)
         {
             _accounts.TryRemove(desk.User!, out _);
+            _hives.TryRemove(desk.User!, out _);
+            _profiles.TryRemove(desk.User!, out _);
             _actions.Enqueue($"userdel {desk.User}");
         }
     }
@@ -137,15 +182,22 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     public bool OnSessionLogon(DeskConfig desk, int sessionId, string deskDirectory)
     {
         _actions.Enqueue($"logon {desk.Id} {sessionId}");
-        if (desk.UserManaged == false)
+        if (desk.User is null)
         {
             return false;
+        }
+
+        _profiles[desk.User] = true;
+        var steam = desk.SteamIsolationEnabled && TrySteamIsolation(desk, desk.User, loggedOn: true);
+        if (desk.UserManaged == false)
+        {
+            return steam;
         }
 
         var marker = Path.Combine(deskDirectory, WindowsDeskPlatform.KeyboardMarkerFile);
         if (File.Exists(marker))
         {
-            return false;
+            return steam;
         }
 
         Directory.CreateDirectory(deskDirectory);
@@ -153,6 +205,52 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         _actions.Enqueue($"layouts {desk.Id}");
         return true;
     }
+
+    private SteamIsolation SteamState(string deskId) => new(Path.Combine(_paths.DeskDirectory(deskId), SteamIsolation.StateFileName));
+
+    private bool TrySteamIsolation(DeskConfig desk, string user, bool loggedOn)
+    {
+        var sid = SidOf(user);
+        var isolation = SteamState(desk.Id);
+        if (isolation.RecordedSid() is { } recorded && recorded != sid)
+        {
+            RevertSteamIsolation(desk.Id);
+        }
+
+        if (!HasProfile(user))
+        {
+            return false;
+        }
+
+        var result = isolation.Apply(Hive(user), sid, desk.Id, SteamMachine);
+        if (result.Changes.Count > 0)
+        {
+            _actions.Enqueue($"steam+ {desk.Id} {user}");
+        }
+
+        return result.EnvironmentWritten && loggedOn;
+    }
+
+    public void RevertSteamIsolation(string deskId)
+    {
+        var isolation = SteamState(deskId);
+        if (isolation.RecordedSid() is not { } sid)
+        {
+            return;
+        }
+
+        var user = _hives.Keys.FirstOrDefault(u => SidOf(u) == sid);
+        if (user is null)
+        {
+            isolation.Forget();
+            return;
+        }
+
+        isolation.Revert(Hive(user));
+        _actions.Enqueue($"steam- {deskId} {user}");
+    }
+
+    public string? SteamExecutable() => SteamExe;
 
     public IReadOnlyList<string> StopBluetoothUserService(int sessionId)
     {

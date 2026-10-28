@@ -50,6 +50,7 @@ internal static class DeskCommands
                     BasePort = args.IntOption("base-port"),
                     Autostart = args.Flag("autostart"),
                     Gpu = args.Option("gpu") ?? "auto",
+                    SteamIsolation = args.Flag("no-steam-isolation") ? false : null,
                     Profile = new ProfileConfig
                     {
                         Fps = args.IntOption("fps"),
@@ -83,6 +84,7 @@ internal static class DeskCommands
                     Gpu = current.Gpu,
                     Profile = current.Profile,
                     DisableBluetoothUserService = current.DisableBluetoothUserService,
+                    SteamIsolation = current.SteamIsolation,
                     WorkerSettings = current.WorkerSettings,
                 };
                 Print(await client.ReplaceDeskAsync(desk, password).ConfigureAwait(false), json);

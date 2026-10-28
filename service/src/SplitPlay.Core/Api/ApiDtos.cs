@@ -94,6 +94,9 @@ public sealed class DeskDto
 
     public bool DisableBluetoothUserService { get; set; } = true;
 
+    /// <summary>See <see cref="DeskConfig.SteamIsolation"/>; always set in responses.</summary>
+    public bool SteamIsolation { get; set; } = true;
+
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, string>? WorkerSettings { get; set; }
 

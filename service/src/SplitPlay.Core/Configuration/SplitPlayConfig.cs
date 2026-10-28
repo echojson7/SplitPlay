@@ -81,6 +81,18 @@ public sealed class DeskConfig
     public bool DisableBluetoothUserService { get; set; } = true;
 
     /// <summary>
+    /// Per-desk Steam isolation (default true; null in a request keeps the current value): the desk user's Steam uses
+    /// the IPC name <c>SplitPlay_&lt;id&gt;</c> so it runs next to the console user's Steam. See
+    /// <see cref="Steam.SteamIsolation"/>.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? SteamIsolation { get; set; }
+
+    /// <summary>The effective <see cref="SteamIsolation"/>.</summary>
+    [JsonIgnore]
+    public bool SteamIsolationEnabled => SteamIsolation ?? true;
+
+    /// <summary>
     /// Extra Sunshine settings passed verbatim to the worker as trailing <c>name=value</c> arguments (after
     /// <c>port=&lt;basePort&gt;</c>); they override the worker's <c>sunshine.conf</c>. See worker/README.md.
     /// </summary>

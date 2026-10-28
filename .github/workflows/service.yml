@@ -125,14 +125,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # upload-artifact needs one common root: the ProgramData logs are copied next to the other diagnostics first.
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          New-Item -ItemType Directory -Force "${{ runner.temp }}\diagnostics" | Out-Null
+          foreach ($d in "${{ runner.temp }}\test-results", "${{ runner.temp }}\smoke", 'C:\ProgramData\SplitPlay\logs') {
+            if (Test-Path $d) { Copy-Item -Recurse -Force $d "${{ runner.temp }}\diagnostics\$(Split-Path $d -Leaf)" }
+          }
+
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: service-diagnostics
-          path: |
-            ${{ runner.temp }}\test-results
-            ${{ runner.temp }}\smoke
-            C:\ProgramData\SplitPlay\logs
+          path: ${{ runner.temp }}\diagnostics
           if-no-files-found: ignore
           retention-days: 7

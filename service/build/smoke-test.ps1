@@ -177,7 +177,7 @@ try {
         if ($desk.state -ne 'Ready') { throw "desk state is $($desk.state), expected Ready ($($desk.lastError))" }
         Assert-DeskUser 'smoke desk 1' 'smoke-1' $consoleData
         Assert-FirewallRules 'smoke-1' $true
-        $children = Get-FakeChildren
+        $children = @(Get-FakeChildren)
         if ($children.Count -ne 1) { throw "expected one fake-child worker, found $($children.Count)" }
         if ($children[0].CommandLine -notmatch '--desk-dir' -or $children[0].CommandLine -notmatch 'port=48089') {
             throw "worker command line lacks --desk-dir/port=: $($children[0].CommandLine)"
@@ -286,7 +286,7 @@ try {
         $desk = Get-Desk 'smoke-2'
         if ($desk.state -ne 'Ready') { throw "desk state is $($desk.state), expected Ready ($($desk.lastError))" }
         Assert-DeskUser 'splitplay-smoke2' 'smoke-2' $programData
-        $children = Get-FakeChildren
+        $children = @(Get-FakeChildren)
         if ($children.Count -ne 1) { throw "expected one fake-child worker, found $($children.Count)" }
         $child = $children[0]
         $owner = Invoke-CimMethod -InputObject $child -MethodName GetOwner
@@ -303,7 +303,7 @@ try {
 
         Invoke-Cli desk stop smoke-2 --wait --timeout 30
         Start-Sleep -Seconds 1
-        if ((Get-FakeChildren).Count -ne 0) { throw 'worker still running after stop (job object not closed?)' }
+        if (@(Get-FakeChildren).Count -ne 0) { throw 'worker still running after stop (job object not closed?)' }
         Invoke-Cli desk delete smoke-2 --delete-user
         if (Get-LocalUser -Name 'splitplay-smoke2' -ErrorAction SilentlyContinue) { throw 'the smoke-2 account still exists' }
 
@@ -334,7 +334,7 @@ try {
                 } else {
                     if ($desk.state -ne 'Ready') { throw "real seat: desk state is $($desk.state) ($($desk.lastError))" }
                     $consoleSession = (Get-Process -Id $PID).SessionId
-                    $children = Get-FakeChildren
+                    $children = @(Get-FakeChildren)
                     if ($children.Count -ne 1) { throw "expected one worker, found $($children.Count)" }
                     if ($children[0].SessionId -ne $desk.sessionId) { throw "worker session $($children[0].SessionId) is not the desk session $($desk.sessionId)" }
                     $sessions = (& quser.exe 2>&1) -join "`n"

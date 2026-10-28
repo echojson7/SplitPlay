@@ -37,8 +37,23 @@ internal sealed class DeskRuntime
 
     public DateTimeOffset LastHeartbeat { get; set; }
 
-    /// <summary>The control connection while a child is connected (used for requests).</summary>
+    /// <summary>The worker's control connection while it is connected (used for pair, list_clients, …).</summary>
     public IpcConnection? Connection { get; set; }
+
+    /// <summary>The seat while it runs. It outlives worker restarts and is replaced only when it fails.</summary>
+    public ChildChannel? Seat { get; set; }
+
+    /// <summary>Cancelled when the seat's session ends (stops the per-session janitor).</summary>
+    public CancellationTokenSource? SeatScope { get; set; }
+
+    /// <summary>Set to end the current worker run without a worker fault (e.g. the session changed after a reconnect).</summary>
+    public TaskCompletionSource<string>? WorkerAbort { get; set; }
+
+    /// <summary>The seat reported <c>session_lost</c> and has not reported <c>session_restored</c> yet.</summary>
+    public bool SessionLost { get; set; }
+
+    /// <summary>The one-time relogon after the first keyboard layout copy has been done in this run.</summary>
+    public bool RelogonDone { get; set; }
 
     public CancellationTokenSource? RunCts { get; set; }
 
@@ -47,8 +62,20 @@ internal sealed class DeskRuntime
     /// <summary>True while the run loop owns the desk (set by Start, cleared by the loop when it ends).</summary>
     public bool Running { get; set; }
 
-    /// <summary>Launch attempts since the last start.</summary>
+    /// <summary>Worker launch attempts since the last start.</summary>
     public int Attempt { get; set; }
+
+    /// <summary>Seat launches since the service started (a field for <see cref="Interlocked"/>).</summary>
+    public int SeatAttempts;
+
+    /// <summary>True when a password for the desk user is stored (mirrors the secret file; updated by the supervisor).</summary>
+    public bool HasPassword { get; set; }
+
+    /// <summary>A non-fatal provisioning problem (e.g. the picked account's password can expire), shown as lastError.</summary>
+    public string? Warning { get; set; }
+
+    /// <summary>The profile's resolution changed while running and the seat could not resize the session.</summary>
+    public bool ResolutionPendingRestart { get; set; }
 
     public DeskDto ToDto()
     {
@@ -59,14 +86,19 @@ internal sealed class DeskRuntime
                 Id = Config.Id,
                 Name = Config.Name,
                 User = Config.User,
+                UserManaged = Config.UserManaged,
+                HasPassword = HasPassword,
+                ResolutionPendingRestart = ResolutionPendingRestart,
                 State = Machine.State,
                 SessionId = SessionId,
                 BasePort = Config.BasePort,
                 Autostart = Config.Autostart,
                 Gpu = Config.Gpu,
                 Profile = Config.Profile,
+                DisableBluetoothUserService = Config.DisableBluetoothUserService,
+                WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,
-                LastError = Machine.LastError,
+                LastError = Machine.LastError ?? Warning,
             };
         }
     }

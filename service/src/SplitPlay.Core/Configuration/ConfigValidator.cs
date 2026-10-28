@@ -32,6 +32,12 @@ public static partial class ConfigValidator
     [GeneratedRegex("^0x[0-9a-fA-F]{1,16}$", RegexOptions.CultureInvariant)]
     private static partial Regex LuidRegex();
 
+    [GeneratedRegex("^[A-Za-z0-9_.-]{1,64}$", RegexOptions.CultureInvariant)]
+    private static partial Regex WorkerSettingNameRegex();
+
+    /// <summary>Worker settings the service sets itself (from other desk fields); they cannot be overridden.</summary>
+    public static readonly IReadOnlySet<string> ReservedWorkerSettings = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "port" };
+
     /// <summary>True if <paramref name="id"/> is a valid desk id (<c>[a-z0-9-]{1,32}</c>).</summary>
     public static bool IsValidDeskId(string? id) => id is not null && DeskIdRegex().IsMatch(id);
 
@@ -198,6 +204,26 @@ public static partial class ConfigValidator
         if (desk.Gpu is null || (desk.Gpu != "auto" && !LuidRegex().IsMatch(desk.Gpu)))
         {
             errors.Add(new($"{path}.gpu", "must be \"auto\" or an adapter LUID \"0x…\""));
+        }
+
+        if (desk.WorkerSettings is not null)
+        {
+            foreach (var (name, value) in desk.WorkerSettings)
+            {
+                if (!WorkerSettingNameRegex().IsMatch(name ?? ""))
+                {
+                    errors.Add(new($"{path}.workerSettings", $"'{name}': names must match [A-Za-z0-9_.-]{{1,64}}"));
+                }
+                else if (ReservedWorkerSettings.Contains(name!))
+                {
+                    errors.Add(new($"{path}.workerSettings.{name}", "is set by the service (from basePort) and cannot be overridden"));
+                }
+
+                if (value is null || value.Length > 1024 || value.Any(char.IsControl))
+                {
+                    errors.Add(new($"{path}.workerSettings.{name}", "must be a string of at most 1024 characters without control characters"));
+                }
+            }
         }
 
         if (desk.Profile is null)

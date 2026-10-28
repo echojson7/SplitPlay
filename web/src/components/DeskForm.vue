@@ -2,7 +2,7 @@
 <!-- Create/edit form for a desk config (docs/contracts/config.md `desks[]`). -->
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { CODECS, GPU_PRIORITIES, type DeskConfig, type GpuInfo } from '../api/types'
+import { CODECS, GPU_PRIORITIES, type DeskConfig, type GpuInfo, type HostUser } from '../api/types'
 import { FPS_MAX, FPS_MIN, hasErrors, validateDeskConfig, type DeskConfigErrors } from '../api/validate'
 import { t } from '../i18n'
 
@@ -14,8 +14,12 @@ const props = withDefaults(
     gpus?: GpuInfo[]
     existingIds?: string[]
     busy?: boolean
+    /** Local accounts from GET /host/users; empty = the list is unknown and the user is typed. */
+    users?: HostUser[]
+    /** The desk already has a stored password (edit). */
+    hasPassword?: boolean
   }>(),
-  { initial: null, running: false, gpus: () => [], existingIds: () => [], busy: false },
+  { initial: null, running: false, gpus: () => [], existingIds: () => [], busy: false, users: () => [], hasPassword: false },
 )
 const emit = defineEmits<{ submit: [config: DeskConfig]; cancel: [] }>()
 
@@ -64,6 +68,30 @@ const form = reactive({
 // Fields the form does not edit (dpbFrames, pacingMbps, …) are kept as they were.
 const passthrough = { ...init.profile }
 
+// ---- Windows user: an existing local account from the list (its password is required) or a new name.
+const NEW_USER = '\u0000new'
+const password = ref('')
+function findUser(name: string): HostUser | undefined {
+  const n = name.trim().toLowerCase()
+  return props.users.find((u) => u.name.toLowerCase() === n)
+}
+const userPick = ref<string>(
+  props.users.length === 0 ? NEW_USER : (findUser(form.user)?.name ?? (editing.value && form.user ? form.user : NEW_USER)),
+)
+const pickedExisting = computed(() => props.users.length > 0 && userPick.value !== NEW_USER)
+/** The chosen name is an existing account (picked, or typed and found in the list). */
+const existingUser = computed(() => (pickedExisting.value ? true : findUser(form.user) !== undefined))
+const userChanged = computed(() => !editing.value || form.user.trim().toLowerCase() !== (init.user ?? '').toLowerCase())
+const passwordRequired = computed(() => existingUser.value && (userChanged.value || !props.hasPassword))
+function onUserPick(): void {
+  if (userPick.value !== NEW_USER) form.user = userPick.value
+  else if (findUser(form.user)) form.user = ''
+}
+const passwordHint = computed(() => {
+  if (existingUser.value) return props.hasPassword && !userChanged.value ? t('form.passwordKeep') : t('form.passwordExisting')
+  return t('form.passwordNew')
+})
+
 const resolutionKey = ref(
   RESOLUTIONS.some(([w, h]) => w === form.width && h === form.height) ? `${form.width}x${form.height}` : 'custom',
 )
@@ -100,9 +128,23 @@ function toConfig(): DeskConfig {
     gpu: form.gpu,
     profile,
   }
+  if (init.disableBluetoothUserService !== undefined) config.disableBluetoothUserService = init.disableBluetoothUserService
+  if (init.workerSettings) config.workerSettings = { ...init.workerSettings }
   if (port !== '') config.basePort = Number(port)
+  if (password.value !== '') config.password = password.value
   return config
 }
+
+const consoleUserPicked = computed(() => {
+  const u = findUser(form.user)
+  return u?.isConsoleUser === true
+})
+const passwordError = computed(() =>
+  submitted.value && passwordRequired.value && password.value === '' ? t('form.err.passwordRequired') : null,
+)
+const resolutionChanged = computed(
+  () => editing.value && (Number(form.width) !== init.profile.width || Number(form.height) !== init.profile.height),
+)
 
 const errors = computed<DeskConfigErrors>(() =>
   validateDeskConfig(
@@ -119,6 +161,7 @@ function err(field: keyof DeskConfigErrors): string | null {
 function submit(): void {
   submitted.value = true
   if (hasErrors(errors.value) || props.busy) return
+  if ((passwordRequired.value && password.value === '') || consoleUserPicked.value) return
   emit('submit', toConfig())
 }
 
@@ -157,19 +200,52 @@ const gpuOptions = computed(() => {
         <span v-if="err('name')" class="error">{{ err('name') }}</span>
       </div>
       <div class="field">
-        <label for="desk-user">{{ t('form.user') }}</label>
+        <label :for="users.length ? 'desk-user-pick' : 'desk-user'">{{ t('form.user') }}</label>
+        <select
+          v-if="users.length"
+          id="desk-user-pick"
+          v-model="userPick"
+          name="userPick"
+          :disabled="locked"
+          @change="onUserPick"
+        >
+          <option v-for="u in users" :key="u.name" :value="u.name" :disabled="u.isConsoleUser">
+            {{ u.fullName ? `${u.name} (${u.fullName})` : u.name }}{{ u.isConsoleUser ? ` — ${t('form.userConsole')}` : '' }}{{
+              u.isAdmin ? ` — ${t('form.userAdmin')}` : ''
+            }}
+          </option>
+          <option :value="NEW_USER">{{ t('form.userNew') }}</option>
+        </select>
         <input
+          v-if="!pickedExisting"
           id="desk-user"
           v-model="form.user"
           name="user"
           maxlength="20"
           autocomplete="off"
           spellcheck="false"
+          :placeholder="users.length ? t('form.userNewPlaceholder') : ''"
           :disabled="locked"
           :aria-invalid="!!err('user')"
         />
         <span v-if="err('user')" class="error">{{ err('user') }}</span>
-        <span v-else class="hint">{{ t('form.userHint') }}</span>
+        <span v-else-if="consoleUserPicked" class="error">{{ t('form.err.consoleUser') }}</span>
+        <span v-else class="hint">{{ existingUser ? t('form.userExistingHint') : t('form.userHint') }}</span>
+      </div>
+      <div class="field">
+        <label for="desk-password">{{ t('form.password') }}</label>
+        <input
+          id="desk-password"
+          v-model="password"
+          name="password"
+          type="password"
+          maxlength="256"
+          autocomplete="off"
+          :required="passwordRequired"
+          :aria-invalid="!!passwordError"
+        />
+        <span v-if="passwordError" class="error">{{ passwordError }}</span>
+        <span v-else class="hint">{{ passwordHint }}</span>
       </div>
       <div class="field">
         <label for="desk-gpu">{{ t('form.gpu') }}</label>
@@ -212,6 +288,7 @@ const gpuOptions = computed(() => {
           <input v-model.number="form.height" name="height" type="number" min="240" max="4320" :aria-label="t('form.height')" />
         </div>
         <span v-if="err('resolution')" class="error">{{ err('resolution') }}</span>
+        <span v-else-if="running && resolutionChanged" class="hint">{{ t('form.resolutionRunning') }}</span>
       </div>
       <div class="field">
         <label for="desk-fps">{{ t('form.fps') }}</label>

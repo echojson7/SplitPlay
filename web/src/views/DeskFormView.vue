@@ -3,7 +3,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { api, deskToConfig } from '../api/client'
-import type { DeskConfig } from '../api/types'
+import type { DeskConfig, HostUser } from '../api/types'
 import DeskForm from '../components/DeskForm.vue'
 import { errorText, isRunning } from '../composables'
 import { t } from '../i18n'
@@ -16,6 +16,7 @@ const s = store.state
 const loaded = ref(false)
 const error = ref<string | null>(null)
 const busy = ref(false)
+const users = ref<HostUser[]>([])
 const desk = computed(() => (props.id ? (s.desks.find((d) => d.id === props.id) ?? null) : null))
 const initial = computed<DeskConfig | null>(() => (desk.value ? deskToConfig(desk.value) : null))
 
@@ -24,6 +25,11 @@ onMounted(async () => {
     await Promise.all([
       props.id ? api.getDesk(props.id).then(store.upsertDesk) : store.refreshDesks(),
       store.refreshMetrics().catch(() => undefined),
+      // Without the list the user name is typed (older service, or not allowed).
+      api
+        .listHostUsers()
+        .then((list) => (users.value = list))
+        .catch(() => undefined),
     ])
   } catch (e) {
     error.value = errorText(e)
@@ -64,6 +70,8 @@ function cancel(): void {
       :gpus="s.metrics?.host.gpus ?? []"
       :existing-ids="s.desks.map((d) => d.id)"
       :busy="busy"
+      :users="users"
+      :has-password="desk?.hasPassword ?? false"
       @submit="save"
       @cancel="cancel"
     />

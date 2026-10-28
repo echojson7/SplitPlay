@@ -1,22 +1,34 @@
 # SPDX-License-Identifier: MIT
 <#
 .SYNOPSIS
-  Smoke test for the published service, CLI and tray (run elevated on Windows; used by CI).
+  Smoke and end-to-end test for the published service, CLI and tray (run elevated on Windows; used by CI).
 
 .DESCRIPTION
-  1. Starts SplitPlay.Service.exe in console mode with the "fake-child" stand-in as desk child, checks
-     GET /api/v1/health and drives a desk through create / start / stop / export / import / delete via splitplay.exe.
-  2. Installs the Windows service with "splitplay service install", checks the SCM configuration
-     (delayed auto start, restart on failure), starts it, queries health, stops and uninstalls it.
-  3. Runs SplitPlay.Tray.exe --smoke-test.
+  1. Host preparation: "splitplay host prepare --skip-termwrap" (never swaps the runner's TermService DLL), checks
+     "host status" and the registry, and at the very end "host revert" restores the previous values.
+  2. Console mode with the real Windows platform: a desk whose user name contains spaces is provisioned for real
+     (local account, Users + Remote Desktop Users by SID, password never expires, DPAPI secret that logs on,
+     firewall rules), runs the "fake-child" stand-in with the real worker command line, survives export/import and
+     is deleted together with its account.
+  3. The Windows service (LocalSystem): registration checks, then a desk whose worker is launched into the console
+     session with the duplicated SYSTEM token (CreateProcessAsUser + TokenSessionId) and a job object; a killed
+     worker is relaunched.
+  4. If -Native points at a native build with splitplay-seat.exe: the real seat opens a loopback RDP session for a
+     fresh desk user and the worker runs inside that session; stop logs the session off. A Stage 2 seat (null RDP
+     connector) is reported and skipped.
+  5. SplitPlay.Tray.exe --smoke-test.
 
 .PARAMETER Publish
   Folder with service\, cli\ and tray\ (the service-win-x64 artifact).
+
+.PARAMETER Native
+  Optional folder with the native build (splitplay-seat.exe), e.g. the native-win-x64 artifact.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Publish,
     [string]$Work = (Join-Path ([IO.Path]::GetTempPath()) "splitplay-smoke"),
-    [int]$Port = 38299
+    [int]$Port = 38299,
+    [string]$Native = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -31,6 +43,10 @@ foreach ($f in @($svc, $cli, $tray)) { if (-not (Test-Path $f)) { throw "missing
 
 if (Test-Path $Work) { Remove-Item $Work -Recurse -Force }
 New-Item -ItemType Directory -Path $Work | Out-Null
+$programData = Join-Path $env:ProgramData 'SplitPlay'
+$consoleData = Join-Path $Work 'console-data'
+$tsKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
+$serviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\SplitPlay'
 
 function Step([string]$text) { Write-Host "`n=== $text" -ForegroundColor Cyan }
 
@@ -61,89 +77,316 @@ function Wait-PortFree([int]$Seconds) {
     }
 }
 
-# --------------------------------------------------------------------------- console mode
-Step 'console mode: start'
-$data = Join-Path $Work 'console-data'
-$serviceArgs = @(
-    '--console',
-    '--data-root', "`"$data`"",
-    '--Supervisor:Launcher=process',
-    "`"--Supervisor:ChildExecutable=$svc`"",
-    '--Supervisor:ChildArguments=fake-child'
-)
-$proc = Start-Process -FilePath $svc -ArgumentList $serviceArgs -PassThru -NoNewWindow `
-    -RedirectStandardOutput (Join-Path $Work 'console.out.log') -RedirectStandardError (Join-Path $Work 'console.err.log')
-try {
-    $health = Wait-Health 60
-    Write-Host "health: $($health | ConvertTo-Json -Compress)"
-    if ($health.version -ne '0.1.0') { throw "unexpected version $($health.version)" }
+function Get-Desk([string]$id) { Invoke-RestMethod -Uri "$base/desks/$id" }
 
-    Step 'console mode: desk lifecycle via CLI'
-    Invoke-Cli desk create smoke-1 --name "Smoke test" --fps 60 --codec hevc
-    Invoke-Cli desk list
-    Invoke-Cli desk start smoke-1 --wait --timeout 60
-    $desk = Invoke-RestMethod -Uri "$base/desks/smoke-1"
-    if ($desk.state -ne 'Ready') { throw "desk state is $($desk.state), expected Ready ($($desk.lastError))" }
-    Invoke-Cli desk show smoke-1 --json
-    Invoke-Cli desk stop smoke-1 --wait --timeout 30
-    $desk = Invoke-RestMethod -Uri "$base/desks/smoke-1"
-    if ($desk.state -ne 'Stopped') { throw "desk state is $($desk.state), expected Stopped" }
-
-    Step 'console mode: config export / import'
-    $zip = Join-Path $Work 'config.zip'
-    Invoke-Cli config export $zip
-    Invoke-Cli desk delete smoke-1
-    Invoke-Cli config import $zip
-    $desks = @(Invoke-RestMethod -Uri "$base/desks")
-    if ($desks.Count -ne 1 -or $desks[0].id -ne 'smoke-1') { throw "import did not restore smoke-1" }
-    Invoke-Cli desk delete smoke-1
-
-    $metrics = Invoke-RestMethod -Uri "$base/metrics"
-    Write-Host "metrics: $($metrics | ConvertTo-Json -Compress -Depth 5)"
-    $index = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing
-    if ($index.Content -notmatch '<title>SplitPlay</title>') { throw 'placeholder index.html not served' }
-} finally {
-    if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
-    $proc.WaitForExit(10000) | Out-Null
-    Get-Content (Join-Path $Work 'console.out.log') -ErrorAction SilentlyContinue | Select-Object -Last 40
+function Wait-Desk([string]$id, [scriptblock]$until, [int]$seconds, [string]$what) {
+    $deadline = (Get-Date).AddSeconds($seconds)
+    while ($true) {
+        $d = Get-Desk $id
+        if (& $until $d) { return $d }
+        if ((Get-Date) -gt $deadline) { throw "desk $id did not reach $what within $seconds s: state $($d.state), lastError $($d.lastError)" }
+        Start-Sleep -Milliseconds 500
+    }
 }
-Wait-PortFree 30
 
-# --------------------------------------------------------------------------- Windows service
-Step 'service: install'
-Invoke-Cli service install
+# Desk user checks. Groups are compared by SID: the names are localized.
+function Assert-DeskUser([string]$user, [string]$deskId, [string]$dataRoot) {
+    $u = Get-LocalUser -Name $user -ErrorAction SilentlyContinue
+    if (-not $u) { throw "local user '$user' was not created" }
+    if (-not $u.Enabled) { throw "local user '$user' is disabled" }
+    if ($null -ne $u.PasswordExpires) { throw "password of '$user' expires ($($u.PasswordExpires)); UF_DONT_EXPIRE_PASSWD missing" }
+    if ($u.Description -notlike 'SplitPlay desk account*') { throw "unexpected comment on '$user': $($u.Description)" }
+    foreach ($group in 'S-1-5-32-545', 'S-1-5-32-555') {
+        $members = @(Get-LocalGroupMember -SID $group | Where-Object { $_.SID -eq $u.SID })
+        if ($members.Count -ne 1) { throw "'$user' is not a member of $group" }
+    }
+    $secret = Join-Path $dataRoot "secrets\desks\$deskId.bin"
+    if (-not (Test-Path $secret)) { throw "secret $secret missing" }
+
+    # The stored password is DPAPI LocalMachine protected and must log the user on (Windows PowerShell has both APIs).
+    $check = @"
+Add-Type -AssemblyName System.Security
+Add-Type -AssemblyName System.DirectoryServices.AccountManagement
+`$bytes = [IO.File]::ReadAllBytes('$secret')
+`$entropy = [Text.Encoding]::UTF8.GetBytes('SplitPlay.desk.$deskId')
+`$plain = [Security.Cryptography.ProtectedData]::Unprotect(`$bytes, `$entropy, 'LocalMachine')
+`$password = [Text.Encoding]::UTF8.GetString(`$plain)
+if (`$password.Length -ne 32) { exit 3 }
+`$ctx = New-Object System.DirectoryServices.AccountManagement.PrincipalContext('Machine')
+if (`$ctx.ValidateCredentials('$user', `$password)) { exit 0 } else { exit 4 }
+"@
+    & powershell.exe -NoProfile -NonInteractive -Command $check
+    if ($LASTEXITCODE -ne 0) { throw "the stored password of '$user' does not work (check exit $LASTEXITCODE)" }
+    Write-Host "  user '$user': created, groups by SID, password never expires, DPAPI secret logs on"
+}
+
+function Assert-FirewallRules([string]$deskId, [bool]$present) {
+    foreach ($proto in 'TCP', 'UDP') {
+        $rule = Get-NetFirewallRule -DisplayName "SplitPlay desk $deskId ($proto)" -ErrorAction SilentlyContinue
+        if ($present -and -not $rule) { throw "firewall rule for $deskId ($proto) missing" }
+        if (-not $present -and $rule) { throw "firewall rule for $deskId ($proto) still present" }
+    }
+}
+
+function Get-FakeChildren {
+    # "<exe> fake-child ...", not the console-mode service whose "--Supervisor:WorkerArguments=fake-child" has the word too.
+    @(Get-CimInstance Win32_Process -Filter "Name = 'SplitPlay.Service.exe'" | Where-Object { $_.CommandLine -match '\.exe"?\s+fake-child\s' })
+}
+
+function Set-ServiceEnvironment([string[]]$values) {
+    Set-ItemProperty -Path $serviceKey -Name Environment -Type MultiString -Value $values
+}
+
+$fDenyBefore = (Get-ItemProperty -Path $tsKey -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections
+Write-Host "fDenyTSConnections before: $fDenyBefore"
+
+# --------------------------------------------------------------------------- host preparation
+Step 'host prepare --skip-termwrap'
+$dllBefore = (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters').ServiceDll
+Invoke-Cli host prepare --skip-termwrap
+Invoke-Cli --data-root $consoleData host prepare --skip-termwrap
+Invoke-Cli host status
+if ((Get-ItemProperty -Path $tsKey).fDenyTSConnections -ne 0) { throw 'fDenyTSConnections is not 0 after prepare' }
+if ((Get-ItemProperty "$tsKey\WinStations\RDP-Tcp").UserAuthentication -ne 1) { throw 'NLA is not required after prepare' }
+if ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters').ServiceDll -ne $dllBefore) { throw 'ServiceDll changed despite --skip-termwrap' }
+if (-not (Test-Path (Join-Path $programData 'host-tuning.json'))) { throw 'host-tuning.json not written' }
+
 try {
-    $qc = (& sc.exe qc SplitPlay) -join "`n"
-    Write-Host $qc
-    if ($qc -notmatch 'AUTO_START\s+\(DELAYED\)') { throw 'service is not delayed auto start' }
-    if ($qc -notmatch 'SplitPlay Host Service') { throw 'unexpected display name' }
-    if ($qc -notmatch 'LocalSystem') { throw 'service does not run as LocalSystem' }
-    $qf = (& sc.exe qfailure SplitPlay) -join "`n"
-    Write-Host $qf
-    if ($qf -notmatch 'RESTART') { throw 'no restart recovery action' }
+    # ----------------------------------------------------------------------- console mode
+    Step 'console mode: start (real accounts, no seat, fake-child worker with the real command line)'
+    $serviceArgs = @(
+        '--console',
+        '--data-root', "`"$consoleData`"",
+        '--Supervisor:Launcher=process',
+        '--Supervisor:Seat=none',
+        "`"--Supervisor:WorkerExecutable=$svc`"",
+        '--Supervisor:WorkerArguments=fake-child'
+    )
+    $proc = Start-Process -FilePath $svc -ArgumentList $serviceArgs -PassThru -NoNewWindow `
+        -RedirectStandardOutput (Join-Path $Work 'console.out.log') -RedirectStandardError (Join-Path $Work 'console.err.log')
+    try {
+        $health = Wait-Health 60
+        Write-Host "health: $($health | ConvertTo-Json -Compress)"
+        if ($health.version -ne '0.1.0') { throw "unexpected version $($health.version)" }
 
-    # Installing again updates the existing registration.
+        Step 'console mode: desk lifecycle via CLI, user name with spaces'
+        Invoke-Cli desk create smoke-1 --name "Smoke test" --user "smoke desk 1" --fps 60 --codec hevc
+        Invoke-Cli desk list
+        Invoke-Cli desk start smoke-1 --wait --timeout 60
+        $desk = Get-Desk 'smoke-1'
+        if ($desk.state -ne 'Ready') { throw "desk state is $($desk.state), expected Ready ($($desk.lastError))" }
+        Assert-DeskUser 'smoke desk 1' 'smoke-1' $consoleData
+        Assert-FirewallRules 'smoke-1' $true
+        $children = Get-FakeChildren
+        if ($children.Count -ne 1) { throw "expected one fake-child worker, found $($children.Count)" }
+        if ($children[0].CommandLine -notmatch '--desk-dir' -or $children[0].CommandLine -notmatch 'port=48089') {
+            throw "worker command line lacks --desk-dir/port=: $($children[0].CommandLine)"
+        }
+        Invoke-Cli desk show smoke-1 --json
+        Invoke-Cli desk stop smoke-1 --wait --timeout 30
+        $desk = Get-Desk 'smoke-1'
+        if ($desk.state -ne 'Stopped') { throw "desk state is $($desk.state), expected Stopped" }
+
+        Step 'console mode: config export / import'
+        $zip = Join-Path $Work 'config.zip'
+        Invoke-Cli config export $zip
+        Invoke-Cli desk delete smoke-1
+        if (-not (Get-LocalUser -Name 'smoke desk 1' -ErrorAction SilentlyContinue)) { throw 'desk delete without --delete-user removed the account' }
+        Invoke-Cli config import $zip
+        $desks = @(Invoke-RestMethod -Uri "$base/desks")
+        if ($desks.Count -ne 1 -or $desks[0].id -ne 'smoke-1') { throw "import did not restore smoke-1" }
+
+        # The secret went with the first delete: the next start rotates the password of the existing account.
+        Invoke-Cli desk start smoke-1 --wait --timeout 60
+        Assert-DeskUser 'smoke desk 1' 'smoke-1' $consoleData
+        Invoke-Cli desk stop smoke-1 --wait --timeout 30
+
+        Step 'console mode: delete with the Windows account'
+        Invoke-Cli desk delete smoke-1 --delete-user
+        if (Get-LocalUser -Name 'smoke desk 1' -ErrorAction SilentlyContinue) { throw 'the desk account still exists' }
+        if (Test-Path (Join-Path $consoleData 'secrets\desks\smoke-1.bin')) { throw 'the desk secret still exists' }
+        Assert-FirewallRules 'smoke-1' $false
+
+        Step 'console mode: an existing Windows user with the owner''s password'
+        $existing = 'smoke owner2'
+        $existingPassword = 'Sm0ke-' + [guid]::NewGuid().ToString('N').Substring(0, 16) + '!'
+        Get-LocalUser -Name $existing -ErrorAction SilentlyContinue | Remove-LocalUser
+        New-LocalUser -Name $existing -Password (ConvertTo-SecureString $existingPassword -AsPlainText -Force) -Description 'owner account' | Out-Null
+        try {
+            $before = Get-LocalUser -Name $existing
+            # A wrong password is refused (400 validation_failed) and nothing is created.
+            'wrong-password' | & $cli desk create smoke-4 --user $existing --password-stdin
+            if ($LASTEXITCODE -eq 0) { throw 'desk create accepted a wrong password' }
+            $existingPassword | & $cli desk create smoke-4 --user $existing --password-stdin
+            if ($LASTEXITCODE -ne 0) { throw "desk create with the right password failed ($LASTEXITCODE)" }
+            $desk = Get-Desk 'smoke-4'
+            if ($desk.userManaged -ne $false -or $desk.hasPassword -ne $true) { throw "unexpected userManaged/hasPassword: $($desk | ConvertTo-Json -Compress)" }
+            if ((Get-Content (Join-Path $consoleData 'config.json') -Raw) -match [regex]::Escape($existingPassword)) { throw 'the password reached config.json' }
+            Invoke-Cli desk start smoke-4 --wait --timeout 60
+            $desk = Get-Desk 'smoke-4'
+            if ($desk.state -ne 'Ready') { throw "desk state is $($desk.state) ($($desk.lastError))" }
+            if ("$($desk.lastError)" -notmatch 'can expire') { throw "expected a password-expiry warning, got '$($desk.lastError)'" }
+            $after = Get-LocalUser -Name $existing
+            if ($after.Description -ne 'owner account' -or $after.PasswordExpires -ne $before.PasswordExpires -or $after.PasswordLastSet -ne $before.PasswordLastSet) {
+                throw 'SplitPlay changed the existing account'
+            }
+            if (-not @(Get-LocalGroupMember -SID 'S-1-5-32-555' | Where-Object { $_.SID -eq $after.SID })) { throw 'not added to Remote Desktop Users' }
+            Invoke-Cli desk stop smoke-4 --wait --timeout 30
+            & $cli desk delete smoke-4 --delete-user
+            if ($LASTEXITCODE -eq 0) { throw 'delete --delete-user removed an account SplitPlay did not create' }
+            if (-not (Get-LocalUser -Name $existing -ErrorAction SilentlyContinue)) { throw 'the existing account was deleted' }
+            Invoke-Cli desk delete smoke-4
+            $global:LASTEXITCODE = 0
+        } finally {
+            Remove-LocalUser -Name $existing -ErrorAction SilentlyContinue
+        }
+
+        $metrics = Invoke-RestMethod -Uri "$base/metrics"
+        Write-Host "metrics: $($metrics | ConvertTo-Json -Compress -Depth 5)"
+        $index = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing
+        if ($index.Content -notmatch '<title>SplitPlay</title>') { throw 'placeholder index.html not served' }
+    } finally {
+        if (-not $proc.HasExited) { Stop-Process -Id $proc.Id -Force }
+        $proc.WaitForExit(10000) | Out-Null
+        Get-Content (Join-Path $Work 'console.out.log') -ErrorAction SilentlyContinue | Select-Object -Last 60
+    }
+    Wait-PortFree 30
+
+    # ----------------------------------------------------------------------- Windows service
+    Step 'service: install'
     Invoke-Cli service install
+    try {
+        $qc = (& sc.exe qc SplitPlay) -join "`n"
+        Write-Host $qc
+        if ($qc -notmatch 'AUTO_START\s+\(DELAYED\)') { throw 'service is not delayed auto start' }
+        if ($qc -notmatch 'SplitPlay Host Service') { throw 'unexpected display name' }
+        if ($qc -notmatch 'LocalSystem') { throw 'service does not run as LocalSystem' }
+        $qf = (& sc.exe qfailure SplitPlay) -join "`n"
+        Write-Host $qf
+        if ($qf -notmatch 'RESTART') { throw 'no restart recovery action' }
 
-    Step 'service: start and health'
-    Invoke-Cli service start --timeout 90
-    $health = Wait-Health 60
-    Write-Host "health: $($health | ConvertTo-Json -Compress)"
-    Invoke-Cli service status
+        # Installing again updates the existing registration.
+        Invoke-Cli service install
 
-    Step 'service: stop'
-    Invoke-Cli service stop --timeout 60
-    Invoke-Cli service status
+        Step 'service: worker launched into the console session as SYSTEM (no seat)'
+        Set-ServiceEnvironment @(
+            'Supervisor__Seat=none',
+            'Supervisor__WorkerSession=console',
+            "Supervisor__WorkerExecutable=$svc",
+            'Supervisor__WorkerArguments=fake-child',
+            'Supervisor__Autostart=false'
+        )
+        Invoke-Cli service start --timeout 90
+        $health = Wait-Health 60
+        Write-Host "health: $($health | ConvertTo-Json -Compress)"
+        Invoke-Cli service status
+
+        Invoke-Cli desk create smoke-2 --user splitplay-smoke2
+        Invoke-Cli desk start smoke-2 --wait --timeout 90
+        $desk = Get-Desk 'smoke-2'
+        if ($desk.state -ne 'Ready') { throw "desk state is $($desk.state), expected Ready ($($desk.lastError))" }
+        Assert-DeskUser 'splitplay-smoke2' 'smoke-2' $programData
+        $children = Get-FakeChildren
+        if ($children.Count -ne 1) { throw "expected one fake-child worker, found $($children.Count)" }
+        $child = $children[0]
+        $owner = Invoke-CimMethod -InputObject $child -MethodName GetOwner
+        Write-Host "worker pid $($child.ProcessId) session $($child.SessionId) owner $($owner.Domain)\$($owner.User); desk sessionId $($desk.sessionId)"
+        if ($child.SessionId -eq 0) { throw 'the worker runs in session 0, expected the console session' }
+        if ($child.SessionId -ne $desk.sessionId) { throw "worker session $($child.SessionId) differs from desk sessionId $($desk.sessionId)" }
+        if ($owner.User -ne 'SYSTEM') { throw "the worker runs as $($owner.User), expected SYSTEM" }
+
+        Step 'service: a killed worker is relaunched in the same session'
+        Stop-Process -Id $child.ProcessId -Force
+        $desk = Wait-Desk 'smoke-2' { param($d) $d.state -eq 'Ready' -and @(Get-FakeChildren | Where-Object { $_.ProcessId -ne $child.ProcessId }).Count -eq 1 } 60 'a relaunched worker'
+        $again = @(Get-FakeChildren)[0]
+        if ($again.SessionId -ne $child.SessionId) { throw "relaunched worker is in session $($again.SessionId)" }
+
+        Invoke-Cli desk stop smoke-2 --wait --timeout 30
+        Start-Sleep -Seconds 1
+        if ((Get-FakeChildren).Count -ne 0) { throw 'worker still running after stop (job object not closed?)' }
+        Invoke-Cli desk delete smoke-2 --delete-user
+        if (Get-LocalUser -Name 'splitplay-smoke2' -ErrorAction SilentlyContinue) { throw 'the smoke-2 account still exists' }
+
+        # ------------------------------------------------------------------- real seat (optional)
+        $seatExe = if ($Native) { Join-Path $Native 'splitplay-seat.exe' } else { '' }
+        if ($seatExe -and (Test-Path $seatExe)) {
+            # The native seat comes from another branch's latest build and may lag behind: a failure here is
+            # reported as a warning (and in the step summary) instead of failing the service build.
+            try {
+                Step "service: real seat from $Native"
+                Invoke-Cli service stop --timeout 60
+                Set-ServiceEnvironment @(
+                    'Supervisor__Seat=real',
+                    "Supervisor__SeatExecutable=$seatExe",
+                    "Supervisor__WorkerExecutable=$svc",
+                    'Supervisor__WorkerArguments=fake-child',
+                    'Supervisor__Autostart=false'
+                )
+                Invoke-Cli service start --timeout 90
+                Wait-Health 60 | Out-Null
+                Invoke-Cli desk create smoke-3 --user splitplay-smoke3
+                & $cli desk start smoke-3 --wait --timeout 240
+                $desk = Get-Desk 'smoke-3'
+                Write-Host "desk: $($desk | ConvertTo-Json -Compress -Depth 5)"
+                if ($desk.state -eq 'Faulted' -and "$($desk.lastError)" -match "connector '(null|)'") {
+                    Write-Warning "the native seat has no RDP connector yet (Stage 2 null connector): real-seat check skipped ($($desk.lastError))"
+                    Invoke-Cli desk stop smoke-3 --wait --timeout 60
+                } else {
+                    if ($desk.state -ne 'Ready') { throw "real seat: desk state is $($desk.state) ($($desk.lastError))" }
+                    $consoleSession = (Get-Process -Id $PID).SessionId
+                    $children = Get-FakeChildren
+                    if ($children.Count -ne 1) { throw "expected one worker, found $($children.Count)" }
+                    if ($children[0].SessionId -ne $desk.sessionId) { throw "worker session $($children[0].SessionId) is not the desk session $($desk.sessionId)" }
+                    $sessions = (& quser.exe 2>&1) -join "`n"
+                    Write-Host $sessions
+                    if ($sessions -notmatch 'splitplay-smoke3') { throw 'no RDP session for splitplay-smoke3' }
+                    Write-Host "real seat: desk session $($desk.sessionId) (runner session $consoleSession), worker inside it"
+
+                    Invoke-Cli desk stop smoke-3 --wait --timeout 60
+                    $deadline = (Get-Date).AddSeconds(60)
+                    do {
+                        Start-Sleep -Seconds 1
+                        $sessions = (& quser.exe 2>&1) -join "`n"
+                    } until ($sessions -notmatch 'splitplay-smoke3' -or (Get-Date) -gt $deadline)
+                    if ($sessions -match 'splitplay-smoke3') { throw 'the desk session was not logged off on stop' }
+                }
+                Invoke-Cli desk delete smoke-3 --delete-user
+            } catch {
+                $msg = "real-seat check failed: $($_.Exception.Message)"
+                Write-Warning $msg
+                Write-Host "::warning title=real seat::$msg"
+                if ($env:GITHUB_STEP_SUMMARY) { "**Real seat:** $msg" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY }
+                & $cli desk stop smoke-3 --wait --timeout 60 2>&1 | Out-Host
+                & $cli desk delete smoke-3 --delete-user 2>&1 | Out-Host
+                $global:LASTEXITCODE = 0
+            }
+        } else {
+            Write-Warning 'no native build with splitplay-seat.exe given (-Native): real-seat check skipped'
+        }
+
+        Step 'service: stop'
+        Invoke-Cli service stop --timeout 60
+        Invoke-Cli service status
+    } finally {
+        Step 'service: uninstall'
+        & $cli service uninstall
+        $uninstallExit = $LASTEXITCODE
+        $logs = Join-Path $programData 'logs\service.log'
+        if (Test-Path $logs) { Get-Content $logs | Select-Object -Last 60 }
+    }
+    if ($uninstallExit -ne 0) { throw "uninstall exited with $uninstallExit" }
+    & sc.exe query SplitPlay | Out-Null
+    if ($LASTEXITCODE -ne 1060) { throw "service still registered after uninstall (sc query exit $LASTEXITCODE)" }
+    $global:LASTEXITCODE = 0
 } finally {
-    Step 'service: uninstall'
-    & $cli service uninstall
-    $uninstallExit = $LASTEXITCODE
-    $logs = Join-Path $env:ProgramData 'SplitPlay\logs\service.log'
-    if (Test-Path $logs) { Get-Content $logs | Select-Object -Last 20 }
+    Step 'host revert'
+    & $cli --data-root $consoleData host revert
+    & $cli host revert
+    $global:LASTEXITCODE = 0
 }
-if ($uninstallExit -ne 0) { throw "uninstall exited with $uninstallExit" }
-& sc.exe query SplitPlay | Out-Null
-if ($LASTEXITCODE -ne 1060) { throw "service still registered after uninstall (sc query exit $LASTEXITCODE)" }
+$fDenyAfter = (Get-ItemProperty -Path $tsKey -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections
+if ("$fDenyAfter" -ne "$fDenyBefore") { throw "host revert did not restore fDenyTSConnections ($fDenyBefore -> $fDenyAfter)" }
+Invoke-Cli host status --json
 $global:LASTEXITCODE = 0
 
 # --------------------------------------------------------------------------- tray

@@ -40,11 +40,21 @@ Compilation fails with a clear error if a required staged file is missing.
     COPYING                   GPL-3.0 text (required)
     README-source.txt         written source offer / link to the exact source and patch queue
   drivers\                    driver packages (optional; copied to Program Files but not installed in Stage 2)
+  termwrap\                   TermWrap x64 release build (llccd/TermWrap, MIT), installed as the "termwrap" component
+    TermWrap.dll              loaded by TermService in place of termsrv.dll (concurrent sessions)
+    UmWrap.dll                loaded by UmRdpService on Home and Server editions only
+    Zydis.dll                 disassembler used by both
+    EndpWrap.dll              optional; shipped if present but not wired up by SplitPlay
+    LICENSE                   TermWrap's MIT licence (should be staged with the DLLs)
 ```
 
 Required files (checked at compile time): `service\SplitPlay.Service.exe`, `service\splitplay.exe`,
 `tray\SplitPlay.Tray.exe`, `service\wwwroot\index.html`, the three files in `native\`,
-`worker\splitplay-worker.exe` and `worker\COPYING`. The repository's `LICENSE` and `NOTICE.md` are added by the script.
+`worker\splitplay-worker.exe`, `worker\COPYING`, `termwrap\TermWrap.dll` and `termwrap\UmWrap.dll`. The repository's
+`LICENSE` and `NOTICE.md` are added by the script.
+
+`termwrap\` is a top-level stage folder, not part of `native\`: if the native build's artifact carries TermWrap in a
+`termwrap` subfolder, the stage step copies it to `<StageDir>\termwrap`.
 
 ## What the installer does
 
@@ -53,25 +63,43 @@ Required files (checked at compile time): `service\SplitPlay.Service.exe`, `serv
 2. Licence page: a notice that SplitPlay modifies Windows Remote Desktop Services to allow concurrent
    sessions, which violates the Microsoft licence terms for Windows client editions, followed by `LICENSE`.
    English and Russian.
-3. Components: the SplitPlay host (fixed) and a **disabled TermWrap placeholder**: TermWrap is not bundled
-   yet and Remote Desktop Services are not modified by this build.
-4. Installs to `%ProgramFiles%\SplitPlay\{service,tray,native,worker,drivers}`.
+3. Components: the SplitPlay host (fixed) and **TermWrap** (selected by default in both setup types).
+4. Installs to `%ProgramFiles%\SplitPlay\{service,tray,native,worker,drivers,termwrap}`. TermService keeps
+   `TermWrap.dll` loaded, so an upgrade replaces it at the next restart (`restartreplace`).
 5. Creates `%ProgramData%\SplitPlay` (with `desks\` and `logs\`) and replaces its ACL with full control for
    SYSTEM and Administrators only, inherited by everything below.
 6. Adds the firewall rule `SplitPlay Web UI` (TCP 38299 inbound, local subnet, private/domain profiles,
    for `SplitPlay.Service.exe`) **disabled**: by default the web UI listens on loopback only, which the
-   firewall does not filter. The service enables the rule when LAN access is turned on. Per-desk port-range
-   rules will come with multi-desk support.
-7. Runs `splitplay.exe service install` (only if the service is not registered yet) and starts the service.
+   firewall does not filter. The service enables the rule when LAN access is turned on. Per-desk rules
+   (`SplitPlay desk <id> (TCP|UDP)`, the desk's Sunshine ports, private/domain) are created and removed by the service.
+7. Runs `splitplay.exe host prepare` (with `--skip-termwrap` when the TermWrap component is not selected or
+   `/SkipTermWrap=1` is given), before the service starts. It turns Remote Desktop on (`fDenyTSConnections=0`,
+   `fSingleSessionPerUser=0`, NLA on), sets the session policies desks need (no idle or disconnection limits,
+   `bEnumerateHWBeforeSW=1`, `DWMFRAMEINTERVAL` from `host.composeIntervalMs`), sets TermService to start
+   automatically and, with TermWrap, points the `ServiceDll` of TermService (and of UmRdpService on Home and Server
+   editions) at `{app}\termwrap\` exactly as TermWrap's own `Install_termwrap_*.reg` files do. Every previous value
+   is recorded in `%ProgramData%\SplitPlay\host-tuning.json`. When the ServiceDll changed while TermService was
+   running, the command exits with 3010 and setup asks for a restart (`NeedRestart`; `/NORESTART` suppresses it).
+   Until that restart desks go to Faulted with "RDP host not prepared: reboot required". A failure shows a message
+   and setup continues; `splitplay host prepare` can be run again later, and `splitplay host status` shows each item.
+8. Runs `splitplay.exe service install` (only if the service is not registered yet) and starts the service.
    On upgrade the service is stopped before files are replaced and started again afterwards.
-8. Start menu: `SplitPlay` (tray) and `SplitPlay Web UI` (http://127.0.0.1:38299/). Optional task
-   (on by default): start the tray at sign-in for all users (`HKLM\...\Run\SplitPlayTray`).
-9. WebView2: if the Evergreen runtime is missing, downloads Microsoft's bootstrapper and runs it silently.
+9. Start menu: `SplitPlay` (tray) and `SplitPlay Web UI` (http://127.0.0.1:38299/). Optional task
+   (on by default): start the tray at sign-in for all users (`HKLM\...\Run\SplitPlayTray`, value
+   `"...\SplitPlay.Tray.exe" --autostart`). Started from the Start menu or the final "Launch SplitPlay" checkbox,
+   the tray opens its dashboard window; with `--autostart` it stays an icon. A second start brings the running
+   tray's window to the front instead of adding another icon.
+10. WebView2: if the Evergreen runtime is missing, downloads Microsoft's bootstrapper and runs it silently.
    A failed download only shows a warning.
 
 Uninstall stops and removes the service (`splitplay.exe service uninstall`, falling back to `net stop` and
-`sc delete`), closes the tray, removes the firewall rule, shortcuts and autostart entry, and asks whether to
-keep `%ProgramData%\SplitPlay` (silent uninstall keeps it). Windows accounts created for desks are never removed.
+`sc delete`; stopping the service stops every desk and logs its session off), runs `splitplay.exe host revert`
+(restores the exact values recorded in `host-tuning.json`, deleting the ones that did not exist before; when it
+reverted a loaded ServiceDll it exits with 3010 and the uninstaller asks for a restart, and `TermWrap.dll` is deleted
+at that restart), closes the tray, removes the `SplitPlay Web UI` rule and every per-desk `SplitPlay desk *` rule,
+the shortcuts and autostart entry, and asks whether to keep `%ProgramData%\SplitPlay` (silent uninstall keeps it).
+Windows accounts created for desks are not removed by the uninstaller; `splitplay desk delete <id> --delete-user`
+(or `DELETE /api/v1/desks/{id}?deleteUser=true`) removes one together with its stored password.
 
 ## Command-line parameters
 
@@ -81,6 +109,8 @@ Standard Inno Setup switches (`/SILENT`, `/VERYSILENT`, `/SUPPRESSMSGBOXES`, `/L
 |---|---|---|
 | setup | `/AllowUnsupportedOS=1` | skip the Windows version and edition checks (CI, testing) |
 | setup | `/SkipWebView2=1` | never download WebView2 |
+| setup | `/SkipTermWrap=1` | install the TermWrap files but run `host prepare --skip-termwrap` (TermService untouched; CI) |
+| setup | `/COMPONENTS=core` | do not install TermWrap at all |
 | setup | `/TASKS="!trayautostart"` | do not start the tray at sign-in |
 | unins000.exe | `/PurgeData=1` | also delete `%ProgramData%\SplitPlay` |
 
@@ -91,6 +121,16 @@ Standard Inno Setup switches (`/SILENT`, `/VERYSILENT`, `/SUPPRESSMSGBOXES`, `/L
 compiled with the .NET Framework `csc.exe` that ships with Windows; its `service install` registers a real,
 idle `SplitPlay` service), checks that ISCC refuses an empty stage, compiles the installer and runs
 [`ci/Test-Installer.ps1`](ci/Test-Installer.ps1): silent install, upgrade over a running service, uninstall
-keeping data, reinstall and uninstall with `/PurgeData=1`, checking files, service state, firewall rule,
-ProgramData ACL, shortcuts and autostart after every step. The `installer-preview` artifact is the
+keeping data, reinstall without the TermWrap component and uninstall with `/PurgeData=1`, checking files, service
+state, firewall rules (including removal of per-desk rules), ProgramData ACL, shortcuts, the `--autostart` Run value,
+that setup ran `host prepare --skip-termwrap` before starting the service and the uninstaller ran `host revert` (the
+stub records its calls in `%ProgramData%\SplitPlay-ci-stub-calls.log`) and that the runner's TermService
+`ServiceDll` never changes. Every install there uses `/SkipTermWrap=1`. The `installer-preview` artifact is the
 resulting setup built from stub binaries, so it is only good for trying the wizard.
+
+[`ci/Test-EndToEnd.ps1`](ci/Test-EndToEnd.ps1) runs in the integration workflow on the setup built from the real
+artifacts (also with `/SkipTermWrap=1`): it checks the installer's host preparation, switches the service to the stub
+worker without a seat through the service's `Environment` registry value (`Supervisor__Worker=stub`,
+`Supervisor__Seat=none`, `Supervisor__WorkerSession=console`), runs a desk (account provisioning, per-desk firewall
+rules, worker in the console session, crash recovery), deletes it with `--delete-user` and checks that the purging
+uninstall reverted the host settings.

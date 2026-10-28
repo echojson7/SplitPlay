@@ -3,16 +3,19 @@ using System.IO.Compression;
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization.Metadata;
 using System.Text.RegularExpressions;
 using SplitPlay.Core;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Host;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Json;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Hosting;
 using SplitPlay.Service.Logging;
+using SplitPlay.Service.Platform;
 using SplitPlay.Service.Supervision;
 
 namespace SplitPlay.Service.Api;
@@ -137,7 +140,7 @@ public static partial class ApiEndpoints
         // ---- host settings (the "host" object of config.json)
         api.MapGet("/host", (ConfigService config) => Results.Json(config.Snapshot().Host, Ctx.HostConfig));
 
-        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, ILoggerFactory loggers) =>
+        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, IDeskPlatform platform, ILoggerFactory loggers) =>
         {
             var host = await ReadBodyAsync(request, Ctx.HostConfig).ConfigureAwait(false);
             var before = config.Snapshot().Host;
@@ -152,6 +155,18 @@ public static partial class ApiEndpoints
                 loggers.CreateLogger("SplitPlay.Api").LogWarning("host.webPort changed to {Port}; it takes effect after a service restart", saved.WebPort);
             }
 
+            if (saved.ComposeIntervalMs != before.ComposeIntervalMs)
+            {
+                try
+                {
+                    platform.ApplyComposeInterval(saved.ComposeIntervalMs);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HostTuningException or System.Security.SecurityException)
+                {
+                    loggers.CreateLogger("SplitPlay.Api").LogWarning("Could not apply host.composeIntervalMs: {Message}", ex.Message);
+                }
+            }
+
             if (saved.LanAccess != before.LanAccess)
             {
                 await firewall.SetWebUiRuleEnabledAsync(saved.LanAccess).ConfigureAwait(false);
@@ -163,10 +178,12 @@ public static partial class ApiEndpoints
         // ---- desks
         api.MapGet("/desks", (DeskSupervisor s) => Results.Json(s.List().ToList(), Ctx.ListDeskDto));
 
+        api.MapGet("/host/users", (IDeskPlatform platform) => Results.Json(platform.ListUsers().ToList(), Ctx.ListHostUserDto));
+
         api.MapPost("/desks", async (HttpRequest request, DeskSupervisor s) =>
         {
-            var desk = await ReadBodyAsync(request, Ctx.DeskConfig).ConfigureAwait(false);
-            var created = s.Create(desk);
+            var (desk, password) = await ReadDeskBodyAsync(request).ConfigureAwait(false);
+            var created = s.Create(desk, password);
             return Results.Json(created, Ctx.DeskDto, statusCode: StatusCodes.Status201Created);
         });
 
@@ -174,8 +191,8 @@ public static partial class ApiEndpoints
 
         api.MapPut("/desks/{id}", async (string id, HttpRequest request, DeskSupervisor s) =>
         {
-            var desk = await ReadBodyAsync(request, Ctx.DeskConfig).ConfigureAwait(false);
-            return Results.Json(s.Replace(id, desk), Ctx.DeskDto);
+            var (desk, password) = await ReadDeskBodyAsync(request).ConfigureAwait(false);
+            return Results.Json(s.Replace(id, desk, password), Ctx.DeskDto);
         });
 
         api.MapDelete("/desks/{id}", (string id, bool? deleteUser, DeskSupervisor s) =>
@@ -312,6 +329,73 @@ public static partial class ApiEndpoints
         {
             return await JsonSerializer.DeserializeAsync(request.Body, typeInfo, request.HttpContext.RequestAborted).ConfigureAwait(false)
                    ?? throw ApiException.BadRequest("the request body must be a JSON object");
+        }
+        catch (JsonException ex)
+        {
+            throw ApiException.BadRequest($"invalid JSON: {ex.Message}");
+        }
+    }
+
+    /// <summary>Maximum length of a desk user's Windows password in a request (CREDUI_MAX_PASSWORD_LENGTH).</summary>
+    private const int MaxDeskPasswordLength = 256;
+
+    /// <summary>
+    /// A desk create/update body: the desk object plus an optional <c>password</c> (the Windows password of
+    /// <c>user</c>). The password is taken out before the rest is read as <see cref="DeskConfig"/>, so it can never
+    /// reach config.json; server-owned fields (<c>hasPassword</c>) are ignored.
+    /// </summary>
+    private static async Task<(DeskConfig Desk, string? Password)> ReadDeskBodyAsync(HttpRequest request)
+    {
+        if (request.ContentType is not null && !request.ContentType.Contains("json", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ApiException(StatusCodes.Status415UnsupportedMediaType, ApiErrorCodes.BadRequest, "expected application/json");
+        }
+
+        JsonObject body;
+        try
+        {
+            var node = await JsonNode.ParseAsync(request.Body, documentOptions: new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            }, cancellationToken: request.HttpContext.RequestAborted).ConfigureAwait(false);
+            body = node as JsonObject ?? throw ApiException.BadRequest("the request body must be a JSON object");
+        }
+        catch (JsonException ex)
+        {
+            throw ApiException.BadRequest($"invalid JSON: {ex.Message}");
+        }
+
+        string? password = null;
+        if (body.TryGetPropertyValue("password", out var passwordNode))
+        {
+            body.Remove("password");
+            if (passwordNode is not null)
+            {
+                if (passwordNode.GetValueKind() != JsonValueKind.String)
+                {
+                    throw ApiException.Validation("password: must be a string");
+                }
+
+                password = passwordNode.GetValue<string>();
+            }
+        }
+
+        body.Remove("hasPassword");
+        if (password is { Length: 0 })
+        {
+            password = null;
+        }
+
+        if (password is { Length: > MaxDeskPasswordLength })
+        {
+            throw ApiException.Validation($"password: at most {MaxDeskPasswordLength} characters");
+        }
+
+        try
+        {
+            var desk = body.Deserialize(Ctx.DeskConfig) ?? throw ApiException.BadRequest("the request body must be a JSON object");
+            return (desk, password);
         }
         catch (JsonException ex)
         {

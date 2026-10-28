@@ -6,22 +6,34 @@ namespace SplitPlay.Tray;
 
 /// <summary>
 /// Tray app: an icon with "Open dashboard" and "Quit", and a window hosting WebView2 on the service's web UI.
-/// <c>SplitPlay.Tray.exe [--url URL] [--smoke-test RESULT_FILE]</c>.
+/// <c>SplitPlay.Tray.exe [--url URL] [--autostart|--minimized] [--smoke-test RESULT_FILE]</c>.
+/// Started by hand (Start menu, installer) it opens the dashboard; with <c>--autostart</c> (the HKLM Run entry) it
+/// stays an icon. One instance per user session: a second start brings the running instance's window to the front.
 /// </summary>
 internal static class Program
 {
     public const string DefaultUrl = "http://127.0.0.1:38299/";
+
+    /// <summary>Per session (<c>Local\</c>): every signed-in user has their own tray.</summary>
+    private const string MutexName = @"Local\SplitPlay.Tray";
+
+    private const string ShowEventName = @"Local\SplitPlay.Tray.Show";
 
     [STAThread]
     private static int Main(string[] args)
     {
         var url = DefaultUrl;
         string? smokeFile = null;
+        var minimized = false;
         for (var i = 0; i < args.Length; i++)
         {
             if (args[i] == "--url" && i + 1 < args.Length)
             {
                 url = args[++i];
+            }
+            else if (args[i] is "--autostart" or "--minimized")
+            {
+                minimized = true;
             }
             else if (args[i] == "--smoke-test" && i + 1 < args.Length)
             {
@@ -34,14 +46,40 @@ internal static class Program
             return SmokeTest(smokeFile);
         }
 
-        using var mutex = new Mutex(initiallyOwned: true, @"Local\SplitPlay.Tray", out var first);
+        using var mutex = new Mutex(initiallyOwned: true, MutexName, out var first);
         if (!first)
         {
+            // Already running in this session: ask it to show its window (unless this is the autostart entry).
+            if (!minimized && EventWaitHandle.TryOpenExisting(ShowEventName, out var show))
+            {
+                using (show)
+                {
+                    show.Set();
+                }
+            }
+
             return 0;
         }
 
+        using var showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
         ApplicationConfiguration.Initialize();
-        Application.Run(new TrayContext(new Uri(url)));
+        using var context = new TrayContext(new Uri(url));
+        var registration = ThreadPool.RegisterWaitForSingleObject(showEvent, (_, _) => context.ShowDashboardFromAnyThread(), null,
+            Timeout.Infinite, executeOnlyOnce: false);
+        try
+        {
+            if (!minimized)
+            {
+                context.ShowDashboardFromAnyThread();
+            }
+
+            Application.Run(context);
+        }
+        finally
+        {
+            registration.Unregister(null);
+        }
+
         return 0;
     }
 

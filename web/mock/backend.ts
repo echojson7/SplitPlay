@@ -93,6 +93,29 @@ export function validateConfigBody(body: unknown): string | null {
   return null
 }
 
+/** Local Windows accounts of the mock host and their passwords. */
+const MOCK_USERS: ReadonlyArray<{ name: string; fullName: string; isAdmin: boolean; password: string; console?: boolean }> = [
+  { name: 'owner', fullName: 'PC Owner', isAdmin: true, password: 'owner', console: true },
+  { name: 'gamer', fullName: 'Second Player', isAdmin: false, password: 'gamer' },
+]
+
+/** Takes `password` out of a desk body; returns an error message for a wrong password of an existing account. */
+function takePassword(body: unknown): { password?: string; problem?: { status: number; code: string; message: string } } {
+  if (typeof body !== 'object' || body === null || !('password' in body)) return {}
+  const b = body as { password?: unknown; user?: unknown }
+  const password = typeof b.password === 'string' && b.password !== '' ? b.password : undefined
+  delete b.password
+  const account = MOCK_USERS.find((u) => typeof b.user === 'string' && u.name === b.user.toLowerCase())
+  if (account && password !== undefined && password !== account.password)
+    return { problem: { status: 400, code: 'validation_failed', message: `wrong password for ${account.name}` } }
+  return { password }
+}
+
+function consoleUserProblem(user: unknown): string | null {
+  const account = MOCK_USERS.find((u) => u.console && typeof user === 'string' && u.name === user.toLowerCase())
+  return account ? `'${account.name}' is signed in at this PC's console; pick another user` : null
+}
+
 const RUNNING: DeskState[] = [
   'Provisioning',
   'Connecting',
@@ -280,7 +303,15 @@ export class MockBackend {
 
     // --- desks
     if (path === '/desks' && method === 'GET') return ok([...this.desks.values()].map((e) => clone(e.desk)))
+    if (path === '/host/users' && method === 'GET')
+      return ok(
+        MOCK_USERS.map((u) => ({ name: u.name, fullName: u.fullName, isAdmin: u.isAdmin, isConsoleUser: !!u.console })),
+      )
     if (path === '/desks' && method === 'POST') {
+      const taken = takePassword(req.body)
+      if (taken.problem) return err(taken.problem.status, taken.problem.code, taken.problem.message)
+      const consoleProblem = consoleUserProblem((req.body as { user?: unknown } | null)?.user)
+      if (consoleProblem) return err(409, 'console_user', consoleProblem)
       const problem = validateConfigBody(req.body)
       if (problem) return err(400, 'invalid_config', problem)
       const c = req.body as DeskConfig
@@ -291,6 +322,8 @@ export class MockBackend {
         return err(409, 'duplicate_port', `Base port ${c.basePort} is already used`)
       const e = this.addDesk(c)
       e.desk.state = 'Stopped'
+      e.desk.hasPassword = taken.password !== undefined
+      e.desk.userManaged = !MOCK_USERS.some((u) => u.name === c.user.toLowerCase())
       return ok(clone(e.desk), 201)
     }
 
@@ -306,6 +339,10 @@ export class MockBackend {
       if (!action) {
         if (method === 'GET') return ok(clone(e.desk))
         if (method === 'PUT') {
+          const taken = takePassword(req.body)
+          if (taken.problem) return err(taken.problem.status, taken.problem.code, taken.problem.message)
+          const consoleProblem = consoleUserProblem((req.body as { user?: unknown } | null)?.user)
+          if (consoleProblem) return err(409, 'console_user', consoleProblem)
           const problem = validateConfigBody(req.body)
           if (problem) return err(400, 'invalid_config', problem)
           const c = req.body as DeskConfig
@@ -316,7 +353,14 @@ export class MockBackend {
             if (JSON.stringify(rest) !== JSON.stringify(cur))
               return err(409, 'desk_running', 'Only the profile can change while the desk runs')
           }
+          const userChanged = c.user.toLowerCase() !== e.desk.user.toLowerCase()
+          const resized = c.profile.width !== e.desk.profile.width || c.profile.height !== e.desk.profile.height
           Object.assign(e.desk, clone(c), { basePort: c.basePort ?? e.desk.basePort })
+          if (taken.password !== undefined) e.desk.hasPassword = true
+          else if (userChanged) e.desk.hasPassword = false
+          if (userChanged) e.desk.userManaged = !MOCK_USERS.some((u) => u.name === c.user.toLowerCase())
+          // The mock seat cannot resize a running session.
+          if (running && resized) e.desk.resolutionPendingRestart = true
           return ok(clone(e.desk))
         }
         if (method === 'DELETE') {
@@ -328,6 +372,7 @@ export class MockBackend {
       if (method === 'POST' && action === 'start') {
         if (running) return err(409, 'already_running', 'Desk is already running')
         e.desk.lastError = null
+        e.desk.resolutionPendingRestart = false
         e.desk.state = 'Provisioning'
         this.schedule(e, ['Connecting', 'SessionReady', 'DisplayReady', 'Ready'])
         return ok(clone(e.desk), 202)

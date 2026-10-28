@@ -123,6 +123,8 @@ function onPaired(name: string): void {
       <p v-if="error" class="notice bad" role="alert">{{ t('common.error', { message: error }) }}</p>
       <p v-if="info" class="notice ok" role="status">{{ info }}</p>
       <p v-if="desk.lastError" class="notice bad">{{ t('desk.lastError') }}: {{ desk.lastError }}</p>
+      <p v-if="desk.resolutionPendingRestart" class="notice warn">{{ t('desk.resolutionPendingRestart') }}</p>
+      <p v-if="desk.userManaged === false && desk.hasPassword === false" class="notice warn">{{ t('desk.passwordMissing') }}</p>
 
       <div class="grid-2 cards">
         <div class="card">

@@ -16,7 +16,7 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { throw "csc.exe not found at $csc" }
 
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
-foreach ($d in 'service\wwwroot', 'tray', 'native', 'worker', 'drivers') {
+foreach ($d in 'service\wwwroot', 'tray', 'native', 'worker', 'drivers', 'termwrap') {
     New-Item -ItemType Directory -Force -Path (Join-Path $Stage $d) | Out-Null
 }
 $Stage = (Resolve-Path $Stage).Path
@@ -34,8 +34,10 @@ $exes = @(
     'worker\splitplay-worker.exe'
 )
 foreach ($e in $exes) { Copy-Item $stub (Join-Path $Stage $e) }
-# Not a real DLL: the installer only copies it.
+# Not real DLLs: the installer only copies them. The smoke test installs with /SkipTermWrap=1, so TermService never
+# points at the fake TermWrap.dll.
 Copy-Item $stub (Join-Path $Stage 'native\splitplay-rdsprov.dll')
+foreach ($dll in 'TermWrap.dll', 'UmWrap.dll', 'Zydis.dll') { Copy-Item $stub (Join-Path $Stage "termwrap\$dll") }
 Remove-Item $stub
 
 Set-Content -Encoding utf8 -Path (Join-Path $Stage 'worker\COPYING') -Value @'
@@ -46,6 +48,7 @@ Set-Content -Encoding utf8 -Path (Join-Path $Stage 'worker\README-source.txt') -
 Placeholder source offer (CI fake stage). The real worker stage contains the written offer and the
 link to the exact Sunshine commit and patch queue used for this build.
 '@
+Set-Content -Encoding utf8 -Path (Join-Path $Stage 'termwrap\LICENSE') -Value 'Placeholder for the TermWrap MIT licence (CI fake stage).'
 Set-Content -Encoding utf8 -Path (Join-Path $Stage 'drivers\README.txt') -Value 'Driver packages are not part of the Stage 2 installer.'
 
 $www = Join-Path $Stage 'service\wwwroot'

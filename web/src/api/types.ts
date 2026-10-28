@@ -49,6 +49,25 @@ export interface DeskConfig {
   /** `"auto"` or an adapter LUID string `"0x…"`. */
   gpu: string
   profile: DeskProfile
+  /** Stop the desk session's BluetoothUserService instance (default true). */
+  disableBluetoothUserService?: boolean
+  /** Extra Sunshine settings passed to the worker verbatim. */
+  workerSettings?: Record<string, string>
+  /**
+   * Windows password of `user`, sent only on create/update: verified for an existing account, used for a new one.
+   * The service stores it encrypted and never returns it (see `Desk.hasPassword`).
+   */
+  password?: string
+}
+
+/** GET /host/users: an enabled local account a desk can use. */
+export interface HostUser {
+  name: string
+  fullName?: string | null
+  isAdmin: boolean
+  /** Signed in at the PC's console: cannot be a desk user (its session would be taken over). */
+  isConsoleUser: boolean
+  createdBySplitPlay?: boolean
 }
 
 /** Live metrics carried in the desk object. Unknown keys from the worker pass through untyped. */
@@ -60,8 +79,14 @@ export interface DeskMetrics {
 }
 
 /** Desk object as returned by GET /desks and GET /desks/{id}. */
-export interface Desk extends Omit<DeskConfig, 'basePort'> {
+export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   basePort: number
+  /** True when SplitPlay created the account; false for an existing account picked by the owner. */
+  userManaged?: boolean
+  /** A password for `user` is stored. */
+  hasPassword?: boolean
+  /** The resolution changed while running and the session could not be resized: applies after a restart. */
+  resolutionPendingRestart?: boolean
   state: DeskState
   sessionId: number | null
   metrics: DeskMetrics

@@ -24,8 +24,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-worker-${{ github.ref }}-${{ github.sha }}
-  cancel-in-progress: false
+  group: ${{ github.workflow }}-worker-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -161,7 +161,7 @@ jobs:
         run: >-
           ./worker/scripts/session-test.ps1 -Exe worker/out/splitplay-worker.exe
           -FreeRdp "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
-          -WorkDir "$env:RUNNER_TEMP\splitplay-session"
+          -WorkDir "$env:RUNNER_TEMP\splitplay-session" -RequireAudio
 
       - name: Upload session test logs
         if: always()
@@ -170,29 +170,3 @@ jobs:
           name: worker-session-test-logs
           path: ${{ runner.temp }}/splitplay-session
           if-no-files-found: ignore
-
-  # TEMPORARY (stage 3 development): RDP logon + SYSTEM launch probe without waiting for the build.
-  session-probe:
-    name: rdp-session-probe
-    runs-on: windows-2022
-    timeout-minutes: 30
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-      - name: Setup MSYS2 UCRT64 with FreeRDP
-        id: msys2
-        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
-        with:
-          msystem: UCRT64
-          update: false
-          cache: true
-          install: mingw-w64-ucrt-x86_64-freerdp
-      - name: List FreeRDP files
-        run: pacman -Ql mingw-w64-ucrt-x86_64-freerdp | grep -i 'bin/' ; pacman -Qi mingw-w64-ucrt-x86_64-freerdp | head -5
-        shell: msys2 {0}
-      - name: Probe
-        shell: pwsh
-        run: >-
-          ./worker/scripts/session-test.ps1 -ProbeOnly
-          -FreeRdp "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
-          -WorkDir "$env:RUNNER_TEMP\splitplay-session"

@@ -225,6 +225,10 @@ jobs:
             exit 1
           }
           Write-Host "RDP listener on 127.0.0.2:$port"
+          # Diagnostics: the values that cap the session colour depth (policy wins over RDP-Tcp).
+          Get-ItemProperty "$ts\WinStations\RDP-Tcp" | Select-Object ColorDepth, fInheritColorDepth | Format-List | Out-Host
+          Get-ItemProperty 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -ErrorAction SilentlyContinue |
+            Select-Object fInheritColorDepth, ColorDepth, MaxColorDepth | Format-List | Out-Host
 
           $bin = 'native/build/windows-x64/bin/Release'
           $env:SP_TEST_RDP_PASSWORD = $pw

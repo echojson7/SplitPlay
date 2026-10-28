@@ -63,6 +63,8 @@ BOOL cb_post_connect(freerdp* instance) {
   // The framebuffer is never looked at (the worker captures inside the session), but the library expects a GDI.
   if (!gdi_init(instance, PIXEL_FORMAT_BGRX32)) return FALSE;
   rdpContext* context = instance->context;
+  // The server's choice (Demand Active preferredBitsPerPixel); below 32 means a server-side colour depth limit.
+  log_info("RDP: session colour depth {} bpp", freerdp_settings_get_uint32(context->settings, FreeRDP_ColorDepth));
   if (!freerdp_settings_set_bool(context->settings, FreeRDP_DeactivateClientDecoding, TRUE)) return FALSE;
   context->update->DesktopResize = cb_desktop_resize;
   context->update->PlaySound = cb_play_sound;

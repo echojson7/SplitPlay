@@ -188,8 +188,8 @@ the worker as SYSTEM with `TokenSessionId` = N through a SYSTEM scheduled task r
 
 1. a probe child runs as `NT AUTHORITY\SYSTEM` in session N;
 2. `--self-test`: the session's output was duplicated (log banner and `Desktop resolution`), frames were captured
-   (software encoder, Microsoft Basic Render Driver), the cursor followed `SendInput`; audio from Remote Audio is
-   reported (warning only when it fails);
+   (software encoder, Microsoft Basic Render Driver), the cursor followed `SendInput`; the session's default render
+   endpoint is Remote Audio and WASAPI loopback delivered packets from it (`-RequireAudio`);
 3. control IPC: `hello.session` = N, `ready` after the encoder probe found the session's output, libdisplaydevice
    disabled, `shutdown` gives exit code 0.
 

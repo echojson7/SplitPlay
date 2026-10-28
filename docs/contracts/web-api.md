@@ -30,11 +30,12 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 | GET | `/auth/session` | current auth state |
 | POST | `/auth/login`, `/auth/logout`, `/auth/password` | login, logout, set or change the admin password |
 | GET, PUT | `/host` | read or replace the `host` object of config.md; validated and saved; a `webPort` change applies after a service restart; a `lanAccess` change toggles the firewall rule `SplitPlay Web UI` |
+| GET | `/host/users` | local accounts that can be a desk user: `[{"name","fullName","isAdmin","isConsoleUser","createdBySplitPlay"}]` (built-in accounts left out) |
 | GET | `/desks` | array of desks with live state |
-| POST | `/desks` | create a desk (body = desk config, see config.md) |
+| POST | `/desks` | create a desk (body = desk config, see config.md, plus optional `password`: the Windows password of `user`, verified when the account exists, used for a new account otherwise) |
 | GET | `/desks/{id}` | one desk with live state |
-| PUT | `/desks/{id}` | replace desk config (only while stopped, except `profile`) |
-| DELETE | `/desks/{id}` | delete a stopped desk (`?deleteUser=true` also removes the Windows account) |
+| PUT | `/desks/{id}` | replace desk config (only while stopped, except `profile`); optional `password` as for POST. A `profile.width/height` change on a running desk is sent to the seat as `set_mode` |
+| DELETE | `/desks/{id}` | delete a stopped desk (`?deleteUser=true` also removes the Windows account; 409 `user_not_managed` for an account SplitPlay did not create) |
 | POST | `/desks/{id}/start`, `/desks/{id}/stop`, `/desks/{id}/restart` | lifecycle; return 202 with the desk. Starting a desk that is not `Stopped`/`Defined` gives 409 `invalid_state` (a `Faulted` desk must be stopped first); stop is accepted in every state and is a no-op on a stopped desk |
 | GET | `/desks/{id}/clients` | array of paired Moonlight clients `{"id","name","pairedAt"?}` (409 `child_unavailable` when the desk is not running) |
 | POST | `/desks/{id}/pair` | `{"pin":"1234","name":"Laptop"}` |
@@ -52,6 +53,9 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
   "id": "desk-1",
   "name": "Skyrim box",
   "user": "splitplay-desk1",
+  "userManaged": true,
+  "hasPassword": true,
+  "resolutionPendingRestart": false,
   "state": "Stopped",
   "sessionId": null,
   "basePort": 48089,
@@ -62,6 +66,9 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
   "lastError": null
 }
 ```
+
+`hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
+`resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.
 
 `state` is one of the lifecycle states in ARCHITECTURE.md §4:
 `Defined, Provisioning, Connecting, SessionReady, DisplayReady, Ready, Streaming, Recovering, Faulted, Stopping, Stopped`.
@@ -93,8 +100,10 @@ The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}`
 | `csrf_failed`, `forbidden` | 403 | missing or wrong `X-CSRF-Token`; not allowed |
 | `not_found` | 404 | unknown desk or client |
 | `already_exists` | 409 | desk id, user or base port taken |
+| `console_user` | 409 | the desk's user is the one signed in at the console |
+| `user_not_managed` | 409 | `deleteUser=true` on an account SplitPlay did not create |
 | `invalid_state` | 409 | the desk is in the wrong state (for example `PUT` of non-profile fields while running) |
 | `child_unavailable` | 409, 504 | the desk's worker is not connected (409) or did not answer in time (504) |
 | `child_error` | 502, 501 | the worker answered with an error; the message starts with the IPC code (501 for `unsupported`/`unknown_type`) |
-| `not_implemented` | 501 | planned for a later stage (`deleteUser=true`, `includeSecrets=true`) |
+| `not_implemented` | 501 | planned for a later stage (`includeSecrets=true`) |
 | `internal` | 500 | unexpected failure |

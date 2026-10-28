@@ -310,6 +310,9 @@ function Test-SelfTest {
   Write-Host "    encoder $($t.encoder), $($t.capture.frames) frame(s) at $($t.capture.width)x$($t.capture.height), cursor moved"
   $endpoints = @($log -split "`n" | Where-Object { $_ -match 'render endpoint\(s\) in session|SplitPlay:   ' })
   $endpoints | ForEach-Object { Write-Host "    endpoint: $($_.Trim())" }
+  if ($RequireAudio) {
+    Assert ($log -match 'SplitPlay:   \[default\] Remote Audio ') "the session's default render endpoint is not Remote Audio"
+  }
   if ($t.audio.ok) {
     Write-Host "    audio: $($t.audio.packets) packet(s) from $($t.audio.endpoint)"
   } elseif ($RequireAudio) {

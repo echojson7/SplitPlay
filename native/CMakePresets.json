@@ -1,0 +1,74 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows-x64",
+      "displayName": "Windows x64, Visual Studio 2022 (MSVC)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build/windows-x64",
+      "cacheVariables": { "SPLITPLAY_BUILD_TESTS": "ON" },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "windows-x64-ninja",
+      "displayName": "Windows x64, Ninja + MSVC (run from a VS x64 developer prompt)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/windows-x64-ninja",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "cl",
+        "CMAKE_CXX_COMPILER": "cl",
+        "SPLITPLAY_BUILD_TESTS": "ON"
+      },
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "linux-portable",
+      "displayName": "Linux: portable parts and their tests only",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/linux-portable",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "SPLITPLAY_WARNINGS_AS_ERRORS": "ON" },
+      "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    },
+    {
+      "name": "mingw-cross",
+      "displayName": "Linux -> Windows compile check with MinGW-w64 (tests run under Wine if installed)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/mingw-cross",
+      "toolchainFile": "${sourceDir}/cmake/mingw-w64-x86_64.cmake",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "SPLITPLAY_WARNINGS_AS_ERRORS": "ON" },
+      "condition": { "type": "notEquals", "lhs": "${hostSystemName}", "rhs": "Windows" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows-x64-release", "configurePreset": "windows-x64", "configuration": "Release" },
+    { "name": "windows-x64-debug", "configurePreset": "windows-x64", "configuration": "Debug" },
+    { "name": "windows-x64-ninja", "configurePreset": "windows-x64-ninja" },
+    { "name": "linux-portable", "configurePreset": "linux-portable" },
+    { "name": "mingw-cross", "configurePreset": "mingw-cross" }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-x64-release",
+      "configurePreset": "windows-x64",
+      "configuration": "Release",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "timeout": 300 }
+    },
+    {
+      "name": "windows-x64-ninja",
+      "configurePreset": "windows-x64-ninja",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "timeout": 300 }
+    },
+    {
+      "name": "linux-portable",
+      "configurePreset": "linux-portable",
+      "output": { "outputOnFailure": true },
+      "execution": { "noTestsAction": "error", "timeout": 300 }
+    }
+  ]
+}

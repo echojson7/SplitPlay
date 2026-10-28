@@ -3,12 +3,16 @@
 import { computed, onMounted, onUnmounted } from 'vue'
 import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { api } from './api/client'
-import { locale, setLocale, t, type Locale } from './i18n'
+import AppIcon from './components/AppIcon.vue'
+import BrandMark from './components/BrandMark.vue'
+import ToastHost from './components/ToastHost.vue'
+import { t } from './i18n'
 import { store } from './store'
 
 const route = useRoute()
 const router = useRouter()
 const bare = computed(() => route.meta.public === true)
+const section = computed(() => route.meta.section ?? 'library')
 const s = store.state
 
 let healthTimer: ReturnType<typeof setInterval> | undefined
@@ -17,10 +21,6 @@ onMounted(() => {
   healthTimer = setInterval(() => void store.refreshHealth(), 10000)
 })
 onUnmounted(() => clearInterval(healthTimer))
-
-function onLocale(e: Event): void {
-  setLocale((e.target as HTMLSelectElement).value as Locale)
-}
 
 async function logout(): Promise<void> {
   try {
@@ -35,100 +35,171 @@ async function logout(): Promise<void> {
 
 <template>
   <div :class="['shell', { bare }]">
-    <header v-if="!bare" class="top">
-      <RouterLink to="/" class="brand">
-        <strong>{{ t('app.title') }}</strong>
-        <span class="muted">{{ t('app.subtitle') }}</span>
+    <header v-if="!bare" class="topbar">
+      <RouterLink to="/" class="brand" :aria-label="t('app.title')">
+        <BrandMark :size="26" />
+        <span class="wordmark">SPLITPLAY</span>
       </RouterLink>
-      <nav aria-label="main">
-        <RouterLink to="/">{{ t('nav.desks') }}</RouterLink>
-        <RouterLink to="/metrics">{{ t('nav.metrics') }}</RouterLink>
-        <RouterLink to="/logs">{{ t('nav.logs') }}</RouterLink>
-        <RouterLink to="/settings">{{ t('nav.settings') }}</RouterLink>
+      <nav class="tabs" aria-label="main">
+        <RouterLink to="/" :class="{ active: section === 'library' }">{{ t('nav.library') }}</RouterLink>
+        <RouterLink to="/settings" :class="{ active: section === 'settings' }">{{ t('nav.settings') }}</RouterLink>
       </nav>
-      <div class="spacer" />
-      <label class="lang">
-        <span class="sr-only">{{ t('app.language') }}</span>
-        <select :value="locale" :aria-label="t('app.language')" @change="onLocale">
-          <option value="ru">RU</option>
-          <option value="en">EN</option>
-        </select>
-      </label>
-      <button v-if="s.session?.authenticated" type="button" @click="logout">{{ t('nav.logout') }}</button>
+      <span class="spacer" />
+      <RouterLink to="/diagnostics" :class="['diag-link', { active: section === 'diagnostics' }]">{{ t('nav.diagnostics') }}</RouterLink>
+      <button
+        v-if="s.session?.authenticated && !s.session.setupRequired"
+        type="button"
+        class="btn-ghost logout"
+        :title="t('nav.logout')"
+        :aria-label="t('nav.logout')"
+        @click="logout"
+      >
+        <AppIcon name="logout" :size="18" />
+      </button>
     </header>
 
-    <main>
-      <div v-if="!s.online" class="notice bad" role="alert">{{ t('app.offline') }}</div>
-      <div v-if="!bare && s.session?.setupRequired" class="notice warn row">
-        <span>{{ t('app.setupBanner') }}</span>
-        <RouterLink to="/setup" class="button">{{ t('app.setupBannerAction') }}</RouterLink>
-      </div>
+    <div v-if="!s.online" class="strip bad" role="alert">{{ t('app.offline') }}</div>
+    <div v-else-if="!bare && s.session?.setupRequired" class="strip warn">
+      <span>{{ t('app.noPassword') }}</span>
+      <RouterLink to="/settings">{{ t('app.setPassword') }}</RouterLink>
+    </div>
+
+    <main :class="{ page: !bare }">
       <RouterView />
     </main>
-
-    <footer v-if="!bare && s.health" class="muted">
-      {{ t('app.version', { version: s.health.version }) }}
-    </footer>
+    <ToastHost />
   </div>
 </template>
 
 <style scoped>
-.shell {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 0 16px 2rem;
-}
-
-.top {
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   display: flex;
   align-items: center;
-  gap: 1rem;
-  flex-wrap: wrap;
-  padding: 0.75rem 0;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 1.25rem;
+  gap: 28px;
+  height: 56px;
+  padding: 0 24px;
+  background: var(--topbar);
+  box-shadow: 0 2px 12px rgb(0 0 0 / 45%);
 }
 
 .brand {
   display: flex;
-  flex-direction: column;
-  text-decoration: none;
-  color: var(--text);
-  line-height: 1.15;
+  align-items: center;
+  gap: 10px;
+  color: #dcdedf;
 }
 
-.brand .muted {
-  font-size: 0.78rem;
+.wordmark {
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
 }
 
-nav {
+.brand:hover {
+  color: #fff;
+}
+
+.tabs {
   display: flex;
-  gap: 0.25rem;
-  flex-wrap: wrap;
+  align-self: stretch;
+  gap: 4px;
 }
 
-nav a {
-  padding: 0.35rem 0.7rem;
-  border-radius: 6px;
-  color: var(--text);
-  text-decoration: none;
+.tabs a {
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #dcdedf;
+  border-bottom: 3px solid transparent;
+  border-top: 3px solid transparent;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease;
 }
 
-nav a.router-link-exact-active,
-nav a:hover {
-  background: var(--surface-2);
+.tabs a:hover {
+  color: #fff;
 }
 
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip: rect(0 0 0 0);
+.tabs a.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
-footer {
-  margin-top: 2rem;
-  font-size: 0.8rem;
+.diag-link {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.diag-link:hover,
+.diag-link.active {
+  color: var(--accent);
+}
+
+.logout {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  margin-right: -8px;
+}
+
+.strip {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 14px;
+  padding: 7px 16px;
+  font-size: 13px;
+}
+
+.strip.bad {
+  background: rgb(226 83 63 / 85%);
+  color: #fff;
+}
+
+.strip.warn {
+  background: rgb(229 177 67 / 12%);
+  color: #f0c869;
+}
+
+.strip.warn a {
+  font-weight: 700;
+  color: #fff;
+}
+
+.page {
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 28px 32px 48px;
+}
+
+@media (width <= 720px) {
+  .topbar {
+    gap: 14px;
+    padding: 0 16px;
+  }
+
+  .wordmark {
+    display: none;
+  }
+
+  .tabs a {
+    padding: 0 8px;
+    font-size: 13px;
+  }
+
+  .page {
+    padding: 20px 16px 40px;
+  }
 }
 </style>

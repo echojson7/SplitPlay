@@ -70,6 +70,11 @@ export interface HostUser {
   createdBySplitPlay?: boolean
 }
 
+/** GET /host/network: LAN IPv4 addresses of the host, those with a default gateway first. */
+export interface HostNetwork {
+  addresses: string[]
+}
+
 /** Live metrics carried in the desk object. Unknown keys from the worker pass through untyped. */
 export interface DeskMetrics {
   fps: number
@@ -172,7 +177,7 @@ export interface LogQuery {
   tail?: number
 }
 
-/** Host settings (config.md `host`). Endpoint GET/PUT /host is a proposed contract addition. */
+/** Host settings (config.md `host`, GET/PUT /host). */
 export interface HostSettings {
   webPort: number
   lanAccess: boolean

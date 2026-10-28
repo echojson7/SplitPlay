@@ -8,6 +8,7 @@ import type {
   DeskConfig,
   DeskProfile,
   Health,
+  HostNetwork,
   HostSettings,
   HostUser,
   LiveEvent,
@@ -270,12 +271,18 @@ export class ApiClient {
     return unwrapList<HostUser>(await this.request('GET', '/host/users'), 'users')
   }
 
-  /** Proposed endpoint (not yet in web-api.md): host settings from config.json `host`. */
+  /** LAN IPv4 addresses of the host: a desk is added in Moonlight as `<address>:<basePort>`. */
+  async hostAddresses(): Promise<string[]> {
+    const raw = await this.request<Partial<HostNetwork> | undefined>('GET', '/host/network')
+    return Array.isArray(raw?.addresses) ? raw.addresses.filter((a): a is string => typeof a === 'string') : []
+  }
+
+  /** Host settings: the `host` object of config.json. */
   getHostSettings(): Promise<HostSettings> {
     return this.request('GET', '/host')
   }
 
-  /** Proposed endpoint (not yet in web-api.md). */
+  /** Replaces the host settings; a `webPort` change applies after a service restart. */
   updateHostSettings(settings: HostSettings): Promise<HostSettings> {
     return this.request('PUT', '/host', { body: settings })
   }

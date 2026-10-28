@@ -8,6 +8,7 @@ import { errorText } from '../composables'
 import { t } from '../i18n'
 import { SETUP_SKIPPED_KEY } from '../router'
 import { store } from '../store'
+import BrandMark from '../components/BrandMark.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -60,9 +61,12 @@ function skip(): void {
 
 <template>
   <section class="login">
-    <form class="card" novalidate @submit.prevent="submit">
-      <h1>{{ setup ? t('setup.title') : t('login.title') }}</h1>
-      <p v-if="setup" class="muted">{{ t('setup.hint') }}</p>
+    <div class="brand">
+      <BrandMark :size="44" />
+      <span class="wordmark">SPLITPLAY</span>
+    </div>
+    <form class="box" novalidate @submit.prevent="submit">
+      <h1 class="title">{{ setup ? t('setup.title') : t('login.title') }}</h1>
       <div class="field">
         <label for="pw">{{ setup ? t('setup.password') : t('login.password') }}</label>
         <input
@@ -78,24 +82,63 @@ function skip(): void {
         <label for="pw2">{{ t('setup.confirm') }}</label>
         <input id="pw2" v-model="confirmPassword" type="password" name="confirm" autocomplete="new-password" />
       </div>
-      <p v-if="error" class="error" role="alert">{{ error }}</p>
-      <div class="row">
-        <button v-if="setup" type="button" @click="skip">{{ t('setup.skip') }}</button>
-        <div class="spacer" />
-        <button type="submit" class="primary" :disabled="busy">{{ setup ? t('setup.submit') : t('login.submit') }}</button>
-      </div>
+      <p v-if="error" class="err" role="alert">{{ error }}</p>
+      <button type="submit" class="btn-primary submit" :disabled="busy">{{ setup ? t('setup.submit') : t('login.submit') }}</button>
+      <button v-if="setup" type="button" class="btn-ghost" @click="skip">{{ t('setup.skip') }}</button>
     </form>
   </section>
 </template>
 
 <style scoped>
 .login {
-  display: grid;
-  place-items: center;
-  min-height: 70vh;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 24px 16px;
 }
 
-.login form {
-  width: min(420px, 100%);
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: #fff;
+}
+
+.wordmark {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+}
+
+.box {
+  width: min(400px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 32px;
+  border-radius: 4px;
+  background: linear-gradient(180deg, rgb(42 71 94 / 70%) 0%, rgb(23 26 33 / 85%) 100%);
+  box-shadow: 0 20px 50px rgb(0 0 0 / 45%);
+}
+
+.title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.err {
+  margin: 0;
+}
+
+.submit {
+  height: 44px;
+  font-size: 15px;
+  margin-top: 6px;
 }
 </style>

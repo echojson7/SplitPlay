@@ -37,9 +37,9 @@ describe('ApiClient', () => {
   it('lists desks with live state', async () => {
     const { client } = setup()
     const desks = await client.listDesks()
-    expect(desks.map((d) => d.id)).toEqual(['desk-1', 'gaming', 'kids'])
-    expect(desks[0]!.state).toBe('Streaming')
-    expect(desks[0]!.metrics.fps).toBeGreaterThan(100)
+    expect(desks.map((d) => d.id)).toEqual(['anna', 'guest'])
+    expect(desks[0]!.state).toBe('Ready')
+    expect(desks[1]!.state).toBe('Stopped')
   })
 
   it('accepts list responses wrapped in an object', async () => {
@@ -52,7 +52,7 @@ describe('ApiClient', () => {
     const { client, advance } = setup()
     const created = await client.createDesk(NEW_DESK)
     expect(created.state).toBe('Stopped')
-    expect(created.basePort).toBe(48389) // lowest free basePortStart + 100k
+    expect(created.basePort).toBe(48289) // lowest free basePortStart + 100k
     const started = await client.startDesk('desk-9')
     expect(started.state).toBe('Provisioning')
     advance(1000)
@@ -65,7 +65,7 @@ describe('ApiClient', () => {
 
   it('turns error bodies into ApiError with code and status', async () => {
     const { client } = setup()
-    const err = await client.createDesk({ ...NEW_DESK, id: 'desk-1' }).catch((e: unknown) => e)
+    const err = await client.createDesk({ ...NEW_DESK, id: 'anna' }).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(ApiError)
     expect((err as ApiError).status).toBe(409)
     expect((err as ApiError).code).toBe('duplicate_id')
@@ -94,7 +94,7 @@ describe('ApiClient', () => {
     const getInit = fetchSpy.mock.calls.at(-1)![1]!
     expect(new Headers(getInit.headers).has('X-CSRF-Token')).toBe(false)
 
-    await client.startDesk('gaming')
+    await client.startDesk('guest')
     const postInit = fetchSpy.mock.calls.at(-1)![1]!
     expect(postInit.method).toBe('POST')
     expect(new Headers(postInit.headers).get('X-CSRF-Token')).toBe(res.csrfToken)
@@ -119,52 +119,67 @@ describe('ApiClient', () => {
 
   it('pairs a client and lists, then revokes it', async () => {
     const { client } = setup()
-    await expect(client.pair('desk-1', { pin: '12a4', name: 'x' })).rejects.toMatchObject({ code: 'invalid_pin' })
-    await client.pair('desk-1', { pin: '1234', name: 'Laptop' })
-    const clients = await client.listClients('desk-1')
-    expect(clients.map((c) => c.name)).toEqual(['Living room TV', 'Laptop'])
-    await client.revokeClient('desk-1', clients[1]!.id)
-    expect(await client.listClients('desk-1')).toHaveLength(1)
+    await expect(client.pair('anna', { pin: '12a4', name: 'x' })).rejects.toMatchObject({ code: 'invalid_pin' })
+    await client.pair('anna', { pin: '1234', name: 'Laptop' })
+    const clients = await client.listClients('anna')
+    expect(clients.map((c) => c.name)).toEqual(['Ноутбук Ани', 'Laptop'])
+    await client.revokeClient('anna', clients[1]!.id)
+    expect(await client.listClients('anna')).toHaveLength(1)
   })
 
   it('refuses pairing on a stopped desk', async () => {
     const { client } = setup()
-    await expect(client.pair('gaming', { pin: '1234', name: 'x' })).rejects.toMatchObject({ status: 409 })
+    await expect(client.pair('guest', { pin: '1234', name: 'x' })).rejects.toMatchObject({ status: 409 })
   })
 
   it('only lets the profile change while a desk runs', async () => {
     const { client } = setup()
-    const desk = await client.getDesk('desk-1')
+    const desk = await client.getDesk('anna')
     const cfg = deskToConfig(desk)
-    const updated = await client.updateDesk('desk-1', { ...cfg, profile: { ...cfg.profile, fps: 240 } })
+    const updated = await client.updateDesk('anna', { ...cfg, profile: { ...cfg.profile, fps: 240 } })
     expect(updated.profile.fps).toBe(240)
-    await expect(client.updateDesk('desk-1', { ...cfg, name: 'Renamed' })).rejects.toMatchObject({ code: 'desk_running' })
+    await expect(client.updateDesk('anna', { ...cfg, name: 'Renamed' })).rejects.toMatchObject({ code: 'desk_running' })
   })
 
   it('passes log filters as query parameters', async () => {
     const { client, fetchSpy } = setup()
-    const lines = await client.logs({ component: 'worker', desk: 'desk-1', tail: 5 })
-    expect(fetchSpy.mock.calls.at(-1)![0]).toBe('/api/v1/logs?component=worker&desk=desk-1&tail=5')
+    const lines = await client.logs({ component: 'worker', desk: 'anna', tail: 5 })
+    expect(fetchSpy.mock.calls.at(-1)![0]).toBe('/api/v1/logs?component=worker&desk=anna&tail=5')
     expect(lines.length).toBeLessThanOrEqual(5)
-    expect(lines.every((l) => l.component === 'worker' && l.desk === 'desk-1')).toBe(true)
+    expect(lines.every((l) => l.component === 'worker' && l.desk === 'anna')).toBe(true)
   })
 
   it('normalises metrics and exposes GPUs', async () => {
     const { client } = setup()
     const m = await client.metrics()
     expect(m.host.gpus.length).toBeGreaterThan(0)
-    expect(m.desks.find((d) => d.id === 'desk-1')?.fps).toBeGreaterThan(0)
+    expect(m.desks.map((d) => d.id)).toEqual(['anna', 'guest'])
     const empty = new ApiClient({ fetch: async () => new Response('{}', { status: 200 }) })
     expect(await empty.metrics()).toEqual({ host: { gpus: [] }, desks: [] })
   })
 
   it('deletes with ?deleteUser=true only when asked', async () => {
     const { client, fetchSpy } = setup()
-    await client.deleteDesk('gaming', true)
-    expect(fetchSpy.mock.calls.at(-1)![0]).toBe('/api/v1/desks/gaming?deleteUser=true')
+    await client.deleteDesk('guest', true)
+    expect(fetchSpy.mock.calls.at(-1)![0]).toBe('/api/v1/desks/guest?deleteUser=true')
     await client.createDesk(NEW_DESK)
     await client.deleteDesk('desk-9')
     expect(fetchSpy.mock.calls.at(-1)![0]).toBe('/api/v1/desks/desk-9')
+  })
+
+  it('reads the host LAN addresses and tolerates an empty answer', async () => {
+    const { client, fetchSpy } = setup()
+    expect(await client.hostAddresses()).toEqual(['192.168.1.20'])
+    expect(fetchSpy.mock.calls.at(-1)![0]).toBe('/api/v1/host/network')
+    const empty = new ApiClient({ fetch: async () => new Response('{}', { status: 200 }) })
+    expect(await empty.hostAddresses()).toEqual([])
+  })
+
+  it('lists host users with the console user flagged', async () => {
+    const { client } = setup()
+    const users = await client.listHostUsers()
+    expect(users.find((u) => u.isConsoleUser)?.name).toBe('owner')
+    expect(users.map((u) => u.name)).toContain('misha')
   })
 
   it('downloads the config export as a blob', async () => {

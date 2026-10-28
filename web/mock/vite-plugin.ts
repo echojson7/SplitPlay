@@ -2,6 +2,7 @@
 // Vite dev-server plugin that serves the in-memory mock API under /api/v1 (`npm run dev:mock`).
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
 import type { Plugin } from 'vite'
 import { MockBackend } from './backend.ts'
 
@@ -18,6 +19,10 @@ export function mockApiPlugin(apiBase = '/api/v1'): Plugin {
     configureServer(server) {
       const backend = new MockBackend()
       server.config.logger.info(`  SplitPlay mock API on ${apiBase} (no service needed)`)
+      // The mock has no live socket: refuse the upgrade so that the UI falls back to polling right away.
+      server.httpServer?.on('upgrade', (req: IncomingMessage, socket: Duplex) => {
+        if ((req.url ?? '').startsWith(`${apiBase}/ws`)) socket.destroy()
+      })
       server.middlewares.use(apiBase, (req: IncomingMessage, res: ServerResponse) => {
         void (async () => {
           const url = new URL(req.url ?? '/', 'http://localhost')

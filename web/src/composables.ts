@@ -49,6 +49,31 @@ export function canStop(desk: Desk): boolean {
 }
 
 export function gpuLabel(gpu: string, gpus: readonly GpuInfo[] | undefined): string {
-  if (gpu === 'auto') return t('desks.gpuAuto')
+  if (gpu === 'auto') return t('adv.gpuAuto')
   return gpus?.find((g) => g.luid.toLowerCase() === gpu.toLowerCase())?.name ?? gpu
+}
+
+/** Copies text to the clipboard; falls back to a hidden textarea where the Clipboard API is missing. */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (globalThis.navigator?.clipboard) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+  } catch {
+    // Fall through to the textarea copy.
+  }
+  try {
+    const area = document.createElement('textarea')
+    area.value = text
+    area.style.position = 'fixed'
+    area.style.opacity = '0'
+    document.body.appendChild(area)
+    area.select()
+    const ok = document.execCommand('copy')
+    area.remove()
+    return ok
+  } catch {
+    return false
+  }
 }

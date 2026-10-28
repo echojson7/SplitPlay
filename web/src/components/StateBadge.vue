@@ -1,70 +1,75 @@
 <!-- SPDX-License-Identifier: MIT -->
+<!-- Coloured status dot with a short state word. -->
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { DeskState } from '../api/types'
+import { stateTone } from '../desk'
 import { t } from '../i18n'
 
 const props = defineProps<{ state: DeskState }>()
-
-const tone = computed(() => {
-  switch (props.state) {
-    case 'Streaming':
-    case 'Ready':
-      return 'ok'
-    case 'Faulted':
-      return 'bad'
-    case 'Recovering':
-      return 'warn'
-    case 'Stopped':
-    case 'Defined':
-      return 'idle'
-    default:
-      return 'busy'
-  }
-})
+const tone = computed(() => stateTone(props.state))
 </script>
 
 <template>
-  <span :class="['badge', tone]" :data-state="state">{{ t(`state.${state}`) }}</span>
+  <span :class="['state', tone]" :data-state="state">
+    <span class="dot" />
+    {{ t(`state.${state}`) }}
+  </span>
 </template>
 
 <style scoped>
-.badge {
+.state {
   display: inline-flex;
   align-items: center;
-  gap: 0.4em;
-  font-size: 0.85rem;
-  padding: 0.1rem 0.55rem;
-  border-radius: 999px;
-  border: 1px solid currentcolor;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
   white-space: nowrap;
 }
 
-.badge::before {
-  content: '';
-  width: 0.5em;
-  height: 0.5em;
+.dot {
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   background: currentcolor;
+  flex: none;
 }
 
 .ok {
   color: var(--ok);
 }
 
-.bad {
-  color: var(--bad);
+.ok .dot {
+  box-shadow: 0 0 8px rgb(139 197 63 / 80%);
+}
+
+.busy {
+  color: var(--busy);
+}
+
+.busy .dot {
+  animation: pulse 1.2s ease-in-out infinite;
 }
 
 .warn {
   color: var(--warn);
 }
 
-.busy {
-  color: var(--info);
+.bad {
+  color: #ff7a66;
+}
+
+.bad .dot {
+  box-shadow: 0 0 8px rgb(226 83 63 / 70%);
 }
 
 .idle {
   color: var(--muted);
+}
+
+@keyframes pulse {
+  50% {
+    opacity: 0.35;
+  }
 }
 </style>

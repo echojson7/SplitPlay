@@ -45,74 +45,84 @@ watch(follow, schedule)
 </script>
 
 <template>
-  <section>
-    <h1>{{ t('logs.title') }}</h1>
-    <div class="row filters">
-      <label>
-        {{ t('logs.component') }}
-        <select v-model="filter.component">
-          <option value="">{{ t('logs.all') }}</option>
-          <option v-for="c in COMPONENTS" :key="c" :value="c">{{ c }}</option>
-        </select>
-      </label>
-      <label>
-        {{ t('logs.desk') }}
-        <select v-model="filter.desk">
-          <option value="">{{ t('logs.all') }}</option>
-          <option v-for="d in store.state.desks" :key="d.id" :value="d.id">{{ d.name }}</option>
-        </select>
-      </label>
-      <label>
-        {{ t('logs.tail') }}
-        <select v-model.number="filter.tail">
-          <option v-for="n in TAILS" :key="n" :value="n">{{ n }}</option>
-        </select>
-      </label>
-      <label class="check"><input v-model="follow" type="checkbox" /> {{ t('logs.follow') }}</label>
-      <div class="spacer" />
+  <div class="logs">
+    <div class="filters">
+      <select v-model="filter.component" :aria-label="t('logs.component')">
+        <option value="">{{ t('logs.component') }}: {{ t('logs.all') }}</option>
+        <option v-for="c in COMPONENTS" :key="c" :value="c">{{ c }}</option>
+      </select>
+      <select v-model="filter.desk" :aria-label="t('logs.desk')">
+        <option value="">{{ t('logs.desk') }}: {{ t('logs.all') }}</option>
+        <option v-for="d in store.state.desks" :key="d.id" :value="d.id">{{ d.name }}</option>
+      </select>
+      <select v-model.number="filter.tail" :aria-label="t('logs.tail')">
+        <option v-for="n in TAILS" :key="n" :value="n">{{ t('logs.tail') }}: {{ n }}</option>
+      </select>
+      <label class="switch"><input v-model="follow" type="checkbox" /> {{ t('logs.follow') }}</label>
+      <span class="spacer" />
       <button type="button" :disabled="loading" @click="load">{{ t('common.refresh') }}</button>
     </div>
-    <p v-if="error" class="notice bad" role="alert">{{ t('common.error', { message: error }) }}</p>
-    <div class="card log">
+    <p v-if="error" class="inline-msg" role="alert">{{ error }}</p>
+    <div class="panel log">
       <p v-if="lines.length === 0" class="muted">{{ t('logs.empty') }}</p>
       <div v-for="(l, i) in lines" :key="i" :class="['line', `lvl-${l.level}`]">
-        <span class="muted">{{ fmtDateTime(l.time) }}</span>
+        <span class="time">{{ fmtDateTime(l.time) }}</span>
         <span class="lvl">{{ l.level }}</span>
         <span class="comp">{{ l.component }}{{ l.desk ? `/${l.desk}` : '' }}</span>
         <span class="msg">{{ l.message }}</span>
       </div>
     </div>
-  </section>
+  </div>
 </template>
 
 <style scoped>
-.filters {
-  margin-bottom: 1rem;
-  gap: 1rem;
+.logs {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
-.check {
+.filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.inline-msg {
   margin: 0;
 }
 
 .log {
   font-family: var(--mono);
-  font-size: 0.82rem;
-  max-height: 70vh;
+  font-size: 12px;
+  max-height: calc(100vh - 250px);
+  min-height: 200px;
   overflow: auto;
+  background: rgb(10 15 21 / 70%);
+  padding: 12px 16px;
 }
 
 .line {
   display: grid;
-  grid-template-columns: max-content 5ch 16ch 1fr;
-  gap: 0.75rem;
+  grid-template-columns: max-content 5ch 18ch 1fr;
+  gap: 12px;
   white-space: pre-wrap;
   word-break: break-word;
-  padding: 0.1rem 0;
+  padding: 2px 0;
+}
+
+.time {
+  color: var(--dim);
 }
 
 .lvl {
   text-transform: uppercase;
+  color: var(--muted);
+}
+
+.comp {
+  color: var(--accent);
 }
 
 .lvl-warn .lvl {
@@ -121,14 +131,14 @@ watch(follow, schedule)
 
 .lvl-error .lvl,
 .lvl-fatal .lvl {
-  color: var(--bad);
+  color: #ff7a66;
 }
 
 @media (width <= 640px) {
   .line {
     grid-template-columns: 1fr;
     gap: 0;
-    margin-bottom: 0.4rem;
+    margin-bottom: 6px;
   }
 }
 </style>

@@ -31,7 +31,7 @@ describe('app smoke', () => {
     vi.unstubAllGlobals()
   })
 
-  it('walks through setup and every page without errors', async () => {
+  it('walks through setup, the wizard and every page without errors', async () => {
     const router = createAppRouter()
     const w = mount(App, { global: { plugins: [router] }, attachTo: document.body })
     await router.push('/')
@@ -43,39 +43,44 @@ describe('app smoke', () => {
     await w.find('input#pw2').setValue('a-long-password')
     await w.find('form').trigger('submit')
     await settle()
-    expect(router.currentRoute.value.name).toBe('desks')
+    expect(router.currentRoute.value.name).toBe('library')
     expect(store.state.session).toMatchObject({ authenticated: true, setupRequired: false })
 
-    expect(w.text()).toContain('Skyrim box')
-    expect(w.findAll('tbody tr')).toHaveLength(3)
+    expect(w.find('nav.tabs').text()).toContain('Библиотека')
+    expect(w.findAll('article[data-desk]')).toHaveLength(2)
+    expect(w.text()).toContain('Аня')
 
-    await router.push('/desks/desk-1')
+    await router.push('/desks/anna')
     await settle()
-    expect(w.text()).toContain('Living room TV')
-    expect(w.text()).toContain('Подключить клиент')
+    expect(w.text()).toContain('Ноутбук Ани')
+    expect(w.find('[data-address]').text()).toBe('192.168.1.20:48089')
+    expect(w.find('details.more').attributes('open')).toBeUndefined()
 
-    await router.push('/desks/desk-1/edit')
-    await settle()
-    expect((w.find('input[name="name"]').element as HTMLInputElement).value).toBe('Skyrim box')
-
+    // Add a desk through the wizard: it is created, started and opened.
     await router.push('/desks/new')
     await settle()
-    await w.find('input[name="id"]').setValue('new-desk')
-    await w.find('input[name="name"]').setValue('New')
-    await w.find('input[name="user"]').setValue('splitplay-new')
-    await w.find('form').trigger('submit')
+    await w.find('[data-user="misha"]').trigger('click')
+    await w.find('[role="dialog"] form').trigger('submit')
+    await w.find('input[name="password"]').setValue('misha')
+    await w.find('[role="dialog"] form').trigger('submit')
+    await w.find('[data-res="1280x720"]').trigger('click')
+    await w.find('[role="dialog"] form').trigger('submit')
     await settle()
-    expect(router.currentRoute.value.fullPath).toBe('/desks/new-desk')
-    expect(w.text()).toContain('Остановлен')
+    expect(router.currentRoute.value.fullPath).toBe('/desks/misha')
+    expect(store.state.desks.find((d) => d.id === 'misha')?.profile).toMatchObject({ width: 1280, height: 720, fps: 60 })
+    expect(w.find('h1').text()).toBe('Михаил')
 
-    for (const path of ['/metrics', '/logs', '/settings']) {
+    for (const path of ['/settings', '/diagnostics/metrics', '/diagnostics/logs']) {
       await router.push(path)
       await settle()
       expect(router.currentRoute.value.path).toBe(path)
     }
-    expect(w.text()).toContain('Настройки хоста')
+    await router.push('/settings')
+    await settle()
+    expect(w.text()).toContain('Пароль администратора')
     await router.push('/metrics')
     await settle()
+    expect(router.currentRoute.value.path).toBe('/diagnostics/metrics')
     expect(w.text()).toContain('NVIDIA GeForce RTX 4090')
 
     expect(errors).toEqual([])

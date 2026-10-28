@@ -14,9 +14,12 @@ export interface StoreState {
   health: Health | null
   online: boolean
   live: 'off' | 'ws' | 'polling'
+  /** LAN addresses of the host (GET /host/network); null until loaded, empty when unknown. */
+  addresses: string[] | null
 }
 
 export const POLL_MS = 2000
+const WS_OPEN_TIMEOUT_MS = 4000
 
 export function createStore(client: ApiClient) {
   const state = reactive<StoreState>({
@@ -27,6 +30,7 @@ export function createStore(client: ApiClient) {
     health: null,
     online: true,
     live: 'off',
+    addresses: null,
   })
 
   let ws: WebSocket | null = null
@@ -72,6 +76,15 @@ export function createStore(client: ApiClient) {
     }
   }
 
+  /** Loads the host's LAN addresses once; an older service without the endpoint gives an empty list. */
+  async function refreshAddresses(): Promise<void> {
+    try {
+      state.addresses = await guard(client.hostAddresses())
+    } catch {
+      state.addresses = []
+    }
+  }
+
   async function refreshSession(): Promise<AuthSession> {
     state.session = await guard(client.session())
     return state.session
@@ -103,8 +116,13 @@ export function createStore(client: ApiClient) {
       startPolling()
       return
     }
+    // A socket that neither opens nor fails (a proxy holding the upgrade) must not stall updates.
+    const openTimer = setTimeout(() => {
+      if (!opened && wanted) startPolling()
+    }, WS_OPEN_TIMEOUT_MS)
     ws.onopen = () => {
       opened = true
+      clearTimeout(openTimer)
       stopPolling()
       state.live = 'ws'
     }
@@ -122,6 +140,7 @@ export function createStore(client: ApiClient) {
       }
     }
     ws.onclose = () => {
+      clearTimeout(openTimer)
       ws = null
       if (!wanted) return
       // Fall back to polling and retry the socket later (longer if it never opened).
@@ -156,6 +175,7 @@ export function createStore(client: ApiClient) {
     refreshDesks,
     refreshMetrics,
     refreshHealth,
+    refreshAddresses,
     refreshSession,
     startLive,
     stopLive,

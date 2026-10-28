@@ -386,7 +386,12 @@ try {
 }
 $fDenyAfter = (Get-ItemProperty -Path $tsKey -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections
 if ("$fDenyAfter" -ne "$fDenyBefore") { throw "host revert did not restore fDenyTSConnections ($fDenyBefore -> $fDenyAfter)" }
-Invoke-Cli host status --json
+# After revert the host is no longer prepared: status says so with exit code 1.
+$statusJson = (& $cli host status --json) -join "`n"
+$statusExit = $LASTEXITCODE
+Write-Host $statusJson
+if ($statusExit -ne 1) { throw "host status after revert exited with $statusExit, expected 1 (not prepared)" }
+if (($statusJson | ConvertFrom-Json).prepared -ne $false) { throw 'host status after revert still reports prepared' }
 $global:LASTEXITCODE = 0
 
 # --------------------------------------------------------------------------- tray

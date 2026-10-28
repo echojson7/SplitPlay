@@ -17,7 +17,7 @@ public sealed class LifecycleTests
     [Fact]
     public async Task Hung_child_is_detected_and_restarted()
     {
-        await using var svc = await TestService.StartAsync(setup: l =>
+        await using var svc = await TestService.StartAsync(["--Supervisor:MissedHeartbeats=3"], setup: l =>
             l.Behavior = r => r.Role == IpcProtocol.Roles.Worker && r.Attempt == 1 ? FakeChildBehavior.StopHeartbeats : FakeChildBehavior.Normal);
         await svc.CreateDeskAsync("desk-1");
         await svc.PostDeskActionAsync("desk-1", "start");

@@ -11,6 +11,7 @@ using SplitPlay.Core.Configuration;
 using SplitPlay.Core.Host;
 using SplitPlay.Core.Platform;
 using SplitPlay.Core.Ports;
+using SplitPlay.Core.Steam;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Hosting;
 using SplitPlay.Service.Supervision;
@@ -71,6 +72,16 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         }
 
         CheckHost();
+        if (desk.SteamIsolationEnabled)
+        {
+            // Before the session logs on, so that explorer, Steam's autostart and steam:// already see the desk's values.
+            TrySteamIsolation(desk, user);
+        }
+        else
+        {
+            RevertSteamIsolation(desk.Id);
+        }
+
         return credentials;
     }
 
@@ -184,6 +195,7 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
             throw new DeskUserNotManagedException($"Windows account '{desk.User}' was not created by SplitPlay; it is never deleted by SplitPlay");
         }
 
+        RevertSteamIsolation(desk.Id);
         _secrets.Delete(desk.Id);
         if (account is null || desk.User is null)
         {
@@ -268,17 +280,24 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
     public bool OnSessionLogon(DeskConfig desk, int sessionId, string deskDirectory)
     {
         ArgumentNullException.ThrowIfNull(desk);
-        if (desk.User is null || desk.UserManaged == false)
+        if (desk.User is null)
+        {
+            return false;
+        }
+
+        // The hive is loaded now; for a new account this is the first time it exists.
+        var steam = desk.SteamIsolationEnabled && TrySteamIsolation(desk, desk.User);
+        if (desk.UserManaged == false)
         {
             // An account the owner picked keeps its own keyboard layouts.
-            return false;
+            return steam;
         }
 
         var deskSid = LocalAccounts.SidOf(desk.User).Value;
         var marker = Path.Combine(deskDirectory, KeyboardMarkerFile);
         if (File.Exists(marker) && File.ReadAllText(marker).Trim() == deskSid)
         {
-            return false;
+            return steam;
         }
 
         var sourceSid = ConsoleUserSid() ?? ".DEFAULT";
@@ -290,7 +309,109 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
             _logger.LogInformation("Desk {Desk}: copied keyboard layouts of {Source} to {User}", desk.Id, sourceSid, desk.User);
         }
 
-        return copied;
+        return copied || steam;
+    }
+
+    // ------------------------------------------------------------------ Steam isolation
+
+    private SteamIsolation SteamState(string deskId) => new(Path.Combine(_paths.DeskDirectory(deskId), SteamIsolation.StateFileName));
+
+    /// <summary>
+    /// Applies the desk's Steam isolation to <paramref name="user"/>'s hive (loaded, or mounted when the profile exists).
+    /// Returns true if the environment variable was newly written into a loaded hive: the running session only sees it
+    /// after the next logon. Failures are logged, never thrown.
+    /// </summary>
+    private bool TrySteamIsolation(DeskConfig desk, string user)
+    {
+        try
+        {
+            var sid = LocalAccounts.SidOf(user).Value;
+            var isolation = SteamState(desk.Id);
+            if (isolation.RecordedSid() is { } recorded && !string.Equals(recorded, sid, StringComparison.OrdinalIgnoreCase))
+            {
+                RevertSteamIsolation(desk.Id);
+            }
+
+            using var hive = UserHive.Open(sid, _logger);
+            if (hive is null)
+            {
+                _logger.LogDebug("Desk {Desk}: {User} has no profile yet; Steam isolation applies at the first logon", desk.Id, user);
+                return false;
+            }
+
+            var result = isolation.Apply(hive.Hive, sid, desk.Id, SteamMachine());
+            foreach (var change in result.Changes)
+            {
+                _logger.LogInformation("Desk {Desk}: Steam isolation for {User}: {Change}", desk.Id, user, change);
+            }
+
+            return result.EnvironmentWritten && !hive.Mounted;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger.LogWarning("Desk {Desk}: could not apply Steam isolation to {User}: {Message}", desk.Id, user, ex.Message);
+            return false;
+        }
+    }
+
+    public void RevertSteamIsolation(string deskId)
+    {
+        try
+        {
+            var isolation = SteamState(deskId);
+            if (isolation.RecordedSid() is not { } sid)
+            {
+                return;
+            }
+
+            using var hive = UserHive.Open(sid, _logger);
+            if (hive is null)
+            {
+                if (UserHive.ProfileHiveFile(sid) is not { } file || !File.Exists(file))
+                {
+                    // The account or its profile is gone, and with it everything SplitPlay wrote.
+                    isolation.Forget();
+                }
+
+                return;
+            }
+
+            foreach (var change in isolation.Revert(hive.Hive))
+            {
+                _logger.LogInformation("Desk {Desk}: Steam isolation reverted for {Sid}: {Change}", deskId, sid, change);
+            }
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger.LogWarning("Desk {Desk}: could not revert Steam isolation: {Message}", deskId, ex.Message);
+        }
+    }
+
+    /// <summary>The machine-wide <c>steam://</c> handler (HKLM; Steam's installer writes it there).</summary>
+    private static SteamMachineInfo SteamMachine()
+    {
+        var hklm = new WindowsHostRegistry();
+        return new SteamMachineInfo(
+            hklm.Get(@"SOFTWARE\Classes\steam\Shell\Open\Command", "")?.Data,
+            hklm.Get(@"SOFTWARE\Classes\steam", "")?.Data);
+    }
+
+    public string? SteamExecutable()
+    {
+        var hklm = new WindowsHostRegistry();
+        foreach (var key in new[] { @"SOFTWARE\WOW6432Node\Valve\Steam", @"SOFTWARE\Valve\Steam" })
+        {
+            if (hklm.Get(key, "InstallPath")?.Data is { Length: > 0 } path)
+            {
+                var exe = Path.Combine(Environment.ExpandEnvironmentVariables(path), "steam.exe");
+                if (File.Exists(exe))
+                {
+                    return exe;
+                }
+            }
+        }
+
+        return null;
     }
 
     private string? ConsoleUserSid()

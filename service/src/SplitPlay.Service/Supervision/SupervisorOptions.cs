@@ -79,8 +79,9 @@ public sealed class SupervisorOptions
     public bool Autostart { get; set; } = true;
 
     /// <summary>
-    /// After the console user's keyboard layouts were copied into a new desk profile, log the session off once so
-    /// that they apply (Windows loads the layout list at logon).
+    /// After the console user's keyboard layouts were copied into a new desk profile, or the Steam isolation variable
+    /// was newly written into a logged-on hive, log the session off once so that they apply (Windows loads the layout
+    /// list and the user's environment at logon).
     /// </summary>
     public bool RelogonAfterLayoutCopy { get; set; } = true;
 

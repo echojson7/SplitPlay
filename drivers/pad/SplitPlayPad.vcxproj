@@ -63,8 +63,9 @@
       <PreprocessorDefinitions>UMDF_DRIVER;_UNICODE;UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <WarningLevel>Level4</WarningLevel>
-      <!-- Stage 2: warnings are reported but not fatal until the first clean CI build; then switch to true. -->
-      <TreatWarningAsError>false</TreatWarningAsError>
+      <!-- C4471: WDK wudfwdm.h forward-declares the unscoped enum _DEVICE_RELATION_TYPE (header issue, not ours). -->
+      <DisableSpecificWarnings>4471;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <TreatWarningAsError>true</TreatWarningAsError>
       <ExceptionHandling>false</ExceptionHandling>
       <AdditionalOptions>/permissive- /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>

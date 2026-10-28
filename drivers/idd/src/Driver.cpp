@@ -10,6 +10,9 @@
 
 #include "Driver.h"
 
+// initguid.h makes devpkey.h define (selectany) the DEVPKEY_* constants used here instead of only declaring
+// them; UMDF has no import library that exports them.
+#include <initguid.h>
 #include <devpkey.h>
 #include <TraceLoggingProvider.h>
 

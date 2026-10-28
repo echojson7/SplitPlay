@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # service.yml may fetch a native-win-x64 artifact; a called workflow cannot get more than the caller grants
 
 concurrency:
   group: ci-${{ github.ref }}

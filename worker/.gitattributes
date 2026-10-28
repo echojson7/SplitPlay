@@ -1,0 +1,5 @@
+# Patches are applied byte for byte to the upstream tree: never convert their line endings.
+*.patch -text
+*.sh text eol=lf
+upstream.lock text eol=lf
+VERSION text eol=lf

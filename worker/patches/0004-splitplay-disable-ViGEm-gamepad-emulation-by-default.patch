@@ -1,0 +1,97 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:03:00 +0000
+Subject: [PATCH] splitplay: disable ViGEm gamepad emulation by default
+
+ViGEmBus is retired, and its X360 (XUSB) pads are not isolated per
+session, so one desk's controller would show up in every desk. SplitPlay
+replaces it with its own per-session pad driver in Stage 4.
+
+- New CMake option SUNSHINE_ENABLE_VIGEM (Windows, default OFF) that sets
+  SUNSHINE_VIGEM=0/1.
+- With it off, platf::input() never creates the ViGEm client, so every
+  gamepad entry point takes its existing "no ViGEm" path and gamepads are
+  reported as unavailable; mouse, keyboard, pen and touch are unchanged.
+- The ViGEmBus installer is neither downloaded at configure time nor
+  packaged.
+
+ViGEmClient.cpp is still compiled (MIT, no driver needed) so that turning
+the option on stays a one-flag change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/cmake/compile_definitions/windows.cmake b/cmake/compile_definitions/windows.cmake
+index 33c601cb8d77da8f638dffbd1dbec77a5bbbff77..398f4bbf4afe007cd44b27998cc84a907ab5a69d 100644
+--- a/cmake/compile_definitions/windows.cmake
++++ b/cmake/compile_definitions/windows.cmake
+@@ -46,6 +46,12 @@ file(GLOB NVPREFS_FILES CONFIGURE_DEPENDS
+ 
+ # vigem
+ include_directories(SYSTEM "${CMAKE_SOURCE_DIR}/third-party/ViGEmClient/include")
++if(SUNSHINE_ENABLE_VIGEM)
++    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_VIGEM=1)
++else()
++    list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_VIGEM=0)
++    message(STATUS "ViGEm gamepad emulation disabled")
++endif()
+ 
+ # sunshine icon
+ if(NOT DEFINED SUNSHINE_ICON_PATH)
+diff --git a/cmake/packaging/windows.cmake b/cmake/packaging/windows.cmake
+index 69830da6b9abd520fe5c0e0de174961098851ab8..4a80e2ca2632c2b6ec349c90dec67d8ad3fd13ed 100644
+--- a/cmake/packaging/windows.cmake
++++ b/cmake/packaging/windows.cmake
+@@ -10,6 +10,7 @@ if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64" AND DEFINED _MINHOOK_DLL)
+ endif()
+ 
+ # ViGEmBus installer
++if(SUNSHINE_ENABLE_VIGEM)
+ set(SUNSHINE_THIRD_PARTY_DIR "third-party")
+ set(VIGEMBUS_INSTALLER "${CMAKE_BINARY_DIR}/${SUNSHINE_THIRD_PARTY_DIR}/vigembus_installer.exe")
+ set(VIGEMBUS_DOWNLOAD_URL_1 "https://github.com/nefarius/ViGEmBus/releases/download")
+@@ -26,6 +27,7 @@ install(FILES ${VIGEMBUS_INSTALLER}
+         DESTINATION "${SUNSHINE_THIRD_PARTY_DIR}"
+         RENAME "vigembus_installer.exe"
+         COMPONENT gamepad)
++endif()
+ 
+ # Adding tools
+ install(TARGETS dxgi-info RUNTIME DESTINATION "tools" COMPONENT dxgi)
+diff --git a/cmake/prep/options.cmake b/cmake/prep/options.cmake
+index 942054837ce4b68ae20f9ef1210f4a0cc1b04f7e..b31496e0e768aa9fc9c9c5dd9b0b615cb6c066b4 100644
+--- a/cmake/prep/options.cmake
++++ b/cmake/prep/options.cmake
+@@ -28,6 +28,10 @@ set(SPLITPLAY_UPSTREAM_COMMIT "unknown"
+ if(WIN32)
+     option(SUNSHINE_USE_STATIC_QT
+             "Require static Qt libraries and their static third-party dependencies." ON)
++
++    # SplitPlay: ViGEmBus is retired and its X360 pads do not respect session isolation.
++    # SplitPlay replaces it with its own per-session pad driver (Stage 4), so it is off by default.
++    option(SUNSHINE_ENABLE_VIGEM "Enable ViGEm virtual gamepads." OFF)
+ endif()
+ 
+ option(SUNSHINE_SYSTEM_VULKAN_HEADERS "Use system installation of vulkan-headers rather than the submodule." OFF)
+diff --git a/src/platform/windows/input.cpp b/src/platform/windows/input.cpp
+index c979feb84fbe6493cd741f8963134122ae70f051..af400a16ec4a34337b52aa7950f4906b1f664345 100644
+--- a/src/platform/windows/input.cpp
++++ b/src/platform/windows/input.cpp
+@@ -516,11 +516,17 @@ namespace platf {
+     input_t result {new input_raw_t {}};
+     auto &raw = *(input_raw_t *) result.get();
+ 
++#if defined SUNSHINE_VIGEM && SUNSHINE_VIGEM >= 1
+     raw.vigem = new vigem_t {};
+     if (raw.vigem->init()) {
+       delete raw.vigem;
+       raw.vigem = nullptr;
+     }
++#else
++    // SplitPlay: ViGEm is disabled at build time (SUNSHINE_ENABLE_VIGEM=OFF); gamepads arrive with Stage 4.
++    raw.vigem = nullptr;
++    BOOST_LOG(info) << "ViGEm gamepad emulation is disabled in this build"sv;
++#endif
+ 
+     // Get pointers to virtual touch/pen input functions (Win10 1809+)
+     raw.fnCreateSyntheticPointerDevice = (decltype(CreateSyntheticPointerDevice) *) GetProcAddress(GetModuleHandleA("user32.dll"), "CreateSyntheticPointerDevice");

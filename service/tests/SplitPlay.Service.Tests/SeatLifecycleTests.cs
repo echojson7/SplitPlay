@@ -37,12 +37,17 @@ public sealed class SeatLifecycleTests
         Assert.Equal((2560, 1440), (rdp.Width, rdp.Height));
         Assert.DoesNotContain(rdp.Password, rdp.ToString(), StringComparison.Ordinal);
 
-        // The worker runs in the seat's session with the documented command line.
+        // The worker runs in the seat's session with the documented command line: the default Sunshine settings,
+        // overridden or extended by the desk's workerSettings.
         var worker = svc.Launcher.Requests.Single(r => r.Role == Worker);
         Assert.Equal(7, worker.SessionId);
         var deskDir = Path.Combine(svc.DataRoot, "desks", "desk-1");
         Assert.Equal(
-            ["--desk-dir", deskDir, "--pipe", worker.PipeName, "--desk", "desk-1", "port=48089", "min_log_level=warning", "encoder=nvenc"],
+            [
+                "--desk-dir", deskDir, "--pipe", worker.PipeName, "--desk", "desk-1", "port=48089",
+                $"sunshine_name={Environment.MachineName}-desk-1", "min_log_level=warning", "nvenc_preset=1",
+                "nvenc_twopass=disabled", "hevc_mode=0", "av1_mode=0", "encoder=nvenc",
+            ],
             worker.Arguments);
         Assert.EndsWith("splitplay-worker.exe", worker.Executable, StringComparison.Ordinal);
         Assert.Null(svc.Launcher.Requests.Single(r => r.Role == Seat).SessionId);

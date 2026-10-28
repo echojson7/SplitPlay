@@ -243,26 +243,69 @@ const gpuOptions = computed(() => {
 .settings {
   display: flex;
   flex-direction: column;
-  gap: 18px;
 }
 
 .inline-msg {
-  margin: 0;
+  margin: 0 0 8px;
 }
 
+/* Each setting is a line: label on the left, control on the right, a divider between lines. */
+.fields,
 .toggles {
   display: flex;
+  flex-direction: column;
+}
+
+.fields > .field,
+.toggles > .switch {
+  flex-direction: row;
   flex-wrap: wrap;
-  gap: 4px 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 16px;
+  min-height: 52px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--divider);
+}
+
+.fields > .field > label {
+  flex: 1;
+}
+
+.fields > .field > input,
+.fields > .field > select {
+  width: 240px;
+  flex: none;
+}
+
+.fields > .field > .err {
+  width: 100%;
+  text-align: right;
+}
+
+.toggles > .switch {
+  flex-direction: row-reverse;
+  width: 100%;
+}
+
+.settings > .field {
+  padding: 10px 0;
 }
 
 .actions {
   display: flex;
   justify-content: flex-end;
+  padding-top: 8px;
 }
 
 .actions button {
-  min-width: 140px;
-  height: 38px;
+  min-width: 120px;
+}
+
+@media (width <= 600px) {
+  .fields > .field > input,
+  .fields > .field > select {
+    width: 160px;
+  }
 }
 </style>

@@ -92,32 +92,6 @@ export function stateTone(state: DeskState): StateTone {
   }
 }
 
-/** Cover colours (soft gradient start, end, and the glyph colour): a stable pick per desk id. */
-const COVERS: ReadonlyArray<readonly [string, string, string]> = [
-  ['#dbeafe', '#e0e7ff', '#006fee'],
-  ['#ede9fe', '#fae8ff', '#7828c8'],
-  ['#d1fae5', '#ccfbf1', '#12a150'],
-  ['#ffe4e6', '#fce7f3', '#c20e4d'],
-  ['#fef3c7', '#ffedd5', '#c4841d'],
-  ['#e0f2fe', '#cffafe', '#0e7490'],
-  ['#e0e7ff', '#f3e8ff', '#4f46e5'],
-]
-
-export function coverColors(id: string): readonly [string, string, string] {
-  // FNV-1a
-  let h = 2166136261
-  for (const c of id) {
-    h ^= c.charCodeAt(0)
-    h = Math.imul(h, 16777619) >>> 0
-  }
-  return COVERS[h % COVERS.length]!
-}
-
-export function coverStyle(id: string): Record<string, string> {
-  const [a, b, ink] = coverColors(id)
-  return { '--cover-a': a, '--cover-b': b, '--cover-ink': ink }
-}
-
 /** Builds the config for a new desk from the wizard's three answers. */
 export function newDeskConfig(opts: {
   user: string

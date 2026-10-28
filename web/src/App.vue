@@ -35,39 +35,40 @@ async function logout(): Promise<void> {
 
 <template>
   <div :class="['shell', { bare }]">
-    <header v-if="!bare" class="topbar">
-      <div class="topbar-inner">
-        <RouterLink to="/" class="brand" :aria-label="t('app.title')">
-          <BrandMark :size="28" />
-          <span class="wordmark">SplitPlay</span>
+    <aside v-if="!bare" class="navpane">
+      <RouterLink to="/" class="appname" :aria-label="t('app.title')">
+        <BrandMark :size="16" />
+        <span class="appname-text">SplitPlay</span>
+      </RouterLink>
+      <nav class="nav" aria-label="main">
+        <RouterLink to="/" :class="{ active: section === 'library' }">
+          <AppIcon name="monitor" :size="16" /><span>{{ t('nav.library') }}</span>
         </RouterLink>
-        <nav class="tabs segmented" aria-label="main">
-          <RouterLink to="/" :class="{ active: section === 'library' }">{{ t('nav.library') }}</RouterLink>
-          <RouterLink to="/settings" :class="{ active: section === 'settings' }">{{ t('nav.settings') }}</RouterLink>
-        </nav>
-        <span class="spacer" />
-        <RouterLink to="/diagnostics" :class="['diag-link', { active: section === 'diagnostics' }]">{{ t('nav.diagnostics') }}</RouterLink>
-        <button
-          v-if="s.session?.authenticated && !s.session.setupRequired"
-          type="button"
-          class="btn-icon btn-ghost logout"
-          :title="t('nav.logout')"
-          :aria-label="t('nav.logout')"
-          @click="logout"
-        >
-          <AppIcon name="logout" :size="18" />
-        </button>
-      </div>
-    </header>
-
-    <div v-if="!s.online" class="strip bad" role="alert"><span class="strip-dot" />{{ t('app.offline') }}</div>
-    <div v-else-if="!bare && s.session?.setupRequired" class="strip warn">
-      <span class="strip-dot" />
-      <span>{{ t('app.noPassword') }}</span>
-      <RouterLink to="/settings">{{ t('app.setPassword') }}</RouterLink>
-    </div>
+        <RouterLink to="/settings" :class="{ active: section === 'settings' }">
+          <AppIcon name="gear" :size="16" /><span>{{ t('nav.settings') }}</span>
+        </RouterLink>
+        <RouterLink to="/diagnostics" :class="{ active: section === 'diagnostics' }">
+          <AppIcon name="activity" :size="16" /><span>{{ t('nav.diagnostics') }}</span>
+        </RouterLink>
+      </nav>
+      <span class="spacer" />
+      <button
+        v-if="s.session?.authenticated && !s.session.setupRequired"
+        type="button"
+        class="navitem logout"
+        :title="t('nav.logout')"
+        @click="logout"
+      >
+        <AppIcon name="logout" :size="16" /><span>{{ t('nav.logout') }}</span>
+      </button>
+    </aside>
 
     <main :class="{ page: !bare }">
+      <div v-if="!s.online" class="inline-msg strip" role="alert">{{ t('app.offline') }}</div>
+      <div v-else-if="!bare && s.session?.setupRequired" class="inline-msg warn strip">
+        <span class="spacer">{{ t('app.noPassword') }}</span>
+        <RouterLink to="/settings" class="btn">{{ t('app.setPassword') }}</RouterLink>
+      </div>
       <RouterView />
     </main>
     <ToastHost />
@@ -75,139 +76,144 @@ async function logout(): Promise<void> {
 </template>
 
 <style scoped>
-.topbar {
+.shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.shell.bare {
+  display: block;
+}
+
+.navpane {
   position: sticky;
   top: 0;
-  z-index: 20;
-  background: color-mix(in srgb, var(--card) 78%, transparent);
-  backdrop-filter: saturate(1.6) blur(14px);
-  border-bottom: 1px solid var(--border);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 8px;
 }
 
-.topbar-inner {
+.appname {
   display: flex;
   align-items: center;
-  gap: 24px;
-  max-width: 1320px;
-  height: 60px;
-  margin: 0 auto;
-  padding: 0 32px;
+  gap: 12px;
+  height: 48px;
+  padding: 0 16px;
+  margin-bottom: 4px;
+  color: var(--text);
+  font-size: 12px;
 }
 
-.brand {
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.nav > a,
+.navitem {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  color: var(--text);
-}
-
-.wordmark {
-  font-size: 16px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-}
-
-.brand:hover {
-  color: var(--text);
-  opacity: 0.85;
-}
-
-.tabs > a {
-  min-width: 96px;
-}
-
-.diag-link {
-  display: inline-flex;
-  align-items: center;
-  height: 32px;
-  padding: 0 12px;
-  border-radius: 999px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
-  transition:
-    color 0.15s var(--ease),
-    background 0.15s var(--ease);
-}
-
-.diag-link:hover {
-  color: var(--text);
-  background: var(--fill);
-}
-
-.diag-link.active {
-  color: var(--primary-ink);
-  background: var(--primary-soft);
-}
-
-.logout {
-  width: 36px;
+  justify-content: flex-start;
+  gap: 16px;
   height: 36px;
-  margin-right: -8px;
-  color: var(--muted);
+  margin: 0 4px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
 }
 
-.strip {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 16px;
-  font-size: 13px;
-  font-weight: 500;
-  border-bottom: 1px solid var(--border);
+.nav > a:hover,
+.navitem:hover:not(:disabled) {
+  background: var(--subtle-hover);
 }
 
-.strip-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: currentcolor;
-  flex: none;
+.nav > a.active {
+  background: var(--nav-selected);
 }
 
-.strip.bad {
-  background: var(--danger-soft);
-  color: var(--danger-ink);
-}
-
-.strip.warn {
-  background: var(--warning-soft);
-  color: var(--warning-ink);
-}
-
-.strip.warn a {
-  font-weight: 600;
-  color: var(--primary);
+.nav > a.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 3px;
+  height: 16px;
+  margin-top: -8px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
 .page {
-  max-width: 1320px;
-  margin: 0 auto;
-  padding: 32px 32px 56px;
+  width: 100%;
+  max-width: 1040px;
+  padding: 28px 40px 40px;
 }
 
-@media (width <= 720px) {
-  .topbar-inner {
-    gap: 12px;
-    padding: 0 16px;
+.strip {
+  margin-bottom: 16px;
+}
+
+@media (width <= 640px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
 
-  .wordmark {
+  .navpane {
+    z-index: 20;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 8px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .appname {
+    height: 40px;
+    padding: 0 8px;
+    margin: 0;
+  }
+
+  .appname-text,
+  .nav > a .icon,
+  .logout span {
     display: none;
   }
 
-  .tabs > a {
-    min-width: 0;
-    padding: 0 12px;
+  .nav {
+    flex-direction: row;
+    gap: 2px;
   }
 
-  .diag-link {
-    padding: 0 8px;
+  .nav > a,
+  .navitem {
+    height: 40px;
+    margin: 0;
+    padding: 0 10px;
+  }
+
+  .nav > a.active::before {
+    left: 50%;
+    top: auto;
+    bottom: 0;
+    width: 16px;
+    height: 3px;
+    margin: 0 0 0 -8px;
   }
 
   .page {
-    padding: 20px 16px 40px;
+    padding: 16px 16px 32px;
   }
 }
 </style>

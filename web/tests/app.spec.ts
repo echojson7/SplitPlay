@@ -47,7 +47,7 @@ describe('app smoke', () => {
     expect(router.currentRoute.value.name).toBe('library')
     expect(store.state.session).toMatchObject({ authenticated: true, setupRequired: false })
 
-    expect(w.find('nav.tabs').text()).toContain('Библиотека')
+    expect(w.find('nav.nav').text()).toContain('Столы')
     expect(w.findAll('article[data-desk]')).toHaveLength(2)
     expect(w.text()).toContain('Аня')
 

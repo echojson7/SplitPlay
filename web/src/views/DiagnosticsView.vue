@@ -11,7 +11,10 @@ defineProps<{ tab: 'metrics' | 'logs' }>()
 
 <template>
   <section class="diag-page">
-    <nav class="tabs segmented" :aria-label="t('nav.diagnostics')">
+    <header class="page-head">
+      <h1>{{ t('nav.diagnostics') }}</h1>
+    </header>
+    <nav class="pivot" :aria-label="t('nav.diagnostics')">
       <RouterLink to="/diagnostics/metrics" :class="{ active: tab === 'metrics' }">{{ t('diag.metrics') }}</RouterLink>
       <RouterLink to="/diagnostics/logs" :class="{ active: tab === 'logs' }">{{ t('diag.logs') }}</RouterLink>
     </nav>
@@ -21,17 +24,7 @@ defineProps<{ tab: 'metrics' | 'logs' }>()
 </template>
 
 <style scoped>
-.diag-page {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
-}
-
-.tabs {
-  align-self: flex-start;
-}
-
-.tabs > a {
-  min-width: 96px;
+.diag-page .page-head {
+  margin-bottom: 12px;
 }
 </style>

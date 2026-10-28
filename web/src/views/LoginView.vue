@@ -62,7 +62,7 @@ function skip(): void {
 <template>
   <section class="login">
     <div class="brand">
-      <BrandMark :size="44" />
+      <BrandMark :size="20" />
       <span class="wordmark">SplitPlay</span>
     </div>
     <form class="box" novalidate @submit.prevent="submit">
@@ -96,39 +96,36 @@ function skip(): void {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 24px;
+  gap: 20px;
   padding: 24px 16px;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   color: var(--text);
 }
 
 .wordmark {
-  font-size: 24px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
+  font-size: 14px;
 }
 
 .box {
-  width: min(400px, 100%);
+  width: min(360px, 100%);
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 32px;
-  border-radius: var(--radius-xl);
-  background: var(--card);
+  padding: 24px;
+  border-radius: 8px;
+  background: var(--row);
   border: 1px solid var(--border);
-  box-shadow: var(--shadow-md);
 }
 
 .title {
-  font-size: 18px;
+  font-size: 20px;
+  line-height: 28px;
   font-weight: 600;
-  color: var(--text);
 }
 
 .err {
@@ -136,8 +133,6 @@ function skip(): void {
 }
 
 .submit {
-  height: 44px;
-  font-size: 15px;
-  margin-top: 6px;
+  margin-top: 4px;
 }
 </style>

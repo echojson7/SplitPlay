@@ -27,25 +27,32 @@ function deskName(id: string): string {
   <div class="metrics">
     <p v-if="!host" class="muted">{{ t('metrics.noData') }}</p>
     <template v-else>
-      <div class="tiles">
-        <div class="panel tile">
-          <span class="k">{{ t('metrics.cpu') }}</span>
-          <span class="big">{{ host.cpuPercent == null ? t('common.none') : t('unit.percent', { value: host.cpuPercent }) }}</span>
-          <div class="meter"><span :style="{ width: `${host.cpuPercent ?? 0}%` }" /></div>
+      <div class="rows">
+        <div class="srow compact">
+          <span class="text"><span class="title">{{ t('metrics.cpu') }}</span></span>
+          <div class="ctl">
+            <span class="val">{{ host.cpuPercent == null ? t('common.none') : t('unit.percent', { value: host.cpuPercent }) }}</span>
+            <div class="pbar meter"><span :style="{ width: `${host.cpuPercent ?? 0}%` }" /></div>
+          </div>
         </div>
-        <div class="panel tile">
-          <span class="k">{{ t('metrics.memory') }}</span>
-          <span class="big">{{ gb(host.memoryUsedMb) }} <small class="muted">/ {{ gb(host.memoryTotalMb) }}</small></span>
-          <div class="meter"><span :style="{ width: `${pct(host.memoryUsedMb, host.memoryTotalMb) ?? 0}%` }" /></div>
+        <div class="srow compact">
+          <span class="text"><span class="title">{{ t('metrics.memory') }}</span></span>
+          <div class="ctl">
+            <span class="val">{{ gb(host.memoryUsedMb) }} / {{ gb(host.memoryTotalMb) }}</span>
+            <div class="pbar meter"><span :style="{ width: `${pct(host.memoryUsedMb, host.memoryTotalMb) ?? 0}%` }" /></div>
+          </div>
         </div>
-        <div class="panel tile">
-          <span class="k">{{ t('metrics.compose') }}</span>
-          <span class="big">{{ host.composeHz == null ? t('common.none') : `${host.composeHz} Hz` }}</span>
+        <div class="srow compact">
+          <span class="text"><span class="title">{{ t('metrics.compose') }}</span></span>
+          <div class="ctl">
+            <span class="val">{{ host.composeHz == null ? t('common.none') : `${host.composeHz} Hz` }}</span>
+            <span class="meter" />
+          </div>
         </div>
       </div>
 
+      <h2 class="group-title">{{ t('metrics.gpus') }}</h2>
       <div class="panel table-wrap">
-        <h2>{{ t('metrics.gpus') }}</h2>
         <table>
           <thead>
             <tr>
@@ -57,7 +64,7 @@ function deskName(id: string): string {
           </thead>
           <tbody>
             <tr v-for="g in host.gpus" :key="g.luid">
-              <td class="strong">{{ g.name }}</td>
+              <td>{{ g.name }}</td>
               <td class="num">{{ g.utilizationPercent ?? t('common.none') }}</td>
               <td class="num">{{ g.encoderPercent ?? t('common.none') }}</td>
               <td class="num">{{ gb(g.vramUsedMb) }} / {{ gb(g.vramTotalMb) }}</td>
@@ -66,8 +73,8 @@ function deskName(id: string): string {
         </table>
       </div>
 
+      <h2 class="group-title">{{ t('metrics.desks') }}</h2>
       <div class="panel table-wrap">
-        <h2>{{ t('metrics.desks') }}</h2>
         <table>
           <thead>
             <tr>
@@ -80,7 +87,7 @@ function deskName(id: string): string {
           </thead>
           <tbody>
             <tr v-for="d in s.metrics?.desks ?? []" :key="d.id">
-              <td class="strong">{{ deskName(d.id) }}</td>
+              <td>{{ deskName(d.id) }}</td>
               <td class="num">{{ fmtNumber(d.fps ?? 0) }}</td>
               <td class="num">{{ fmtBitrate(d.bitrateKbps ?? 0) }}</td>
               <td class="num">{{ t('unit.ms', { value: fmtNumber(d.encodeMsP99 ?? 0, 2) }) }}</td>
@@ -94,60 +101,18 @@ function deskName(id: string): string {
 </template>
 
 <style scoped>
-.metrics {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
-.tiles {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 16px;
-}
-
-.tile {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.k {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--muted);
-}
-
-.big {
-  font-size: 28px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: var(--text);
+.val {
   font-variant-numeric: tabular-nums;
-}
-
-.big small {
-  font-size: 14px;
-  font-weight: 400;
+  color: var(--text-2);
 }
 
 .meter {
-  height: 6px;
-  border-radius: 3px;
-  background: var(--fill);
-  overflow: hidden;
+  width: 160px;
 }
 
-.meter span {
-  display: block;
-  height: 100%;
-  border-radius: 3px;
-  background: var(--primary);
-  transition: width 0.5s var(--ease);
-}
-
-.strong {
-  color: var(--text);
-  font-weight: 500;
+@media (width <= 600px) {
+  .meter {
+    width: 64px;
+  }
 }
 </style>

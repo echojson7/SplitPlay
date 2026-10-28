@@ -59,7 +59,7 @@ describe('DeskCard', () => {
     const w = await mountCard(desk('Stopped'))
     const play = w.find('[data-action="start"]')
     expect(play.text()).toContain('Запустить')
-    expect(play.classes()).toContain('btn-success')
+    expect(play.classes()).toContain('btn-accent')
     expect(w.find('[data-action="pair"]').attributes('disabled')).toBeDefined()
     await play.trigger('click')
     expect(w.emitted('start')).toHaveLength(1)

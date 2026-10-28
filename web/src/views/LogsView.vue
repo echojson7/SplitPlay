@@ -79,14 +79,14 @@ watch(follow, schedule)
 .logs {
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
 }
 
 .filters {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
 }
 
 .filters select {
@@ -100,10 +100,10 @@ watch(follow, schedule)
 .log {
   font-family: var(--mono);
   font-size: 12px;
-  max-height: calc(100vh - 250px);
+  line-height: 18px;
+  max-height: calc(100vh - 260px);
   min-height: 200px;
   overflow: auto;
-  padding: 12px 16px;
 }
 
 .line {
@@ -112,30 +112,23 @@ watch(follow, schedule)
   gap: 12px;
   white-space: pre-wrap;
   word-break: break-word;
-  padding: 3px 0;
-  color: var(--text-2);
+  padding: 1px 0;
+  color: var(--text);
 }
 
-.time {
-  color: var(--faint);
+.time,
+.lvl,
+.comp {
+  color: var(--text-2);
 }
 
 .lvl {
   text-transform: uppercase;
-  color: var(--muted);
-}
-
-.comp {
-  color: var(--primary-ink);
-}
-
-.lvl-warn .lvl {
-  color: var(--warning-ink);
 }
 
 .lvl-error .lvl,
 .lvl-fatal .lvl {
-  color: var(--danger-ink);
+  color: var(--bad);
 }
 
 @media (width <= 640px) {

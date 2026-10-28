@@ -1,9 +1,7 @@
 <!-- SPDX-License-Identifier: MIT -->
-<!-- Modal dialog: dimmed backdrop, panel with a title bar. Escape or the backdrop closes it. -->
+<!-- Modal dialog (ContentDialog): dimmed backdrop, title, content and a command strip. Escape closes it. -->
 <script setup lang="ts">
 import { nextTick, onUnmounted, ref, watch } from 'vue'
-import { t } from '../i18n'
-import AppIcon from './AppIcon.vue'
 
 const props = withDefaults(defineProps<{ open: boolean; title: string; width?: number }>(), { width: 440 })
 const emit = defineEmits<{ close: [] }>()
@@ -32,15 +30,10 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
 
 <template>
   <Transition name="modal">
-    <div v-if="open" class="backdrop" @mousedown.self="emit('close')">
+    <div v-if="open" class="backdrop">
       <div ref="panel" class="modal" role="dialog" aria-modal="true" :aria-label="title" :style="{ width: `min(${width}px, calc(100vw - 32px))` }">
-        <header>
-          <h2>{{ title }}</h2>
-          <button type="button" class="btn-ghost close" :aria-label="t('common.close')" @click="emit('close')">
-            <AppIcon name="close" :size="16" />
-          </button>
-        </header>
         <div class="body">
+          <h2 class="dlg-title">{{ title }}</h2>
           <slot />
         </div>
       </div>
@@ -56,54 +49,60 @@ onUnmounted(() => document.removeEventListener('keydown', onKey))
   display: grid;
   place-items: center;
   padding: 16px;
-  background: rgb(0 0 0 / 28%);
-  backdrop-filter: blur(6px);
+  background: var(--smoke);
   overflow-y: auto;
 }
 
 .modal {
-  background: var(--card);
+  background: var(--dialog);
   border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-lg);
+  border-radius: 8px;
+  box-shadow: var(--shadow-dialog);
   max-height: calc(100vh - 32px);
   display: flex;
   flex-direction: column;
-}
-
-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 18px 16px 0 24px;
-}
-
-header h2 {
-  flex: 1;
-  font-size: 18px;
-  font-weight: 600;
-}
-
-.close {
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border-radius: 50%;
+  overflow: hidden;
 }
 
 .body {
-  padding: 16px 24px 24px;
+  padding: 24px 24px 0;
   overflow-y: auto;
+}
+
+.dlg-title {
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
+  margin-bottom: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ContentDialog command area: buttons on a darker strip at the bottom. */
+.body :deep(.dlg-foot) {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 24px -24px 0;
+  padding: 24px;
+  background: var(--dialog-footer);
+  border-top: 1px solid var(--border);
+}
+
+.body :deep(.dlg-foot) > button {
+  min-width: 120px;
 }
 
 .modal-enter-active,
 .modal-leave-active {
-  transition: opacity 0.18s var(--ease);
+  transition: opacity 0.15s ease;
 }
 
 .modal-enter-active .modal,
 .modal-leave-active .modal {
-  transition: transform 0.18s var(--ease);
+  transition: transform 0.15s cubic-bezier(0.2, 0, 0, 1);
 }
 
 .modal-enter-from,
@@ -111,8 +110,7 @@ header h2 {
   opacity: 0;
 }
 
-.modal-enter-from .modal,
-.modal-leave-to .modal {
-  transform: translateY(8px) scale(0.98);
+.modal-enter-from .modal {
+  transform: scale(1.05);
 }
 </style>

@@ -12,20 +12,14 @@ const emit = defineEmits<{ confirm: []; close: [] }>()
 </script>
 
 <template>
-  <ModalDialog :open="open" :title="title" :width="400" @close="emit('close')">
+  <ModalDialog :open="open" :title="title" :width="440" @close="emit('close')">
     <div class="confirm">
       <slot />
-      <div class="actions">
-        <button type="button" class="btn-ghost" @click="emit('close')">{{ t('common.cancel') }}</button>
-        <button
-          type="button"
-          :class="[danger ? 'btn-danger-solid' : 'btn-primary', 'primary-action']"
-          :disabled="busy"
-          data-confirm
-          @click="emit('confirm')"
-        >
+      <div class="dlg-foot">
+        <button type="button" class="btn-accent primary-action" :disabled="busy" data-confirm @click="emit('confirm')">
           {{ confirmLabel }}
         </button>
+        <button type="button" @click="emit('close')">{{ t('common.cancel') }}</button>
       </div>
     </div>
   </ModalDialog>
@@ -35,16 +29,10 @@ const emit = defineEmits<{ confirm: []; close: [] }>()
 .confirm {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 12px;
 }
 
-.actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.actions button {
-  min-width: 110px;
+.dlg-foot > button {
+  flex: 1;
 }
 </style>

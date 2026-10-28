@@ -36,6 +36,15 @@ const ICONS = {
       'M16 12a4 4 0 1 1-8 0a4 4 0 1 1 8 0z M12 2.5v2 M12 19.5v2 M2.5 12h2 M19.5 12h2 M5.3 5.3l1.4 1.4 M17.3 17.3l1.4 1.4 M5.3 18.7l1.4-1.4 M17.3 6.7l1.4-1.4',
   },
   moon: { stroke: 'M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z' },
+  more: { fill: 'M7 12a1.6 1.6 0 1 1-3.2 0a1.6 1.6 0 1 1 3.2 0z M13.6 12a1.6 1.6 0 1 1-3.2 0a1.6 1.6 0 1 1 3.2 0z M20.2 12a1.6 1.6 0 1 1-3.2 0a1.6 1.6 0 1 1 3.2 0z' },
+  chevronRight: { stroke: 'M9 5l7 7-7 7' },
+  activity: { stroke: 'M3 12h4l3-7 4 14 3-7h4' },
+  globe: { stroke: 'M21 12a9 9 0 1 1-18 0a9 9 0 1 1 18 0z M3 12h18 M12 3c2.5 2.6 3.7 5.6 3.7 9s-1.2 6.4-3.7 9 M12 3c-2.5 2.6-3.7 5.6-3.7 9s1.2 6.4 3.7 9' },
+  link: { stroke: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1 M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1' },
+  lock: { stroke: 'M5.5 10.5h13v10h-13z M8.5 10.5V7.5a3.5 3.5 0 0 1 7 0v3' },
+  archive: { stroke: 'M3.5 4.5h17v4h-17z M5 8.5v11h14v-11 M10 12.5h4' },
+  info: { stroke: 'M21 12a9 9 0 1 1-18 0a9 9 0 1 1 18 0z M12 11v5.5 M12 7.5v.5' },
+  sliders: { stroke: 'M4 7h10 M18 7h2 M4 17h2 M10 17h10 M16 5v4 M8 15v4' },
 } as const
 
 export type IconName = keyof typeof ICONS
@@ -60,7 +69,7 @@ const paths = computed(() => iconPaths(props.name))
       :d="paths.stroke"
       fill="none"
       stroke="currentColor"
-      stroke-width="2"
+      stroke-width="1.5"
       stroke-linecap="round"
       stroke-linejoin="round"
     />

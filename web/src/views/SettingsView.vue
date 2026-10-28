@@ -23,10 +23,10 @@ const LANGUAGES: ReadonlyArray<{ value: Locale; label: string }> = [
   { value: 'en', label: 'English' },
 ]
 const THEMES = [
-  { value: 'light', label: 'settings.themeLight', icon: 'sun' },
-  { value: 'dark', label: 'settings.themeDark', icon: 'moon' },
-  { value: 'system', label: 'settings.themeSystem', icon: 'monitor' },
-] as const satisfies ReadonlyArray<{ value: ThemeMode; label: string; icon: string }>
+  { value: 'light', label: 'settings.themeLight' },
+  { value: 'dark', label: 'settings.themeDark' },
+  { value: 'system', label: 'settings.themeSystem' },
+] as const satisfies ReadonlyArray<{ value: ThemeMode; label: string }>
 
 const currentPassword = ref('')
 const newPassword = ref('')
@@ -77,6 +77,10 @@ async function changePassword(): Promise<void> {
   }, t('settings.passwordChanged'))
 }
 
+function onTheme(e: Event): void {
+  setTheme((e.target as HTMLSelectElement).value as ThemeMode)
+}
+
 function onLanguage(e: Event): void {
   setLocale((e.target as HTMLSelectElement).value as Locale)
 }
@@ -106,86 +110,86 @@ function importConfig(): Promise<void> {
 
 <template>
   <section class="settings-page">
-    <h1>{{ t('settings.title') }}</h1>
+    <header class="page-head">
+      <h1>{{ t('settings.title') }}</h1>
+    </header>
 
-    <div class="grid">
-      <form class="panel" novalidate @submit.prevent="changePassword">
-        <h2>{{ t('settings.password') }}</h2>
-        <div class="stack">
-          <div v-if="!s.session?.setupRequired" class="field">
-            <label for="cur-pw">{{ t('settings.currentPassword') }}</label>
-            <input id="cur-pw" v-model="currentPassword" type="password" autocomplete="current-password" />
-          </div>
-          <div class="field">
-            <label for="new-pw">{{ t('settings.newPassword') }}</label>
-            <input id="new-pw" v-model="newPassword" type="password" autocomplete="new-password" />
-          </div>
-          <div class="field">
-            <label for="new-pw2">{{ t('settings.repeatPassword') }}</label>
-            <input id="new-pw2" v-model="repeatPassword" type="password" autocomplete="new-password" />
-          </div>
-          <p v-if="passwordError" class="err" role="alert">{{ passwordError }}</p>
-          <div class="actions">
-            <button type="submit" class="btn-primary" :disabled="busy">
-              {{ s.session?.setupRequired ? t('settings.setPassword') : t('settings.changePassword') }}
-            </button>
-          </div>
+    <h2 class="group-title">{{ t('settings.appearance') }}</h2>
+    <div class="rows">
+      <div class="srow">
+        <AppIcon name="sun" :size="16" />
+        <label class="text" for="theme"><span class="title">{{ t('settings.theme') }}</span></label>
+        <div class="ctl">
+          <select id="theme" name="theme" :value="themeMode" @change="onTheme">
+            <option v-for="m in THEMES" :key="m.value" :value="m.value" :data-theme-mode="m.value">{{ t(m.label) }}</option>
+          </select>
         </div>
-      </form>
-
-      <div class="panel">
-        <h2>{{ t('settings.appearance') }}</h2>
-        <div class="stack">
-          <div class="field">
-            <span class="field-label">{{ t('settings.theme') }}</span>
-            <div class="segmented theme" role="radiogroup" :aria-label="t('settings.theme')">
-              <button
-                v-for="m in THEMES"
-                :key="m.value"
-                type="button"
-                role="radio"
-                :aria-checked="themeMode === m.value"
-                :class="{ selected: themeMode === m.value }"
-                :data-theme-mode="m.value"
-                @click="setTheme(m.value)"
-              >
-                <AppIcon :name="m.icon" :size="15" />{{ t(m.label) }}
-              </button>
-            </div>
-          </div>
-          <div class="field">
-            <label for="lang">{{ t('settings.language') }}</label>
-            <select id="lang" :value="locale" @change="onLanguage">
-              <option v-for="l in LANGUAGES" :key="l.value" :value="l.value">{{ l.label }}</option>
-            </select>
-          </div>
+      </div>
+      <div class="srow">
+        <AppIcon name="globe" :size="16" />
+        <label class="text" for="lang"><span class="title">{{ t('settings.language') }}</span></label>
+        <div class="ctl">
+          <select id="lang" :value="locale" @change="onLanguage">
+            <option v-for="l in LANGUAGES" :key="l.value" :value="l.value">{{ l.label }}</option>
+          </select>
         </div>
-        <p v-if="s.health" class="about muted">
-          {{ t('settings.version', { version: s.health.version }) }} ·
-          {{ t('settings.uptime', { time: fmtDuration(s.health.uptimeSeconds) }) }}
-        </p>
       </div>
     </div>
 
-    <details class="more">
-      <summary><AppIcon name="gear" :size="16" />{{ t('common.more') }}<span class="spacer" /><AppIcon class="chev" name="chevronDown" :size="16" /></summary>
-      <div class="more-body">
-        <h3 class="sub">{{ t('settings.service') }}</h3>
-        <form v-if="host" class="stack" @submit.prevent="saveHost">
-          <div class="fields">
-            <div class="field">
+    <h2 class="group-title">{{ t('settings.password') }}</h2>
+    <form class="rows" novalidate @submit.prevent="changePassword">
+      <div v-if="!s.session?.setupRequired" class="srow">
+        <AppIcon name="lock" :size="16" />
+        <label class="text" for="cur-pw"><span class="title">{{ t('settings.currentPassword') }}</span></label>
+        <div class="ctl"><input id="cur-pw" v-model="currentPassword" type="password" autocomplete="current-password" /></div>
+      </div>
+      <div class="srow">
+        <AppIcon v-if="s.session?.setupRequired" name="lock" :size="16" />
+        <span v-else class="row-pad" />
+        <label class="text" for="new-pw"><span class="title">{{ t('settings.newPassword') }}</span></label>
+        <div class="ctl"><input id="new-pw" v-model="newPassword" type="password" autocomplete="new-password" /></div>
+      </div>
+      <div class="srow">
+        <span class="row-pad" />
+        <label class="text" for="new-pw2"><span class="title">{{ t('settings.repeatPassword') }}</span></label>
+        <div class="ctl"><input id="new-pw2" v-model="repeatPassword" type="password" autocomplete="new-password" /></div>
+      </div>
+      <div class="srow compact">
+        <span class="row-pad" />
+        <div class="text">
+          <span v-if="passwordError" class="desc err" role="alert">{{ passwordError }}</span>
+        </div>
+        <div class="ctl">
+          <button type="submit" class="btn-accent" :disabled="busy">
+            {{ s.session?.setupRequired ? t('settings.setPassword') : t('settings.changePassword') }}
+          </button>
+        </div>
+      </div>
+    </form>
+
+    <h2 class="group-title">{{ t('common.more') }}</h2>
+    <div class="rows">
+      <details class="more">
+        <summary>
+          <AppIcon name="gear" :size="16" />
+          <span class="text"><span class="title">{{ t('settings.service') }}</span></span>
+          <AppIcon class="chev" name="chevronDown" :size="16" />
+        </summary>
+        <div class="more-body inner">
+          <form v-if="host" @submit.prevent="saveHost">
+            <div class="irow">
               <label for="h-port">{{ t('settings.webPort') }}</label>
               <input id="h-port" v-model.number="host.webPort" type="number" min="1" max="65535" />
             </div>
-            <div class="field">
+            <div class="irow">
               <label for="h-bps">{{ t('settings.basePortStart') }}</label>
               <input id="h-bps" v-model.number="host.basePortStart" type="number" min="1029" max="65514" />
             </div>
-            <div class="field">
+            <div class="irow">
               <label for="h-stride">{{ t('settings.basePortStride') }}</label>
               <input id="h-stride" v-model.number="host.basePortStride" type="number" min="27" max="1000" />
             </div>
-            <div class="field">
+            <div class="irow">
               <label for="h-comp">{{ t('settings.composeInterval') }}</label>
               <select id="h-comp" v-model.number="host.composeIntervalMs">
                 <option v-for="ms in COMPOSE_INTERVALS" :key="ms" :value="ms">
@@ -193,127 +197,138 @@ function importConfig(): Promise<void> {
                 </option>
               </select>
             </div>
-            <div class="field">
+            <div class="irow">
               <label for="h-log">{{ t('settings.logLevel') }}</label>
               <select id="h-log" v-model="host.logLevel">
                 <option v-for="l in LOG_LEVELS" :key="l" :value="l">{{ l }}</option>
               </select>
             </div>
-          </div>
-          <label class="switch">
-            <input id="h-lan" v-model="host.lanAccess" type="checkbox" />
-            {{ t('settings.lanAccess') }}
-          </label>
-          <div class="actions">
-            <button type="submit" class="btn-primary" :disabled="busy">{{ t('common.save') }}</button>
-          </div>
-        </form>
-        <p v-else-if="unsupported" class="muted">{{ t('common.notSupported') }}</p>
-        <p v-else class="muted">{{ t('common.loading') }}</p>
-
-        <h3 class="sub">{{ t('settings.backup') }}</h3>
-        <div class="backup">
-          <label class="switch">
-            <input v-model="includeSecrets" type="checkbox" />
-            {{ t('settings.exportSecrets') }}
-          </label>
-          <input
-            v-if="includeSecrets"
-            v-model="exportPassword"
-            type="password"
-            autocomplete="new-password"
-            :placeholder="t('settings.exportPassword')"
-            :aria-label="t('settings.exportPassword')"
-          />
-          <button type="button" :disabled="busy || (includeSecrets && !exportPassword)" @click="exportConfig">
-            {{ t('settings.export') }}
-          </button>
+            <div class="irow">
+              <label for="h-lan">{{ t('settings.lanAccess') }}</label>
+              <span class="switch"><input id="h-lan" v-model="host.lanAccess" type="checkbox" /></span>
+            </div>
+            <div class="irow end">
+              <button type="submit" class="btn-accent" :disabled="busy">{{ t('common.save') }}</button>
+            </div>
+          </form>
+          <p v-else-if="unsupported" class="muted pad">{{ t('common.notSupported') }}</p>
+          <p v-else class="muted pad">{{ t('common.loading') }}</p>
         </div>
-        <div class="backup">
-          <input ref="importInput" class="file" type="file" accept=".zip,application/zip" :aria-label="t('settings.import')" />
-          <button type="button" :disabled="busy" @click="importConfig">{{ t('settings.import') }}</button>
+      </details>
+
+      <details class="more">
+        <summary>
+          <AppIcon name="archive" :size="16" />
+          <span class="text"><span class="title">{{ t('settings.backup') }}</span></span>
+          <AppIcon class="chev" name="chevronDown" :size="16" />
+        </summary>
+        <div class="more-body inner">
+          <div class="irow">
+            <label for="b-secrets">{{ t('settings.exportSecrets') }}</label>
+            <span class="switch"><input id="b-secrets" v-model="includeSecrets" type="checkbox" /></span>
+          </div>
+          <div v-if="includeSecrets" class="irow">
+            <label for="b-pw">{{ t('settings.exportPassword') }}</label>
+            <input id="b-pw" v-model="exportPassword" type="password" autocomplete="new-password" />
+          </div>
+          <div class="irow end">
+            <button type="button" :disabled="busy || (includeSecrets && !exportPassword)" @click="exportConfig">
+              {{ t('settings.export') }}
+            </button>
+          </div>
+          <div class="irow">
+            <input ref="importInput" class="file" type="file" accept=".zip,application/zip" :aria-label="t('settings.import')" />
+            <button type="button" :disabled="busy" @click="importConfig">{{ t('settings.import') }}</button>
+          </div>
+        </div>
+      </details>
+
+      <div v-if="s.health" class="srow">
+        <AppIcon name="info" :size="16" />
+        <div class="text">
+          <span class="title">{{ t('settings.version', { version: s.health.version }) }}</span>
+          <span class="desc">{{ t('settings.uptime', { time: fmtDuration(s.health.uptimeSeconds) }) }}</span>
         </div>
       </div>
-    </details>
+    </div>
   </section>
 </template>
 
 <style scoped>
-.settings-page {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  max-width: 920px;
+.ctl input,
+.ctl select {
+  width: 240px;
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+.row-pad {
+  width: 16px;
+  flex: none;
+}
+
+label.text {
+  cursor: default;
+}
+
+.desc.err {
+  color: var(--bad);
+}
+
+details.more > summary .text {
+  flex: 1;
+}
+
+.inner {
+  padding: 0 16px 0 48px;
+}
+
+.irow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 16px;
-  align-items: start;
+  min-height: 52px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--divider);
 }
 
-.stack {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+.irow:last-child {
+  border-bottom: 0;
 }
 
-.err {
-  margin: 0;
-}
-
-.actions {
-  display: flex;
+.irow.end {
   justify-content: flex-end;
 }
 
-.actions button {
-  min-width: 160px;
-  height: 38px;
+.irow > input,
+.irow > select {
+  width: 240px;
+  flex: none;
 }
 
-.about {
-  margin: 18px 0 0;
-  font-size: 12px;
-}
-
-.sub {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
-  margin: 6px 0 14px;
-}
-
-.sub + form,
-.sub + p {
-  margin-bottom: 22px;
-}
-
-.theme {
-  align-self: flex-start;
-}
-
-.theme button {
-  gap: 6px;
-}
-
-.settings-page > h1 {
-  font-size: 22px;
-}
-
-.backup {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.file {
-  height: auto;
-  padding: 6px;
+.irow > .file {
   flex: 1;
-  min-width: 200px;
+  width: auto;
+}
+
+.pad {
+  padding: 16px 0;
+}
+
+@media (width <= 600px) {
+  .srow > .icon,
+  .row-pad {
+    display: none;
+  }
+
+  .ctl input,
+  .ctl select,
+  .irow > input,
+  .irow > select {
+    width: 160px;
+  }
+
+  .inner {
+    padding-left: 16px;
+  }
 }
 </style>

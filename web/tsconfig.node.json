@@ -1,0 +1,14 @@
+{
+  "extends": "@tsconfig/node22/tsconfig.json",
+  "include": ["vite.config.ts", "mock/**/*.ts", "src/api/types.ts"],
+  "compilerOptions": {
+    "composite": true,
+    "noEmit": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "types": ["node"]
+  }
+}

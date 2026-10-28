@@ -11,7 +11,7 @@ public static class Program
         usage: splitplay [--url URL] [--data-root DIR] <command>
 
         service install [--bin PATH] [--data-root DIR] [--start]
-                                    register the 'SplitPlay' Windows service (delayed auto start,
+                                    register the 'SplitPlay' Windows service (auto start,
                                     restart on failure); updates it if it already exists
         service uninstall           stop and remove the service
         service start|stop [--timeout S]

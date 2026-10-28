@@ -42,7 +42,7 @@ static class Program
     {
         string exe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SplitPlay.Service.exe");
         // binPath= "\"C:\...\SplitPlay.Service.exe\" --stub-service"
-        return Run("sc.exe", "create " + Name + " binPath= \"\\\"" + exe + "\\\" --stub-service\" start= delayed-auto DisplayName= \"SplitPlay Host Service\"");
+        return Run("sc.exe", "create " + Name + " binPath= \"\\\"" + exe + "\\\" --stub-service\" start= auto DisplayName= \"SplitPlay Host Service\"");
     }
 
     static int Uninstall()

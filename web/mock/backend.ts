@@ -94,10 +94,22 @@ export function validateConfigBody(body: unknown): string | null {
 }
 
 /** Local Windows accounts of the mock host and their passwords. */
-const MOCK_USERS: ReadonlyArray<{ name: string; fullName: string; isAdmin: boolean; password: string; console?: boolean }> = [
-  { name: 'owner', fullName: 'PC Owner', isAdmin: true, password: 'owner', console: true },
-  { name: 'gamer', fullName: 'Second Player', isAdmin: false, password: 'gamer' },
+const MOCK_USERS: ReadonlyArray<{
+  name: string
+  fullName: string | null
+  isAdmin: boolean
+  password: string
+  console?: boolean
+  managed?: boolean
+}> = [
+  { name: 'owner', fullName: 'Владелец ПК', isAdmin: true, password: 'owner', console: true },
+  { name: 'anna', fullName: 'Анна', isAdmin: false, password: 'anna' },
+  { name: 'misha', fullName: 'Михаил', isAdmin: false, password: 'misha' },
+  { name: 'splitplay-guest', fullName: null, isAdmin: false, password: 'guest', managed: true },
 ]
+
+/** LAN addresses reported by GET /host/network. */
+const MOCK_ADDRESSES = ['192.168.1.20']
 
 /** Takes `password` out of a desk body; returns an error message for a wrong password of an existing account. */
 function takePassword(body: unknown): { password?: string; problem?: { status: number; code: string; message: string } } {
@@ -153,38 +165,31 @@ export class MockBackend {
 
   private seed(): void {
     const a = this.addDesk({
-      id: 'desk-1',
-      name: 'Skyrim box',
-      user: 'splitplay-desk1',
+      id: 'anna',
+      name: 'Аня',
+      user: 'anna',
       basePort: 48089,
       autostart: true,
       gpu: 'auto',
-      profile: { fps: 120, width: 1920, height: 1080, bitrateKbps: 60000, codec: 'hevc' },
+      profile: { fps: 120, width: 1920, height: 1080, bitrateKbps: 50000, codec: 'hevc' },
     })
-    a.desk.state = 'Streaming'
+    a.desk.state = 'Ready'
     a.desk.sessionId = 3
-    a.clients.push({ id: 'c0ffee00-0000-4000-8000-000000000001', name: 'Living room TV', pairedAt: '2026-10-20T18:00:00Z' })
+    a.desk.hasPassword = true
+    a.desk.userManaged = false
+    a.clients.push({ id: 'c0ffee00-0000-4000-8000-000000000001', name: 'Ноутбук Ани', pairedAt: '2026-10-20T18:00:00Z' })
     const b = this.addDesk({
-      id: 'gaming',
-      name: 'Competitive 500 Hz',
-      user: 'splitplay-gaming',
+      id: 'guest',
+      name: 'Гостевой',
+      user: 'splitplay-guest',
       basePort: 48189,
       autostart: false,
       gpu: '0x0000000000012345',
-      profile: { fps: 500, width: 1920, height: 1080, bitrateKbps: 150000, codec: 'av1' },
+      profile: { fps: 60, width: 2560, height: 1440, bitrateKbps: 45000, codec: 'av1' },
     })
     b.desk.state = 'Stopped'
-    const c = this.addDesk({
-      id: 'kids',
-      name: 'Kids',
-      user: 'splitplay-kids',
-      basePort: 48289,
-      autostart: true,
-      gpu: 'auto',
-      profile: { fps: 60, width: 1280, height: 720, bitrateKbps: 20000, codec: 'h264' },
-    })
-    c.desk.state = 'Faulted'
-    c.desk.lastError = 'seat: loopback RDP logon failed (0x80070005)'
+    b.desk.hasPassword = true
+    b.desk.userManaged = true
   }
 
   private addDesk(config: DeskConfig): DeskEntry {
@@ -305,7 +310,13 @@ export class MockBackend {
     if (path === '/desks' && method === 'GET') return ok([...this.desks.values()].map((e) => clone(e.desk)))
     if (path === '/host/users' && method === 'GET')
       return ok(
-        MOCK_USERS.map((u) => ({ name: u.name, fullName: u.fullName, isAdmin: u.isAdmin, isConsoleUser: !!u.console })),
+        MOCK_USERS.map((u) => ({
+          name: u.name,
+          fullName: u.fullName,
+          isAdmin: u.isAdmin,
+          isConsoleUser: !!u.console,
+          createdBySplitPlay: !!u.managed,
+        })),
       )
     if (path === '/desks' && method === 'POST') {
       const taken = takePassword(req.body)
@@ -323,7 +334,7 @@ export class MockBackend {
       const e = this.addDesk(c)
       e.desk.state = 'Stopped'
       e.desk.hasPassword = taken.password !== undefined
-      e.desk.userManaged = !MOCK_USERS.some((u) => u.name === c.user.toLowerCase())
+      e.desk.userManaged = !MOCK_USERS.some((u) => u.name === c.user.toLowerCase() && !u.managed)
       return ok(clone(e.desk), 201)
     }
 
@@ -416,6 +427,7 @@ export class MockBackend {
     if (path === '/metrics' && method === 'GET') return ok(this.metrics())
     if (path === '/logs' && method === 'GET') return ok(this.logs(req.query ?? {}))
     if (path === '/host' && method === 'GET') return ok(clone(this.host))
+    if (path === '/host/network' && method === 'GET') return ok({ addresses: [...MOCK_ADDRESSES] })
     if (path === '/host' && method === 'PUT') {
       const h = req.body as Partial<HostSettings> | undefined
       if (!h || typeof h.webPort !== 'number' || h.webPort < 1 || h.webPort > 65535)
@@ -492,7 +504,7 @@ export class MockBackend {
     const base = this.now() - 60_000
     for (let i = 0; i < 120; i++) {
       const component = components[i % 3]!
-      const desk = component === 'service' && i % 2 === 0 ? null : ['desk-1', 'gaming', 'kids'][i % 3]!
+      const desk = component === 'service' && i % 2 === 0 ? null : ['anna', 'guest'][i % 2]!
       lines.push({
         time: new Date(base + i * 500).toISOString(),
         level: levels[i % levels.length]!,
@@ -500,7 +512,7 @@ export class MockBackend {
         desk,
         message:
           component === 'worker'
-            ? `heartbeat seq=${i} fps=${desk === 'desk-1' ? 120 : 0}`
+            ? `heartbeat seq=${i} fps=${desk === 'anna' ? 120 : 0}`
             : component === 'seat'
               ? `rdp session state: logged_on (session ${2 + (i % 3)})`
               : `desk ${desk ?? '-'} supervisor tick`,

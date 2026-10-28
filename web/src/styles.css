@@ -1,82 +1,96 @@
 /* SPDX-License-Identifier: MIT */
+/* Steam-like dark theme. Colours are tokens; components use only these. */
 :root {
-  --bg: #f5f6f8;
-  --surface: #ffffff;
-  --surface-2: #eef0f3;
-  --border: #d9dde3;
-  --text: #1b1f24;
-  --muted: #5d6673;
-  --accent: #2f6fde;
-  --accent-text: #ffffff;
-  --ok: #1f8a4c;
-  --warn: #b26a00;
-  --bad: #c62f2f;
-  --info: #2f6fde;
-  --radius: 8px;
-  --mono: ui-monospace, 'Cascadia Mono', Consolas, monospace;
-  color-scheme: light dark;
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-  font-size: 15px;
+  --topbar: #171a21;
+  --bg: #1b2838;
+  --bg-deep: #141d29;
+  --panel: #213244;
+  --panel-2: #2a475e;
+  --panel-3: #32404f;
+  --line: #2f4256;
+  --line-strong: #3d5a76;
+  --text: #c7d5e0;
+  --text-strong: #ffffff;
+  --muted: #8f98a0;
+  --dim: #67707b;
+  --accent: #66c0f4;
+  --accent-strong: #1a9fff;
+  --ok: #8bc53f;
+  --busy: #66c0f4;
+  --warn: #e5b143;
+  --bad: #e2533f;
+  --play-1: #75b022;
+  --play-2: #588a1b;
+  --play-1-hover: #8ed629;
+  --play-2-hover: #6aa621;
+  --stop-1: #c4503f;
+  --stop-2: #8f3328;
+  --input: #0f1822;
+  --radius: 3px;
+  --shadow: 0 8px 24px rgb(0 0 0 / 35%);
+  --mono: 'Cascadia Mono', Consolas, 'Liberation Mono', monospace;
+  color-scheme: dark;
+  font-family: 'Motiva Sans', Arial, Helvetica, sans-serif;
+  font-size: 14px;
   line-height: 1.45;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #111418;
-    --surface: #1a1e24;
-    --surface-2: #232830;
-    --border: #323842;
-    --text: #e6e9ee;
-    --muted: #98a2b0;
-    --accent: #5b93f5;
-    --accent-text: #0b0e12;
-    --ok: #46c27a;
-    --warn: #e6a23c;
-    --bad: #f06a6a;
-    --info: #5b93f5;
-  }
 }
 
 * {
   box-sizing: border-box;
 }
 
+html {
+  background: #17222f;
+}
+
+html,
 body {
   margin: 0;
-  background: var(--bg);
+  min-height: 100%;
   color: var(--text);
+}
+
+body {
+  background:
+    radial-gradient(120% 60% at 50% -10%, rgb(42 71 94 / 75%) 0%, transparent 60%),
+    linear-gradient(180deg, #1b2838 0%, #17222f 100%);
+  min-height: 100vh;
+  overflow-x: hidden;
 }
 
 a {
   color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--text-strong);
+}
+
+h1,
+h2,
+h3 {
+  color: var(--text-strong);
+  font-weight: 700;
+  margin: 0;
 }
 
 h1 {
-  font-size: 1.5rem;
-  margin: 0 0 1rem;
+  font-size: 26px;
+  letter-spacing: 0.01em;
 }
 
 h2 {
-  font-size: 1.15rem;
-  margin: 1.5rem 0 0.75rem;
+  font-size: 15px;
 }
 
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 1rem;
-}
-
-.row {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  flex-wrap: wrap;
-}
-
-.spacer {
-  flex: 1;
+/* Section label: small uppercase text, as in the Steam library shelves. */
+.label {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
 }
 
 .muted {
@@ -87,122 +101,401 @@ h2 {
   font-family: var(--mono);
 }
 
-.error {
-  color: var(--bad);
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
-.notice {
+.spacer {
+  flex: 1;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* ---- panels ------------------------------------------------------------------------------- */
+
+.panel {
+  background: linear-gradient(180deg, rgb(42 71 94 / 55%) 0%, rgb(33 50 68 / 85%) 100%);
+  border: 1px solid rgb(255 255 255 / 4%);
   border-radius: var(--radius);
-  padding: 0.6rem 0.9rem;
-  margin-bottom: 1rem;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
+  padding: 18px 20px;
+  box-shadow: 0 2px 10px rgb(0 0 0 / 18%);
 }
 
-.notice.bad {
-  border-color: var(--bad);
-  color: var(--bad);
+.panel > h2,
+.panel-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0 0 14px;
 }
 
-.notice.warn {
-  border-color: var(--warn);
-}
-
-.notice.ok {
-  border-color: var(--ok);
-  color: var(--ok);
-}
+/* ---- buttons ------------------------------------------------------------------------------ */
 
 button,
-.button {
+.btn {
   font: inherit;
-  border: 1px solid var(--border);
-  background: var(--surface-2);
+  font-size: 14px;
   color: var(--text);
-  border-radius: 6px;
-  padding: 0.4rem 0.85rem;
+  background: var(--panel-3);
+  border: 0;
+  border-radius: 2px;
+  padding: 0 16px;
+  height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
   cursor: pointer;
   text-decoration: none;
-  display: inline-block;
+  white-space: nowrap;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease,
+    filter 0.15s ease;
 }
 
 button:hover:not(:disabled),
-.button:hover {
-  border-color: var(--accent);
+.btn:hover {
+  background: #3e5266;
+  color: var(--text-strong);
 }
 
 button:disabled {
-  opacity: 0.5;
+  opacity: 0.45;
   cursor: default;
 }
 
-button.primary,
-.button.primary {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--accent-text);
+button:focus-visible,
+.btn:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
-button.danger {
-  color: var(--bad);
+/* Blue action (Steam "btn_blue"). */
+.btn-primary {
+  background: linear-gradient(90deg, #06bfff 0%, #2d73ff 100%);
+  color: #fff;
+  font-weight: 700;
 }
+
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(90deg, #36ccff 0%, #4d89ff 100%);
+  box-shadow: 0 0 12px rgb(26 159 255 / 45%);
+}
+
+/* The green Play button. */
+.btn-play {
+  background: linear-gradient(90deg, var(--play-1) 5%, var(--play-2) 95%);
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  height: 40px;
+  padding: 0 20px;
+  text-shadow: 0 1px 1px rgb(0 0 0 / 25%);
+}
+
+.btn-play:hover:not(:disabled) {
+  background: linear-gradient(90deg, var(--play-1-hover) 5%, var(--play-2-hover) 95%);
+  color: #fff;
+  box-shadow: 0 0 14px rgb(117 176 34 / 50%);
+}
+
+.btn-stop {
+  background: linear-gradient(90deg, var(--stop-1) 5%, var(--stop-2) 95%);
+  color: #fff;
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  height: 40px;
+  padding: 0 20px;
+}
+
+.btn-stop:hover:not(:disabled) {
+  background: linear-gradient(90deg, #d8604e 5%, #a63d31 95%);
+  color: #fff;
+  box-shadow: 0 0 14px rgb(226 83 63 / 40%);
+}
+
+.btn-danger {
+  background: transparent;
+  color: #e77b6c;
+  box-shadow: inset 0 0 0 1px rgb(226 83 63 / 45%);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgb(226 83 63 / 16%);
+  color: #ff9d8f;
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--muted);
+}
+
+.btn-ghost:hover:not(:disabled) {
+  background: rgb(255 255 255 / 6%);
+}
+
+/* Square icon button. */
+.btn-icon {
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  background: rgb(50 64 79 / 85%);
+  color: var(--text);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.btn-icon.small {
+  width: 32px;
+  height: 32px;
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: #3e5266;
+  color: var(--text-strong);
+  box-shadow: 0 0 10px rgb(102 192 244 / 25%);
+}
+
+.btn-wide {
+  width: 100%;
+}
+
+/* ---- form controls ------------------------------------------------------------------------ */
 
 input,
-select {
+select,
+textarea {
   font: inherit;
-  color: var(--text);
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.35rem 0.55rem;
+  font-size: 14px;
+  color: var(--text-strong);
+  background: var(--input);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 0 10px;
+  height: 36px;
   min-width: 0;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+textarea {
+  height: auto;
+  padding: 8px 10px;
+  resize: vertical;
+}
+
+select {
+  padding-right: 28px;
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position:
+    calc(100% - 15px) 50%,
+    calc(100% - 10px) 50%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+}
+
+select option {
+  background: #1f2c3b;
+  color: var(--text);
+}
+
+input::placeholder {
+  color: var(--dim);
 }
 
 input:focus,
 select:focus,
-button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgb(102 192 244 / 18%);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  opacity: 0.5;
 }
 
 input[aria-invalid='true'] {
   border-color: var(--bad);
 }
 
+input[type='checkbox'] {
+  height: auto;
+}
+
 .field {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
-  margin-bottom: 0.9rem;
+  gap: 6px;
+  min-width: 0;
 }
 
-.field > label {
-  font-weight: 600;
-  font-size: 0.9rem;
-}
-
-.field .hint {
+.field > label,
+.field > .field-label {
+  font-size: 12px;
+  font-weight: 700;
   color: var(--muted);
-  font-size: 0.82rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
-.field .error {
-  font-size: 0.85rem;
+.hint {
+  font-size: 12px;
+  color: var(--muted);
 }
 
-.check {
-  display: flex;
-  gap: 0.5rem;
-  align-items: center;
-  margin-bottom: 0.9rem;
+.err {
+  font-size: 13px;
+  color: #ff8a7a;
 }
 
-.grid-2 {
+.fields {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 0 1rem;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 16px 18px;
 }
 
+/* Toggle switch built on a checkbox. */
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  user-select: none;
+  min-height: 36px;
+}
+
+.switch input {
+  appearance: none;
+  width: 38px;
+  height: 20px;
+  border-radius: 10px;
+  background: #0f1822;
+  border: 1px solid var(--line-strong);
+  position: relative;
+  cursor: pointer;
+  flex: none;
+  padding: 0;
+  transition: background 0.15s ease;
+}
+
+.switch input::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
+}
+
+.switch input:checked {
+  background: #1f5f8f;
+  border-color: var(--accent);
+}
+
+.switch input:checked::after {
+  transform: translateX(18px);
+  background: #fff;
+}
+
+/* Inline status line (errors, warnings). */
+.inline-msg {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-radius: 2px;
+  font-size: 13px;
+  background: rgb(226 83 63 / 12%);
+  color: #ff9d8f;
+  border-left: 3px solid var(--bad);
+}
+
+.inline-msg.warn {
+  background: rgb(229 177 67 / 10%);
+  color: #f0c869;
+  border-left-color: var(--warn);
+}
+
+.inline-msg.info {
+  background: rgb(102 192 244 / 10%);
+  color: var(--accent);
+  border-left-color: var(--accent);
+}
+
+/* Collapsible section («Дополнительно»). */
+details.more {
+  border-radius: var(--radius);
+  background: rgb(33 50 68 / 60%);
+  border: 1px solid rgb(255 255 255 / 4%);
+}
+
+details.more > summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  transition: color 0.15s ease;
+}
+
+details.more > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.more > summary:hover {
+  color: var(--text-strong);
+}
+
+details.more > summary .chev {
+  transition: transform 0.2s ease;
+}
+
+details.more[open] > summary .chev {
+  transform: rotate(180deg);
+}
+
+details.more > .more-body {
+  padding: 4px 20px 20px;
+}
+
+/* Tables (diagnostics). */
 table {
   width: 100%;
   border-collapse: collapse;
@@ -211,15 +504,17 @@ table {
 th,
 td {
   text-align: left;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid var(--border);
+  padding: 9px 12px;
+  border-bottom: 1px solid rgb(255 255 255 / 5%);
   white-space: nowrap;
 }
 
 th {
-  font-size: 0.82rem;
+  font-size: 11px;
   color: var(--muted);
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 td.num,
@@ -232,30 +527,23 @@ th.num {
   overflow-x: auto;
 }
 
-dl.props {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: 0.35rem 1rem;
-  margin: 0;
+/* Scrollbars in the Steam client style. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
 
-dl.props dt {
-  color: var(--muted);
+::-webkit-scrollbar-track {
+  background: transparent;
 }
 
-dl.props dd {
-  margin: 0;
+::-webkit-scrollbar-thumb {
+  background: #3d4c5c;
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
 }
 
-dialog {
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  background: var(--surface);
-  color: var(--text);
-  padding: 1.25rem;
-  width: min(420px, calc(100vw - 32px));
-}
-
-dialog::backdrop {
-  background: rgb(0 0 0 / 45%);
+::-webkit-scrollbar-thumb:hover {
+  background-color: #4f6275;
 }

@@ -94,6 +94,9 @@ public sealed class DeskDto
 
     public bool DisableBluetoothUserService { get; set; } = true;
 
+    /// <summary>See <see cref="DeskConfig.SteamIsolation"/>; always set in responses.</summary>
+    public bool SteamIsolation { get; set; } = true;
+
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, string>? WorkerSettings { get; set; }
 
@@ -107,6 +110,9 @@ public sealed class DeskDto
 /// such as Administrator, Guest, DefaultAccount and WDAGUtilityAccount are left out).
 /// </summary>
 public sealed record HostUserDto(string Name, string? FullName, bool IsAdmin, bool IsConsoleUser, bool CreatedBySplitPlay);
+
+/// <summary><c>GET /host/network</c>: LAN IPv4 addresses of the host, those with a default gateway first.</summary>
+public sealed record HostNetworkDto(IReadOnlyList<string> Addresses);
 
 /// <summary><c>GET /auth/session</c>: <c>{setupRequired, authenticated, csrfToken?}</c>.</summary>
 public sealed record AuthSessionDto(

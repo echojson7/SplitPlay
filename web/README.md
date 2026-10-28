@@ -1,8 +1,20 @@
 # SplitPlay web UI
 
-Vue 3 + Vite + TypeScript single-page app for the SplitPlay host: desks list, desk details
-(start/stop/restart, Pair New Client), create/edit desk, host settings, logs, metrics and
-login / first-time password setup. The UI is in Russian; English strings are the fallback.
+Vue 3 + Vite + TypeScript single-page app for the SplitPlay host, styled after the Steam client (dark theme only):
+
+- **Library** (`/`): a card per desk with the green Play / red Stop button, PIN pairing and settings, plus the
+  "Add desk" tile. A starting desk shows a progress bar on its card.
+- **Add desk** (`/desks/new`): a three-step dialog over the library: Windows user, password, resolution and FPS,
+  then "Create and start". The desk id and name come from the user name.
+- **Desk page** (`/desks/:id`): status and Play / Stop, the address to type in Moonlight (`<host IP>:<basePort>`, from
+  `GET /host/network`), PIN entry, paired devices, resolution and FPS. Bitrate, codec, GPU, user and password, ports,
+  autostart, Bluetooth and the Sunshine settings sit in the collapsed "Advanced" section; delete is at the bottom.
+- **Settings** (`/settings`): admin password and language; service options and backup under "Advanced".
+- **Diagnostics** (`/diagnostics/metrics`, `/diagnostics/logs`).
+- Login / first-time password setup.
+
+The UI is in Russian; English strings are the fallback. Labels stay short: no help paragraphs. Errors appear as
+inline lines or toasts.
 
 The SPA talks only to Web API v1 ([`docs/contracts/web-api.md`](../docs/contracts/web-api.md)) through the
 typed client in `src/api/client.ts`.
@@ -37,10 +49,13 @@ src/api/types.ts      API types (desk, metrics, logs, auth); assumed shapes are 
 src/api/client.ts     typed fetch client: CSRF header, error mapping (ApiError), list unwrapping, WebSocket URL
 src/api/validate.ts   client-side desk config rules from config.md
 src/i18n/messages.ts  every UI string: `en` (complete, fallback) and `ru` (UI language)
-src/store.ts          reactive desks/metrics/session; live updates via /ws with REST polling fallback
+src/store.ts          reactive desks/metrics/session/addresses; live updates via /ws with REST polling fallback
+src/desk.ts           desk helpers: presets, id from the user name, bitrate suggestion, progress, cover colours
+src/toast.ts          toast notifications
 src/router.ts         routes and the auth guard (setup -> login -> app)
-src/views/            pages
-src/components/       StateBadge, PairDialog, DeskForm
+src/styles.css        theme tokens and shared controls (buttons, fields, switches, panels)
+src/views/            pages: Library, Desk, Settings, Diagnostics (Metrics, Logs), Login
+src/components/       DeskCard, AddDeskWizard, DeskSettings, PairDialog, PinField, ModalDialog, ConfirmDialog, ...
 mock/backend.ts       in-memory Web API used by dev:mock and by the tests
 mock/vite-plugin.ts   mounts the mock under /api/v1 in the Vite dev server
 tests/                Vitest specs (API client, validation, i18n, components, whole-app smoke)
@@ -48,8 +63,10 @@ tests/                Vitest specs (API client, validation, i18n, components, wh
 
 ## Mock API
 
-`mock/backend.ts` implements every endpoint of web-api.md (except the `/ws` socket; the UI falls back to
-polling every 2 s) with three seeded desks, simulated lifecycle transitions and metrics. Pairing accepts any
+`mock/backend.ts` implements every endpoint of web-api.md (except the `/ws` socket; the dev server refuses it and the
+UI falls back to polling every 2 s) with two seeded desks (one Ready with a paired device, one Stopped), four
+Windows users (the console user, one free), the LAN address `192.168.1.20`, simulated lifecycle transitions and
+metrics. Pairing accepts any
 4-digit PIN on a running desk; `0000` simulates a timeout. No admin password is set initially, so the UI
 starts on the first-time setup page.
 
@@ -63,5 +80,7 @@ web-api.md leaves some response shapes open; the client accepts these and degrad
 - Client: `{ id, name, pairedAt? }`. Log line: `{ time, level, component, desk?, message }`.
 - `GET /metrics` -> `{ host: { cpuPercent?, memoryUsedMb?, memoryTotalMb?, composeHz?, gpus: [{ luid, name, utilizationPercent?, encoderPercent?, vramUsedMb?, vramTotalMb? }] }, desks: [{ id, fps, bitrateKbps, encodeMsP99, clients }] }`.
   The desk form's GPU list comes from `host.gpus`.
-- Host settings use `GET/PUT /host` (config.json `host` object). This endpoint is not in web-api.md yet;
-  when the service answers 404 the settings page says the service does not support it.
+- Host settings use `GET/PUT /host` (config.json `host` object); when the service answers 404 the settings page says
+  the service does not support it.
+- `GET /host/network` -> `{ addresses: [...] }`; an older service without it leaves the Moonlight address as
+  "PC address:<basePort>".

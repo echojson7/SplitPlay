@@ -96,6 +96,7 @@ internal sealed class DeskRuntime
                 Gpu = Config.Gpu,
                 Profile = Config.Profile,
                 DisableBluetoothUserService = Config.DisableBluetoothUserService,
+                SteamIsolation = Config.SteamIsolationEnabled,
                 WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,
                 LastError = Machine.LastError ?? Warning,

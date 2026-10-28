@@ -25,6 +25,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
       "userManaged": true,
       "gpu": "auto",
       "disableBluetoothUserService": true,
+      "steamIsolation": true,
       "workerSettings": { "min_log_level": "warning" },
       "profile": {
         "fps": 120,
@@ -53,6 +54,19 @@ Rules:
   Desk passwords live DPAPI-protected in `secrets\desks\<id>.bin`, never in this file.
 - `disableBluetoothUserService` (default `true`) stops the per-user `BluetoothUserService_*` instance in the desk
   session so it does not compete with the console user's Bluetooth devices (issue #3).
+- `steamIsolation` (default `true`; a request that leaves it out keeps the current value) lets the desk user's Steam
+  run next to the console user's Steam (Steam isolation research, 2026-10-28). Only the desk user's hive is changed, never the
+  console user's and never machine-wide: `HKU\<sid>\Environment\steam_master_ipc_name_override` = `SplitPlay_<id>`
+  (REG_SZ, `-` in the id becomes `_`); Steam's autostart `...\CurrentVersion\Run\Steam`, when present, gets
+  `-master_ipc_name_override SplitPlay_<id>` after `steam.exe`; a per-user `steam://` handler
+  (`Software\Classes\steam`, i.e. `UsrClass.dat`) mirrors the machine one plus the flag. Values are written before
+  logon with the profile mounted from disk when it exists, otherwise at the first logon (then the session is logged
+  off once, together with the keyboard-layout relogon, so explorer sees the variable). Each value SplitPlay writes is
+  recorded with its previous value in `desks\<id>\steam-isolation.json`; turning the option off, changing `user` or
+  deleting the desk restores them (a value changed since is left alone). Existing accounts (`userManaged: false`) are
+  included. With Steam installed, the desk's `apps.json` also gets a Moonlight app "Steam":
+  `"<InstallPath>\steam.exe" -master_ipc_name_override SplitPlay_<id> -gamepadui` (an owner's own "Steam" entry
+  without the flag is kept). Changing the option requires a stopped desk.
 - `workerSettings`: extra Sunshine `name=value` settings passed to the worker after the service defaults (ipc.md);
   names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters; `port` is reserved.
 - `basePort` unique; if omitted the service picks `basePortStart + stride * k` with the lowest free `k ≥ 0`. A desk occupies `basePort-5 … basePort+21`.

@@ -30,7 +30,8 @@ public sealed class DeskProvisioningException(string message, Exception? inner =
 public interface IDeskPlatform
 {
     /// <summary>
-    /// Ensures the desk's account and stored password are usable and the RDP host is prepared.
+    /// Ensures the desk's account and stored password are usable and the RDP host is prepared. With Steam isolation on
+    /// and a profile that exists, the user's hive gets the isolation values before the session logs on (best effort).
     /// Managed accounts (<see cref="DeskConfig.UserManaged"/>) are created when missing (stored or random password,
     /// never expires, in Users and Remote Desktop Users) and get a new password when the stored one is missing or stale.
     /// An account SplitPlay did not create is never changed except for being added to Remote Desktop Users: its stored
@@ -53,9 +54,19 @@ public interface IDeskPlatform
 
     /// <summary>
     /// Runs once the desk session is logged on. Returns true if something was changed that only applies at the next
-    /// logon (the console user's keyboard layouts were copied for the first time).
+    /// logon (the console user's keyboard layouts were copied for the first time, or the Steam isolation environment
+    /// variable was newly written).
     /// </summary>
     bool OnSessionLogon(DeskConfig desk, int sessionId, string deskDirectory);
+
+    /// <summary>
+    /// Undoes the desk's Steam isolation (<see cref="DeskConfig.SteamIsolation"/>) in the hive of the user it was applied
+    /// to: recorded previous values are restored. No-op when nothing is recorded. Best effort: failures are logged.
+    /// </summary>
+    void RevertSteamIsolation(string deskId);
+
+    /// <summary>The machine's <c>steam.exe</c> (from <c>HKLM\SOFTWARE\WOW6432Node\Valve\Steam\InstallPath</c>), or null.</summary>
+    string? SteamExecutable();
 
     /// <summary>Stops the <c>BluetoothUserService_*</c> instance running in <paramref name="sessionId"/>; returns what was stopped.</summary>
     IReadOnlyList<string> StopBluetoothUserService(int sessionId);

@@ -52,15 +52,15 @@ describe('validateDeskConfig', () => {
 describe('i18n', () => {
   it('defaults to Russian', () => {
     expect(locale.value).toBe('ru')
-    expect(t('nav.desks')).toBe('Столы')
+    expect(t('nav.library')).toBe('Библиотека')
   })
 
   it('interpolates parameters', () => {
-    expect(translate('en', 'desk.notFound', { id: 'x' })).toBe('Desk x not found')
+    expect(translate('en', 'desk.paired', { name: 'x' })).toBe('Device paired: x')
   })
 
   it('falls back to English for keys missing in Russian', () => {
-    const key = 'nav.desks' as MessageKey
+    const key = 'nav.library' as MessageKey
     const saved = ru[key]
     delete ru[key]
     try {

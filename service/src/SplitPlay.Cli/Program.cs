@@ -21,9 +21,10 @@ public static class Program
         desk show <id> [--json]
         desk create <id> [--name N] [--user U] [--base-port P] [--autostart] [--gpu auto|0x…]
                          [--fps N] [--width N] [--height N] [--bitrate-kbps N] [--codec h264|hevc|av1]
-                         [--password-stdin | --ask-password]
+                         [--password-stdin | --ask-password] [--no-steam-isolation]
                                     --user may name an existing local account; its Windows password is then
                                     required (read from stdin or a hidden prompt, never an argument)
+                                    --no-steam-isolation: the desk user's Steam keeps the default IPC name
         desk set-password <id> [--password-stdin | --ask-password]
                                     store (after verifying) the Windows password of the desk's user
         desk start <id> [--wait] [--timeout S]
@@ -46,7 +47,7 @@ public static class Program
         Exit codes: 0 ok, 1 error, 2 usage, 3 service unreachable, 4 timeout.
         """;
 
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "wait", "autostart", "start", "help", "skip-termwrap", "delete-user", "password-stdin", "ask-password" };
+    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "wait", "autostart", "start", "help", "skip-termwrap", "delete-user", "password-stdin", "ask-password", "no-steam-isolation" };
 
     public static async Task<int> Main(string[] argv)
     {

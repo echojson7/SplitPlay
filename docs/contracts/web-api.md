@@ -31,6 +31,7 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 | POST | `/auth/login`, `/auth/logout`, `/auth/password` | login, logout, set or change the admin password |
 | GET, PUT | `/host` | read or replace the `host` object of config.md; validated and saved; a `webPort` change applies after a service restart; a `lanAccess` change toggles the firewall rule `SplitPlay Web UI` |
 | GET | `/host/users` | local accounts that can be a desk user: `[{"name","fullName","isAdmin","isConsoleUser","createdBySplitPlay"}]` (built-in accounts left out) |
+| GET | `/host/network` | LAN addresses of the host for Moonlight: `{"addresses":["192.168.1.20"]}`: IPv4 addresses of interfaces that are up, without loopback and link-local (169.254/16), those of interfaces with a default gateway first; empty when none. A desk is added in Moonlight as `<address>:<basePort>` |
 | GET | `/desks` | array of desks with live state |
 | POST | `/desks` | create a desk (body = desk config, see config.md, plus optional `password`: the Windows password of `user`, verified when the account exists, used for a new account otherwise) |
 | GET | `/desks/{id}` | one desk with live state |
@@ -56,6 +57,7 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
   "userManaged": true,
   "hasPassword": true,
   "resolutionPendingRestart": false,
+  "steamIsolation": true,
   "state": "Stopped",
   "sessionId": null,
   "basePort": 48089,
@@ -69,6 +71,8 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.
+`steamIsolation` (config.md) is always present in responses; POST/PUT accept it, and a PUT without it keeps the current
+value. Changing it on a running desk is `409 invalid_state`.
 
 `state` is one of the lifecycle states in ARCHITECTURE.md §4:
 `Defined, Provisioning, Connecting, SessionReady, DisplayReady, Ready, Streaming, Recovering, Faulted, Stopping, Stopped`.

@@ -7,6 +7,7 @@ using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Lifecycle;
+using SplitPlay.Core.Steam;
 using SplitPlay.Service.Api;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Hosting;
@@ -182,6 +183,7 @@ public sealed class DeskSupervisor : IHostedService
 
             desk.User ??= ConfigStore.DefaultUserName(desk.Id, _config.Snapshot().Desks.Select(d => d.User));
             desk.UserManaged = CheckUser(desk.User, password);
+            desk.SteamIsolation ??= true;
             var saved = _config.Update(cfg =>
             {
                 cfg.Desks.Add(desk);
@@ -241,12 +243,14 @@ public sealed class DeskSupervisor : IHostedService
             desk.User ??= current.User;
             desk.Name ??= current.Name;
             desk.Profile ??= new ProfileConfig();
+            desk.SteamIsolation ??= current.SteamIsolation ?? true;
             var userChanged = !string.Equals(desk.User, current.User, StringComparison.OrdinalIgnoreCase);
             desk.UserManaged = userChanged || password is not null ? CheckUser(desk.User!, password) : current.UserManaged;
 
             if (!idle && (desk.Name != current.Name || !string.Equals(desk.User, current.User, StringComparison.OrdinalIgnoreCase)
                           || desk.BasePort != current.BasePort || desk.Autostart != current.Autostart || desk.Gpu != current.Gpu
                           || desk.DisableBluetoothUserService != current.DisableBluetoothUserService
+                          || desk.SteamIsolationEnabled != current.SteamIsolationEnabled
                           || !SameSettings(desk.WorkerSettings, current.WorkerSettings)))
             {
                 throw ApiException.Conflict(ApiErrorCodes.InvalidState, $"desk '{id}' is running: only 'profile' can change; stop it first");
@@ -266,6 +270,12 @@ public sealed class DeskSupervisor : IHostedService
             else if (userChanged)
             {
                 _platform.ForgetPassword(id);
+            }
+
+            if (userChanged || !saved.SteamIsolationEnabled)
+            {
+                // The old user's hive gets its previous values back (the desk is idle: its session is logged off).
+                _platform.RevertSteamIsolation(id);
             }
 
             IpcConnection? connection;
@@ -900,6 +910,7 @@ public sealed class DeskSupervisor : IHostedService
         }
         else
         {
+            UpdateSteamApp(deskId, config, deskDirectory);
             args.AddRange(["--desk-dir", deskDirectory, "--pipe", pipe, "--desk", deskId]);
             args.Add(FormattableString.Invariant($"port={config.BasePort}"));
             foreach (var (name, value) in WorkerSettings(deskId, config))
@@ -914,6 +925,26 @@ public sealed class DeskSupervisor : IHostedService
             Arguments = args,
             SessionId = session,
         };
+    }
+
+    /// <summary>
+    /// The Moonlight app "Steam" in the desk's <c>apps.json</c> (read by the worker at start-up): starts the desk's
+    /// isolated Steam in Big Picture; removed again when isolation is off or Steam is not installed.
+    /// </summary>
+    private void UpdateSteamApp(string deskId, DeskConfig config, string deskDirectory)
+    {
+        try
+        {
+            var steam = config.SteamIsolationEnabled ? _platform.SteamExecutable() : null;
+            if (SteamApps.Ensure(Path.Combine(deskDirectory, SteamApps.FileName), deskId, steam, config.SteamIsolationEnabled))
+            {
+                _logger.LogInformation("Desk {Desk}: {Action} the Moonlight app \"Steam\" in apps.json", deskId, steam is null ? "removed" : "updated");
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            _logger.LogWarning("Desk {Desk}: could not update apps.json: {Message}", deskId, ex.Message);
+        }
     }
 
     // ------------------------------------------------------------------ seat
@@ -975,8 +1006,9 @@ public sealed class DeskSupervisor : IHostedService
 
         if (again)
         {
-            // Windows loads the keyboard layout list at logon: log the new profile off once so the copied layouts apply.
-            _logger.LogInformation("Desk {Desk}: logging the new session off once so that the copied keyboard layouts apply", rt.Id);
+            // Windows reads the keyboard layout list and the user's environment at logon: log the session off once so the
+            // copied layouts and the Steam isolation variable apply.
+            _logger.LogInformation("Desk {Desk}: logging the new session off once so that the copied keyboard layouts and the Steam environment apply", rt.Id);
             await StopSeatAsync(rt).ConfigureAwait(false);
             failure = await StartSeatAsync(rt, config, credentials, stop).ConfigureAwait(false);
             if (failure is not null)

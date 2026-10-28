@@ -1,50 +1,54 @@
 // SPDX-License-Identifier: MIT
 using System.Diagnostics;
-using Microsoft.Extensions.Options;
 
 namespace SplitPlay.Service.Supervision;
 
 /// <summary>
-/// Starts a configurable executable with <c>[ChildArguments] --pipe &lt;name&gt; --desk &lt;id&gt;</c>.
-/// Stage 2 stub: the child runs as the service account in the service's session. Stage 3 replaces the start with
-/// <c>CreateProcessAsUser</c> (duplicated SYSTEM token with <c>TokenSessionId</c> = desk session) inside a per-desk
-/// job object.
+/// Starts real executables. On Windows every child gets its own job object (kill on close); a child with
+/// <see cref="ChildLaunchRequest.SessionId"/> is started in that session with a duplicate of the service's SYSTEM token
+/// (<see cref="Win32ChildProcess"/>). Elsewhere (developer machines, Linux CI) it is a plain <see cref="Process"/>.
 /// </summary>
-public sealed class ProcessChildLauncher(IOptions<SupervisorOptions> options, ILogger<ProcessChildLauncher> logger) : IChildLauncher
+public sealed class ProcessChildLauncher(ILogger<ProcessChildLauncher> logger) : IChildLauncher
 {
     public Task<IChildProcess> LaunchAsync(ChildLaunchRequest request, CancellationToken cancellationToken)
     {
-        var o = options.Value;
-        var executable = Path.IsPathRooted(o.ChildExecutable)
-            ? o.ChildExecutable
-            : Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, o.ChildExecutable));
-
+        ArgumentNullException.ThrowIfNull(request);
+        var executable = request.Executable;
         if (!File.Exists(executable))
         {
-            throw new FileNotFoundException($"child executable not found: {executable}", executable);
+            throw new FileNotFoundException($"{request.Role} executable not found: {executable}", executable);
         }
 
-        var startInfo = new ProcessStartInfo(executable)
+        var workingDirectory = Directory.Exists(request.DeskDirectory) ? request.DeskDirectory : AppContext.BaseDirectory;
+        IChildProcess child;
+        if (OperatingSystem.IsWindows())
         {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            WorkingDirectory = Directory.Exists(request.DeskDirectory) ? request.DeskDirectory : AppContext.BaseDirectory,
-        };
+            child = Win32ChildProcess.Start(executable, request.Arguments, workingDirectory, request.SessionId);
+        }
+        else
+        {
+            if (request.SessionId is not null)
+            {
+                throw new PlatformNotSupportedException("starting a child in another session needs Windows");
+            }
 
-        foreach (var arg in o.ChildArguments.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-        {
-            startInfo.ArgumentList.Add(arg);
+            var startInfo = new ProcessStartInfo(executable)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = workingDirectory,
+            };
+            foreach (var argument in request.Arguments)
+            {
+                startInfo.ArgumentList.Add(argument);
+            }
+
+            child = new ProcessChild(Process.Start(startInfo) ?? throw new InvalidOperationException($"could not start {executable}"));
         }
 
-        startInfo.ArgumentList.Add("--pipe");
-        startInfo.ArgumentList.Add(request.PipeName);
-        startInfo.ArgumentList.Add("--desk");
-        startInfo.ArgumentList.Add(request.DeskId);
-
-        var process = Process.Start(startInfo) ?? throw new InvalidOperationException($"could not start {executable}");
-        logger.LogInformation("Started {Executable} for desk {Desk} (pid {Pid}, attempt {Attempt})",
-            Path.GetFileName(executable), request.DeskId, process.Id, request.Attempt);
-        return Task.FromResult<IChildProcess>(new ProcessChild(process));
+        logger.LogInformation("Started {Executable} for desk {Desk} as {Role} (pid {Pid}, session {Session}, attempt {Attempt})",
+            Path.GetFileName(executable), request.DeskId, request.Role, child.Pid, request.SessionId?.ToString() ?? "own", request.Attempt);
+        return Task.FromResult(child);
     }
 
     private sealed class ProcessChild : IChildProcess

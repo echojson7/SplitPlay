@@ -51,6 +51,7 @@ public sealed partial class SplitPlayJsonContext : JsonSerializerContext;
 [JsonSerializable(typeof(ListClientsMessage))]
 [JsonSerializable(typeof(UnpairMessage))]
 [JsonSerializable(typeof(SendSasMessage))]
+[JsonSerializable(typeof(SetModeMessage))]
 [JsonSerializable(typeof(ShutdownMessage))]
 [JsonSerializable(typeof(ResultMessage))]
 [JsonSerializable(typeof(int))]

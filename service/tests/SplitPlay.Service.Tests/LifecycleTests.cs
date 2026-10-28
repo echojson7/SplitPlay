@@ -10,15 +10,19 @@ namespace SplitPlay.Service.Tests;
 /// <summary>Supervisor behaviour: handshake, heartbeat timeout, backoff, Faulted, shutdown, real child processes.</summary>
 public sealed class LifecycleTests
 {
+    /// <summary>Applies <paramref name="behavior"/> to workers only; seats behave normally.</summary>
+    internal static Func<Supervision.ChildLaunchRequest, FakeChildBehavior> Worker(FakeChildBehavior behavior) =>
+        r => r.Role == IpcProtocol.Roles.Worker ? behavior : FakeChildBehavior.Normal;
+
     [Fact]
     public async Task Hung_child_is_detected_and_restarted()
     {
         await using var svc = await TestService.StartAsync(setup: l =>
-            l.Behavior = r => r.Attempt == 1 ? FakeChildBehavior.StopHeartbeats : FakeChildBehavior.Normal);
+            l.Behavior = r => r.Role == IpcProtocol.Roles.Worker && r.Attempt == 1 ? FakeChildBehavior.StopHeartbeats : FakeChildBehavior.Normal);
         await svc.CreateDeskAsync("desk-1");
         await svc.PostDeskActionAsync("desk-1", "start");
 
-        await svc.WaitForAsync("desk-1", _ => svc.Launcher.Launches >= 2, what: "a relaunch");
+        await svc.WaitForAsync("desk-1", _ => svc.Launcher.LaunchesOf(IpcProtocol.Roles.Worker) >= 2, what: "a relaunch");
         var ready = await svc.WaitForStateAsync("desk-1", DeskState.Ready);
         Assert.Null(ready.LastError);
 
@@ -30,13 +34,14 @@ public sealed class LifecycleTests
     [Fact]
     public async Task Crash_loop_ends_in_faulted_and_stop_recovers()
     {
-        await using var svc = await TestService.StartAsync(setup: l => l.Behavior = _ => FakeChildBehavior.ExitAfterReady);
+        await using var svc = await TestService.StartAsync(setup: l => l.Behavior = Worker(FakeChildBehavior.ExitAfterReady));
         await svc.CreateDeskAsync("desk-1");
         await svc.PostDeskActionAsync("desk-1", "start");
 
         var faulted = await svc.WaitForStateAsync("desk-1", DeskState.Faulted, TimeSpan.FromSeconds(30));
         Assert.Contains("exited with code 3", faulted.LastError, StringComparison.Ordinal);
-        Assert.Equal(4, svc.Launcher.Launches); // MaxFailuresInWindow = 3 in tests, so the 4th failure faults.
+        Assert.Equal(4, svc.Launcher.LaunchesOf(IpcProtocol.Roles.Worker)); // MaxFailuresInWindow = 3 in tests, so the 4th failure faults.
+        Assert.Equal(1, svc.Launcher.LaunchesOf(IpcProtocol.Roles.Seat)); // worker crashes never touch the seat
 
         Assert.Equal(HttpStatusCode.Conflict, (await svc.Client.PostAsync("/api/v1/desks/desk-1/start", null)).StatusCode);
 
@@ -74,7 +79,7 @@ public sealed class LifecycleTests
     public async Task Missing_ready_times_out()
     {
         await using var svc = await TestService.StartAsync(["--Supervisor:ReadyTimeoutMs=300", "--Supervisor:MaxFailuresInWindow=0"],
-            setup: l => l.Behavior = _ => FakeChildBehavior.NoReady);
+            setup: l => l.Behavior = Worker(FakeChildBehavior.NoReady));
         await svc.CreateDeskAsync("desk-1");
         await svc.PostDeskActionAsync("desk-1", "start");
         var faulted = await svc.WaitForStateAsync("desk-1", DeskState.Faulted);
@@ -85,7 +90,7 @@ public sealed class LifecycleTests
     public async Task Child_that_ignores_shutdown_is_killed()
     {
         await using var svc = await TestService.StartAsync(["--Supervisor:ShutdownTimeoutMs=300"],
-            setup: l => l.Behavior = _ => FakeChildBehavior.IgnoreShutdown);
+            setup: l => l.Behavior = Worker(FakeChildBehavior.IgnoreShutdown));
         await svc.CreateDeskAsync("desk-1");
         await svc.PostDeskActionAsync("desk-1", "start");
         await svc.WaitForStateAsync("desk-1", DeskState.Ready);
@@ -174,8 +179,9 @@ public sealed class LifecycleTests
         await using var svc = await TestService.StartAsync(
         [
             "--Supervisor:Launcher=process",
-            $"--Supervisor:ChildExecutable={exe}",
-            "--Supervisor:ChildArguments=fake-child --heartbeat-ms 100",
+            "--Supervisor:Seat=none",
+            $"--Supervisor:WorkerExecutable={exe}",
+            "--Supervisor:WorkerArguments=fake-child --heartbeat-ms 100",
             "--Supervisor:HelloTimeoutMs=20000",
         ]);
         await svc.CreateDeskAsync("desk-1");
@@ -192,7 +198,8 @@ public sealed class LifecycleTests
     public async Task Missing_child_executable_faults_the_desk()
     {
         await using var svc = await TestService.StartAsync(
-            ["--Supervisor:Launcher=process", "--Supervisor:ChildExecutable=does-not-exist.exe", "--Supervisor:MaxFailuresInWindow=0"]);
+            ["--Supervisor:Launcher=process", "--Supervisor:Seat=none", "--Supervisor:WorkerExecutable=does-not-exist.exe",
+                "--Supervisor:MaxFailuresInWindow=0"]);
         await svc.CreateDeskAsync("desk-1");
         await svc.PostDeskActionAsync("desk-1", "start");
         var faulted = await svc.WaitForStateAsync("desk-1", DeskState.Faulted);

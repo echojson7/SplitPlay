@@ -20,7 +20,13 @@ $data = Join-Path $env:ProgramData 'SplitPlay'
 $startMenu = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\SplitPlay'
 $runKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
 $ruleName = 'SplitPlay Web UI'
+$stubCalls = Join-Path $env:ProgramData 'SplitPlay-ci-stub-calls.log'
+$termServiceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters'
 $failures = 0
+
+# The runner's own Remote Desktop stack must never be touched (/SkipTermWrap=1 everywhere below).
+$termServiceDll = (Get-ItemProperty -Path $termServiceKey -Name ServiceDll).ServiceDll
+Write-Host "TermService ServiceDll before: $termServiceDll"
 
 function Check([string] $what, [bool] $ok) {
     if ($ok) { Write-Host "  ok   $what" }
@@ -44,7 +50,20 @@ function Wait-Until([scriptblock] $condition, [int] $seconds = 60) {
 
 function Get-Rule { Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue }
 
-function Test-Installed([string] $label) {
+# Commands the stub splitplay.exe was run with since the last call (installer/ci/stub.cs records them).
+function Get-StubCalls {
+    $calls = @(if (Test-Path $stubCalls) { Get-Content $stubCalls })
+    Remove-Item $stubCalls -ErrorAction SilentlyContinue
+    $calls | ForEach-Object { Write-Host "  stub: $_" }
+    return $calls
+}
+
+function Test-TermServiceUntouched {
+    $now = (Get-ItemProperty -Path $termServiceKey -Name ServiceDll).ServiceDll
+    Check "TermService ServiceDll unchanged ($now)" ($now -eq $termServiceDll)
+}
+
+function Test-Installed([string] $label, [bool] $termWrap = $true) {
     Write-Host "== $label"
     foreach ($f in 'service\SplitPlay.Service.exe', 'service\splitplay.exe', 'tray\SplitPlay.Tray.exe',
                    'service\wwwroot\index.html', 'native\splitplay-seat.exe', 'native\splitplay-rdsprov.dll',
@@ -52,6 +71,18 @@ function Test-Installed([string] $label) {
                    'LICENSE.txt', 'NOTICE.md', 'unins000.exe') {
         Check "file $f" (Test-Path (Join-Path $app $f))
     }
+    foreach ($f in 'termwrap\TermWrap.dll', 'termwrap\UmWrap.dll', 'termwrap\Zydis.dll', 'termwrap\LICENSE') {
+        if ($termWrap) { Check "file $f (TermWrap component)" (Test-Path (Join-Path $app $f)) }
+        else { Check "no $f (TermWrap component not selected)" (-not (Test-Path (Join-Path $app $f))) }
+    }
+
+    # Post-install host preparation, always with --skip-termwrap here (the parameter or the deselected component).
+    $calls = @(Get-StubCalls)
+    Check 'setup ran "splitplay host prepare --skip-termwrap"' (@($calls | Where-Object { $_ -eq 'splitplay.exe host prepare --skip-termwrap' }).Count -eq 1)
+    Check 'host prepare ran before the service was started' (
+        [array]::IndexOf($calls, 'splitplay.exe host prepare --skip-termwrap') -ge 0 -and
+        [array]::IndexOf($calls, 'splitplay.exe host prepare --skip-termwrap') -lt [array]::IndexOf($calls, 'SplitPlay.Service.exe --stub-service'))
+    Test-TermServiceUntouched
     $svc = Get-Service -Name SplitPlay -ErrorAction SilentlyContinue
     Check 'service SplitPlay exists' ($null -ne $svc)
     if ($svc) {
@@ -83,13 +114,26 @@ function Test-Installed([string] $label) {
     Check 'Start menu web UI link' (@(Get-ChildItem $startMenu -Filter '*.url' -ErrorAction SilentlyContinue).Count -eq 1)
     $run = Get-ItemProperty -Path $runKey -Name SplitPlayTray -ErrorAction SilentlyContinue
     Check 'tray autostart (HKLM Run)' ($null -ne $run)
+    if ($run) {
+        $expected = '"' + (Join-Path $app 'tray\SplitPlay.Tray.exe') + '" --autostart'
+        Check "tray autostart starts minimized ($($run.SplitPlayTray))" ($run.SplitPlayTray -eq $expected)
+    }
+}
+
+# A per-desk rule as the service creates it; the uninstaller must remove every "SplitPlay desk *" rule.
+function New-DeskRule {
+    New-NetFirewallRule -DisplayName 'SplitPlay desk ci-1 (TCP)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 48084, 48089, 48110 -Profile Private | Out-Null
 }
 
 function Test-Removed([string] $label, [bool] $dataKept) {
     Write-Host "== $label"
     Wait-Until { -not (Test-Path $app) }
+    $calls = @(Get-StubCalls)
+    Check 'uninstaller ran "splitplay host revert"' (@($calls | Where-Object { $_ -eq 'splitplay.exe host revert' }).Count -eq 1)
+    Test-TermServiceUntouched
     Check 'service removed' ($null -eq (Get-Service -Name SplitPlay -ErrorAction SilentlyContinue))
     Check 'firewall rule removed' ($null -eq (Get-Rule))
+    Check 'per-desk firewall rules removed' ($null -eq (Get-NetFirewallRule -DisplayName 'SplitPlay desk *' -ErrorAction SilentlyContinue))
     Check 'Program Files\SplitPlay removed' (-not (Test-Path $app))
     Check 'Start menu folder removed' (-not (Test-Path $startMenu))
     Check 'tray autostart removed' ($null -eq (Get-ItemProperty -Path $runKey -Name SplitPlayTray -ErrorAction SilentlyContinue))
@@ -97,8 +141,9 @@ function Test-Removed([string] $label, [bool] $dataKept) {
     else { Check 'ProgramData\SplitPlay purged' (-not (Test-Path $data)) }
 }
 
-$common = '/AllowUnsupportedOS=1 /SkipWebView2=1'
+$common = '/AllowUnsupportedOS=1 /SkipWebView2=1 /SkipTermWrap=1'
 $uninstaller = Join-Path $app 'unins000.exe'
+Remove-Item $stubCalls -ErrorAction SilentlyContinue
 
 # 1. Fresh install.
 Check 'install exit code 0' ((Invoke-Silent $Setup 'install.log' $common) -eq 0)
@@ -110,13 +155,15 @@ Check 'reinstall exit code 0' ((Invoke-Silent $Setup 'reinstall.log' $common) -e
 Test-Installed 'after reinstall'
 
 # 3. Uninstall, keeping ProgramData (the silent default).
+New-DeskRule
 Check 'uninstall exit code 0' ((Invoke-Silent $uninstaller 'uninstall.log') -eq 0)
 Test-Removed 'after uninstall (keep data)' $true
 Check 'config.json kept' (Test-Path (Join-Path $data 'config.json'))
 
-# 4. Install again over the kept data, then uninstall with /PurgeData=1.
-Check 'install over kept data exit code 0' ((Invoke-Silent $Setup 'install2.log' $common) -eq 0)
-Test-Installed 'after install over kept data'
+# 4. Install again over the kept data without the TermWrap component, then uninstall with /PurgeData=1.
+Check 'install over kept data exit code 0' ((Invoke-Silent $Setup 'install2.log' "$common /COMPONENTS=core") -eq 0)
+Test-Installed 'after install over kept data (core only)' $false
+New-DeskRule
 Check 'uninstall /PurgeData=1 exit code 0' ((Invoke-Silent $uninstaller 'uninstall2.log' '/PurgeData=1') -eq 0)
 Test-Removed 'after uninstall (purge)' $false
 

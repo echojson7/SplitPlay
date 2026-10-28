@@ -24,6 +24,9 @@ public enum FakeChildBehavior
 
     /// <summary>Like <see cref="Normal"/> but ignores <c>shutdown</c> (must be killed).</summary>
     IgnoreShutdown,
+
+    /// <summary>Seat: becomes ready, then reports <c>session_lost</c> and exits with code 4 (gave up reconnecting).</summary>
+    GiveUpAfterReady,
 }
 
 /// <summary>Options for <see cref="FakeChild.RunAsync"/>.</summary>
@@ -48,6 +51,18 @@ public sealed record FakeChildOptions
 
     /// <summary>Send <c>client_connected</c> right after ready (drives the desk to Streaming).</summary>
     public bool SimulateClient { get; init; }
+
+    /// <summary>Worker: send <c>mode_requested</c> with this mode right after ready.</summary>
+    public (int Width, int Height, int Fps)? RequestMode { get; init; }
+
+    /// <summary>
+    /// Seat: after ready, report <c>session_lost</c> and then <c>session_restored</c> with this session id
+    /// (the same id as <see cref="Session"/> models a reconnect into the same session).
+    /// </summary>
+    public int? RestoreIntoSession { get; init; }
+
+    /// <summary>Observes every message the child receives (tests).</summary>
+    public Action<IpcMessage>? OnMessage { get; init; }
 
     /// <summary>Optional diagnostic sink.</summary>
     public Action<string>? Log { get; init; }
@@ -108,6 +123,8 @@ public static class FakeChild
             return ExitCodes.PipeBroken;
         }
 
+        options.OnMessage?.Invoke(first);
+
         if (first is not WelcomeMessage welcome || welcome.Protocol != IpcProtocol.Version)
         {
             log($"expected welcome, got {first.Type}");
@@ -120,10 +137,45 @@ public static class FakeChild
 
         try
         {
+            var seat = options.Role == IpcProtocol.Roles.Seat;
             if (options.Behavior != FakeChildBehavior.NoReady)
             {
-                await connection.SendAsync(new ReadyMessage(), cancellationToken).ConfigureAwait(false);
+                var ready = seat
+                    ? new ReadyMessage { InputRing = $"Global\\SplitPlay.InputRing.{options.DeskId}", Connector = "fake", Session = options.Session }
+                    : new ReadyMessage();
+                await connection.SendAsync(ready, cancellationToken).ConfigureAwait(false);
                 log("ready");
+            }
+
+            if (options.Behavior == FakeChildBehavior.GiveUpAfterReady)
+            {
+                await Task.Delay(options.HeartbeatInterval, cancellationToken).ConfigureAwait(false);
+                await SendEventAsync(connection, IpcProtocol.Events.SessionLost, """{"reason":"simulated"}""", cancellationToken).ConfigureAwait(false);
+                return IpcProtocol.ExitCodes.SeatGaveUp;
+            }
+
+            if (options.RequestMode is { } mode)
+            {
+                await SendEventAsync(connection, IpcProtocol.Events.ModeRequested,
+                    $$"""{"width":{{mode.Width}},"height":{{mode.Height}},"fps":{{mode.Fps}}}""", cancellationToken).ConfigureAwait(false);
+            }
+
+            if (options.RestoreIntoSession is { } restored)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        await Task.Delay(options.HeartbeatInterval, cancellationToken).ConfigureAwait(false);
+                        await SendEventAsync(connection, IpcProtocol.Events.SessionLost, """{"reason":"simulated"}""", cancellationToken).ConfigureAwait(false);
+                        await Task.Delay(options.HeartbeatInterval, cancellationToken).ConfigureAwait(false);
+                        await SendEventAsync(connection, IpcProtocol.Events.SessionRestored, $$"""{"session":{{restored}}}""", cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+                    {
+                    }
+                }, CancellationToken.None);
             }
 
             if (options.Behavior == FakeChildBehavior.ExitAfterReady)
@@ -169,6 +221,11 @@ public static class FakeChild
         while (true)
         {
             var message = await connection.ReceiveAsync(ct).ConfigureAwait(false);
+            if (message is not null)
+            {
+                options.OnMessage?.Invoke(message);
+            }
+
             switch (message)
             {
                 case null:
@@ -207,6 +264,11 @@ public static class FakeChild
                     await connection.ReplyAsync(sas.Id, ok: true, cancellationToken: ct).ConfigureAwait(false);
                     break;
 
+                case SetModeMessage setMode when options.Role == IpcProtocol.Roles.Seat:
+                    log($"set_mode {setMode.Width}x{setMode.Height}");
+                    await connection.ReplyAsync(setMode.Id, ok: true, cancellationToken: ct).ConfigureAwait(false);
+                    break;
+
                 case IIpcRequest request:
                     await connection.ReplyAsync(request.Id, ok: false, errorCode: IpcProtocol.ErrorCodes.Unsupported,
                         errorMessage: $"{options.Role} does not support '{((IpcMessage)request).Type}'", cancellationToken: ct).ConfigureAwait(false);
@@ -218,6 +280,12 @@ public static class FakeChild
                     break;
             }
         }
+    }
+
+    private static async Task SendEventAsync(IpcConnection connection, string name, string json, CancellationToken ct)
+    {
+        using var data = JsonDocument.Parse(json);
+        await connection.SendAsync(new EventMessage { Name = name, Data = data.RootElement.Clone() }, ct).ConfigureAwait(false);
     }
 
     private static async Task HeartbeatLoopAsync(IpcConnection connection, TimeSpan interval, long max, CancellationToken ct)

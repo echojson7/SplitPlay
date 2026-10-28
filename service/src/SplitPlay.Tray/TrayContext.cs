@@ -7,6 +7,7 @@ internal sealed class TrayContext : ApplicationContext
     private readonly Uri _url;
     private readonly NotifyIcon _icon;
     private readonly ContextMenuStrip _menu;
+    private readonly Control _invoker;
     private DashboardForm? _dashboard;
 
     public TrayContext(Uri url, bool visible = true)
@@ -25,6 +26,28 @@ internal sealed class TrayContext : ApplicationContext
             Visible = visible,
         };
         _icon.DoubleClick += (_, _) => ShowDashboard();
+
+        // A window handle on the UI thread so that other threads (the "show" signal) can post to it.
+        _invoker = new Control();
+        _invoker.CreateControl();
+    }
+
+    /// <summary>Shows and activates the dashboard; safe from any thread.</summary>
+    public void ShowDashboardFromAnyThread()
+    {
+        if (_invoker.IsDisposed)
+        {
+            return;
+        }
+
+        if (_invoker.InvokeRequired)
+        {
+            _invoker.BeginInvoke(ShowDashboard);
+        }
+        else
+        {
+            ShowDashboard();
+        }
     }
 
     public int MenuItemCount => _menu.Items.Count;
@@ -43,6 +66,7 @@ internal sealed class TrayContext : ApplicationContext
         }
 
         _dashboard.Activate();
+        _dashboard.BringToFront();
     }
 
     private void Quit()
@@ -58,6 +82,7 @@ internal sealed class TrayContext : ApplicationContext
         {
             _icon.Dispose();
             _menu.Dispose();
+            _invoker.Dispose();
             _dashboard?.Dispose();
         }
 

@@ -23,10 +23,17 @@ public static class Program
                          [--fps N] [--width N] [--height N] [--bitrate-kbps N] [--codec h264|hevc|av1]
         desk start <id> [--wait] [--timeout S]
         desk stop <id> [--wait] [--timeout S]
-        desk delete <id>
+        desk delete <id> [--delete-user]    --delete-user also removes the desk's Windows account
 
         config export <file.zip>
         config import <file.zip>
+
+        host prepare [--skip-termwrap] [--termwrap-dir DIR] [--compose-interval-ms N] [--json]
+                                    prepare Remote Desktop for desks (TermWrap, RDP policies); records the
+                                    previous values in <data root>\host-tuning.json
+        host revert [--json]        restore exactly what prepare changed
+        host status [--json]        show each item and whether a reboot is required
+                                    (host commands need an elevated prompt; exit code 3010 = reboot required)
 
         version
 
@@ -34,7 +41,7 @@ public static class Program
         Exit codes: 0 ok, 1 error, 2 usage, 3 service unreachable, 4 timeout.
         """;
 
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "wait", "autostart", "start", "help" };
+    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "wait", "autostart", "start", "help", "skip-termwrap", "delete-user" };
 
     public static async Task<int> Main(string[] argv)
     {
@@ -66,6 +73,8 @@ public static class Program
             {
                 "service" when OperatingSystem.IsWindows() => await ServiceCommands.RunAsync(verb, rest, Api).ConfigureAwait(false),
                 "service" => Fail("'service' commands need Windows"),
+                "host" when OperatingSystem.IsWindows() => HostCommands.Run(verb, rest, dataRoot),
+                "host" => Fail("'host' commands need Windows"),
                 "desk" or "desks" => await DeskCommands.RunDeskAsync(verb, rest, Api).ConfigureAwait(false),
                 "config" => await DeskCommands.RunConfigAsync(verb, rest, Api).ConfigureAwait(false),
                 _ => throw new UsageException($"unknown command '{group}'"),

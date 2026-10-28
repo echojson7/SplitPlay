@@ -6,7 +6,7 @@ name: web-installer
 
 on:
   push:
-    branches: ['stage2/**', main]
+    branches: ['stage2/**', 'stage3/**', main]
     paths:
       - 'web/**'
       - 'installer/**'

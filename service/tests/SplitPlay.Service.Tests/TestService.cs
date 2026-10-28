@@ -25,7 +25,10 @@ internal sealed class TestService : IAsyncDisposable
         DataRoot = dataRoot;
         _ownsDataRoot = ownsDataRoot;
         Launcher = app.Services.GetRequiredService<FakeChildLauncher>();
+        Platform = app.Services.GetRequiredService<Platform.FakeDeskPlatform>();
     }
+
+    public Platform.FakeDeskPlatform Platform { get; }
 
     public WebApplication App { get; }
 
@@ -52,6 +55,9 @@ internal sealed class TestService : IAsyncDisposable
             "--data-root", dataRoot,
             $"--Supervisor:PipeNamespace={ns}",
             "--Supervisor:Launcher=fake",
+            "--Supervisor:Platform=fake",
+            "--Supervisor:RelogonAfterLayoutCopy=false",
+            "--Supervisor:BluetoothPollMs=100",
             "--Supervisor:HeartbeatIntervalMs=100",
             "--Supervisor:MissedHeartbeats=3",
             "--Supervisor:HelloTimeoutMs=5000",

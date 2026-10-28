@@ -34,6 +34,12 @@ public static class BasePortAllocator
 
     public static PortRange RangeOf(int basePort) => new(basePort - PortsBelow, basePort + PortsAbove);
 
+    /// <summary>Inbound TCP ports of a desk: HTTPS (P-5), HTTP (P), RTSP (P+21).</summary>
+    public static int[] TcpPorts(int basePort) => [basePort - 5, basePort, basePort + 21];
+
+    /// <summary>Inbound UDP ports of a desk: video (P+9), control (P+10), audio (P+11).</summary>
+    public static int[] UdpPorts(int basePort) => [basePort + 9, basePort + 10, basePort + 11];
+
     /// <summary>
     /// Returns <c>start + stride * k</c> for the lowest <c>k ≥ 0</c> whose range does not overlap any range of
     /// <paramref name="usedBasePorts"/> and does not contain any of <paramref name="reservedPorts"/>.

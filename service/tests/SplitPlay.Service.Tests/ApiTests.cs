@@ -6,6 +6,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using SplitPlay.Core.Api;
+using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Json;
 using SplitPlay.Core.Lifecycle;
 
@@ -253,7 +254,8 @@ public sealed class ApiTests
 
         // Stopping a stopped desk is a no-op.
         Assert.Equal(DeskState.Stopped, (await svc.PostDeskActionAsync("desk-1", "stop")).State);
-        Assert.Equal(1, svc.Launcher.Launches);
+        Assert.Equal(1, svc.Launcher.LaunchesOf(IpcProtocol.Roles.Worker));
+        Assert.Equal(1, svc.Launcher.LaunchesOf(IpcProtocol.Roles.Seat));
     }
 
     [Fact]
@@ -266,7 +268,8 @@ public sealed class ApiTests
 
         await svc.PostDeskActionAsync("desk-1", "restart");
         await svc.WaitForStateAsync("desk-1", DeskState.Ready);
-        Assert.Equal(2, svc.Launcher.Launches);
+        Assert.Equal(2, svc.Launcher.LaunchesOf(IpcProtocol.Roles.Worker));
+        Assert.Equal(2, svc.Launcher.LaunchesOf(IpcProtocol.Roles.Seat));
     }
 
     [Fact]

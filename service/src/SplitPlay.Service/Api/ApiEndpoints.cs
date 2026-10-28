@@ -8,11 +8,13 @@ using System.Text.RegularExpressions;
 using SplitPlay.Core;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Host;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Json;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Hosting;
 using SplitPlay.Service.Logging;
+using SplitPlay.Service.Platform;
 using SplitPlay.Service.Supervision;
 
 namespace SplitPlay.Service.Api;
@@ -137,7 +139,7 @@ public static partial class ApiEndpoints
         // ---- host settings (the "host" object of config.json)
         api.MapGet("/host", (ConfigService config) => Results.Json(config.Snapshot().Host, Ctx.HostConfig));
 
-        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, ILoggerFactory loggers) =>
+        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, IDeskPlatform platform, ILoggerFactory loggers) =>
         {
             var host = await ReadBodyAsync(request, Ctx.HostConfig).ConfigureAwait(false);
             var before = config.Snapshot().Host;
@@ -150,6 +152,18 @@ public static partial class ApiEndpoints
             if (saved.WebPort != before.WebPort)
             {
                 loggers.CreateLogger("SplitPlay.Api").LogWarning("host.webPort changed to {Port}; it takes effect after a service restart", saved.WebPort);
+            }
+
+            if (saved.ComposeIntervalMs != before.ComposeIntervalMs)
+            {
+                try
+                {
+                    platform.ApplyComposeInterval(saved.ComposeIntervalMs);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HostTuningException or System.Security.SecurityException)
+                {
+                    loggers.CreateLogger("SplitPlay.Api").LogWarning("Could not apply host.composeIntervalMs: {Message}", ex.Message);
+                }
             }
 
             if (saved.LanAccess != before.LanAccess)

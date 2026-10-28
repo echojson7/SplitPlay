@@ -9,6 +9,8 @@
 ; Setup command-line parameters (besides the standard Inno Setup ones):
 ;   /AllowUnsupportedOS=1  install on Windows older than 11 22H2 or on Windows Server (CI, testing)
 ;   /SkipWebView2=1        do not download the WebView2 runtime even if it is missing
+;   /SkipTermWrap=1        install the TermWrap files but leave TermService's ServiceDll alone
+;                          ("splitplay host prepare --skip-termwrap"; CI runners must keep their RDP stack)
 ; Uninstaller parameters:
 ;   /PurgeData=1           also delete %ProgramData%\SplitPlay (default: keep it; interactive runs ask)
 
@@ -60,6 +62,12 @@
 #if !FileExists(AddBackslash(StageDir) + "worker\COPYING")
   #error Missing staged file worker\COPYING (check /DStageDir, see installer/README.md)
 #endif
+#if !FileExists(AddBackslash(StageDir) + "termwrap\TermWrap.dll")
+  #error Missing staged file termwrap\TermWrap.dll (check /DStageDir, see installer/README.md)
+#endif
+#if !FileExists(AddBackslash(StageDir) + "termwrap\UmWrap.dll")
+  #error Missing staged file termwrap\UmWrap.dll (check /DStageDir, see installer/README.md)
+#endif
 
 [Setup]
 AppId={{6F1C3B2A-5D4E-4C7B-9A8E-2B1D0F3C5A71}
@@ -99,16 +107,16 @@ Name: "ru"; MessagesFile: "compiler:Languages\Russian.isl"
 [CustomMessages]
 en.LicenseLabel=Please read the licence and the Windows licensing notice below.
 ru.LicenseLabel=Прочитайте лицензию и предупреждение о лицензии Windows ниже.
-en.RdsNotice=IMPORTANT: WINDOWS LICENSING NOTICE%n%nSplitPlay runs several desktops at once on one PC. To do that it modifies Windows Remote Desktop Services so that several users can be signed in at the same time (concurrent sessions, through the TermWrap component).%n%nOn Windows client editions (Windows 11 Home, Pro, Enterprise and Education) concurrent remote sessions are not permitted, so this modification violates the Microsoft Software License Terms for your copy of Windows. You use it at your own risk; it may also be flagged by antivirus software and can stop working after Windows updates.%n%nThis preview build does not include TermWrap yet: the component is shown but disabled, and Remote Desktop Services are not changed by this installation.%n%nBy accepting, you confirm that you have read and understood this notice and the licence below.%n%n------------------------------------------------------------%n%n
-ru.RdsNotice=ВАЖНО: ПРЕДУПРЕЖДЕНИЕ О ЛИЦЕНЗИИ WINDOWS%n%nSplitPlay запускает несколько рабочих столов одновременно на одном ПК. Для этого он изменяет службы удалённых рабочих столов Windows, чтобы несколько пользователей могли работать одновременно (параллельные сеансы, компонент TermWrap).%n%nКлиентские редакции Windows (Windows 11 Домашняя, Pro, Корпоративная и для образовательных учреждений) не разрешают параллельные удалённые сеансы, поэтому это изменение нарушает условия лицензии Microsoft на вашу копию Windows. Вы используете его на свой страх и риск; антивирусы могут на него реагировать, а обновления Windows могут его ломать.%n%nВ этой предварительной сборке TermWrap ещё нет: компонент показан, но отключён, и службы удалённых рабочих столов при этой установке не изменяются.%n%nПринимая условия, вы подтверждаете, что прочитали и поняли это предупреждение и лицензию ниже.%n%n------------------------------------------------------------%n%n
+en.RdsNotice=IMPORTANT: WINDOWS LICENSING NOTICE%n%nSplitPlay runs several desktops at once on one PC. To do that it modifies Windows Remote Desktop Services so that several users can be signed in at the same time (concurrent sessions, through the TermWrap component).%n%nOn Windows client editions (Windows 11 Home, Pro, Enterprise and Education) concurrent remote sessions are not permitted, so this modification violates the Microsoft Software License Terms for your copy of Windows. You use it at your own risk; it may also be flagged by antivirus software and can stop working after Windows updates.%n%nTermWrap is included and selected by default. Setup copies it into the SplitPlay folder and points the Remote Desktop service at it (the same registry change as TermWrap's own install script), turns Remote Desktop on for loopback desks and records every previous value; uninstalling SplitPlay restores them. Windows must be restarted once before desks can start. If you clear the TermWrap component, Remote Desktop Services are not replaced, but a desk cannot run while you are signed in at the PC.%n%nBy accepting, you confirm that you have read and understood this notice and the licence below.%n%n------------------------------------------------------------%n%n
+ru.RdsNotice=ВАЖНО: ПРЕДУПРЕЖДЕНИЕ О ЛИЦЕНЗИИ WINDOWS%n%nSplitPlay запускает несколько рабочих столов одновременно на одном ПК. Для этого он изменяет службы удалённых рабочих столов Windows, чтобы несколько пользователей могли работать одновременно (параллельные сеансы, компонент TermWrap).%n%nКлиентские редакции Windows (Windows 11 Домашняя, Pro, Корпоративная и для образовательных учреждений) не разрешают параллельные удалённые сеансы, поэтому это изменение нарушает условия лицензии Microsoft на вашу копию Windows. Вы используете его на свой страх и риск; антивирусы могут на него реагировать, а обновления Windows могут его ломать.%n%nTermWrap входит в сборку и выбран по умолчанию. Установщик копирует его в папку SplitPlay и подключает к службе удалённых рабочих столов (то же изменение реестра, что и в установочном скрипте самого TermWrap), включает удалённый рабочий стол для локальных столов и запоминает все прежние значения; удаление SplitPlay их восстанавливает. Перед первым запуском столов Windows нужно один раз перезагрузить. Если снять компонент TermWrap, службы удалённых рабочих столов не заменяются, но стол не сможет работать, пока вы вошли в систему на этом ПК.%n%nПринимая условия, вы подтверждаете, что прочитали и поняли это предупреждение и лицензию ниже.%n%n------------------------------------------------------------%n%n
 en.TypeFull=Full installation
 ru.TypeFull=Полная установка
 en.TypeCustom=Custom installation
 ru.TypeCustom=Выборочная установка
 en.CompCore=SplitPlay host (service, CLI, tray, web UI, native helpers, worker)
 ru.CompCore=Хост SplitPlay (служба, CLI, трей, веб-интерфейс, нативные модули, воркер)
-en.CompTermWrap=TermWrap concurrent sessions (not bundled yet)
-ru.CompTermWrap=TermWrap: параллельные сеансы (пока не входит в сборку)
+en.CompTermWrap=TermWrap concurrent sessions (several desks while you are signed in; needs a restart)
+ru.CompTermWrap=TermWrap: параллельные сеансы (несколько столов, пока вы в системе; нужна перезагрузка)
 en.TaskTrayAutostart=Start the SplitPlay tray when a user signs in
 ru.TaskTrayAutostart=Запускать трей SplitPlay при входе пользователя
 en.LaunchTray=Launch SplitPlay
@@ -139,6 +147,10 @@ en.StatusService=Registering and starting the SplitPlay service...
 ru.StatusService=Регистрация и запуск службы SplitPlay...
 en.StatusWebView2=Installing the WebView2 runtime...
 ru.StatusWebView2=Установка среды WebView2...
+en.StatusHost=Preparing Remote Desktop for SplitPlay desks...
+ru.StatusHost=Настройка удалённого рабочего стола для столов SplitPlay...
+en.HostPrepareFailed=Preparing the Remote Desktop host failed (exit code %1). Desks cannot start until it succeeds: run "splitplay host prepare" from an elevated prompt and see the setup log for details.
+ru.HostPrepareFailed=Не удалось настроить удалённый рабочий стол (код %1). Столы не запустятся, пока настройка не пройдёт: выполните "splitplay host prepare" от имени администратора; подробности в журнале установки.
 
 [Types]
 Name: "full"; Description: "{cm:TypeFull}"
@@ -146,8 +158,8 @@ Name: "custom"; Description: "{cm:TypeCustom}"; Flags: iscustom
 
 [Components]
 Name: "core"; Description: "{cm:CompCore}"; Types: full custom; Flags: fixed
-; Placeholder: TermWrap arrives in Stage 3. No type selects it and InitializeWizard disables it.
-Name: "termwrap"; Description: "{cm:CompTermWrap}"
+; TermWrap (llccd/TermWrap, MIT): "splitplay host prepare" points TermService's ServiceDll at {app}\termwrap.
+Name: "termwrap"; Description: "{cm:CompTermWrap}"; Types: full custom
 
 [Tasks]
 Name: "trayautostart"; Description: "{cm:TaskTrayAutostart}"; Components: core
@@ -163,6 +175,9 @@ Source: "{#StageDir}\service\*"; DestDir: "{app}\service"; Components: core; Fla
 Source: "{#StageDir}\tray\*"; DestDir: "{app}\tray"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\native\*"; DestDir: "{app}\native"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\worker\*"; DestDir: "{app}\worker"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
+; TermService (svchost) keeps TermWrap.dll loaded: an upgrade replaces it at the next restart, and the uninstaller
+; deletes it at the next restart after "host revert" has pointed TermService back at termsrv.dll.
+Source: "{#StageDir}\termwrap\*"; DestDir: "{app}\termwrap"; Components: termwrap; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
 ; Driver packages are shipped but not installed in Stage 2 (pnputil comes with the drivers in Stage 4).
 Source: "{#StageDir}\drivers\*"; DestDir: "{app}\drivers"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Components: core; Flags: ignoreversion
@@ -176,9 +191,10 @@ Name: "{group}\SplitPlay"; Filename: "{app}\tray\SplitPlay.Tray.exe"; WorkingDir
 Name: "{group}\{cm:UninstallProgram,SplitPlay}"; Filename: "{uninstallexe}"
 
 [Registry]
-Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SplitPlayTray"; ValueData: """{app}\tray\SplitPlay.Tray.exe"""; Flags: uninsdeletevalue; Tasks: trayautostart
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "SplitPlayTray"; ValueData: """{app}\tray\SplitPlay.Tray.exe"" --autostart"; Flags: uninsdeletevalue; Tasks: trayautostart
 
 [Run]
+; Started by hand the tray opens its dashboard window; the Run entry above passes --autostart to stay an icon.
 Filename: "{app}\tray\SplitPlay.Tray.exe"; Description: "{cm:LaunchTray}"; Flags: postinstall nowait skipifsilent runasoriginaluser
 
 [UninstallDelete]
@@ -190,6 +206,10 @@ const
   ServiceName = 'SplitPlay';
   ServiceKey = 'SYSTEM\CurrentControlSet\Services\SplitPlay';
   FirewallRuleWeb = 'SplitPlay Web UI';
+  { Per-desk rules created by the service ("SplitPlay desk <id> (TCP|UDP)"). }
+  FirewallRuleDeskPattern = 'SplitPlay desk *';
+  { "splitplay host prepare|revert": the change needs a restart. }
+  ExitRebootRequired = 3010;
   WebView2ClientKey = 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}';
   WebView2Url = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703';
   WebView2File = 'MicrosoftEdgeWebview2Setup.exe';
@@ -199,6 +219,8 @@ const
 var
   DownloadPage: TDownloadWizardPage;
   WebView2Downloaded: Boolean;
+  HostRebootRequired: Boolean;
+  UninstallRebootRequired: Boolean;
 
 { Runs a program hidden and waits; returns its exit code, or -1 if it could not start. }
 function RunHidden(const FileName, Params: String): Integer;
@@ -298,9 +320,6 @@ begin
   { Licence page: the Remote Desktop Services notice comes first, then the MIT licence. }
   WizardForm.LicenseLabel1.Caption := CustomMessage('LicenseLabel');
   WizardForm.LicenseMemo.Lines.Text := CustomMessage('RdsNotice') + WizardForm.LicenseMemo.Lines.Text;
-  { TermWrap placeholder (component index 1) cannot be selected yet. }
-  WizardForm.ComponentsList.Checked[1] := False;
-  WizardForm.ComponentsList.ItemEnabled[1] := False;
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
@@ -348,13 +367,49 @@ procedure AddFirewallRules;
 begin
   { The web UI listens on loopback only by default, which the firewall does not filter. This rule is for
     LAN access and stays disabled until host.lanAccess is turned on (the service enables it then).
-    Per-desk port-range rules come with multi-desk support. }
+    Per-desk rules ("SplitPlay desk <id> (TCP|UDP)") are created and removed by the service. }
   WizardForm.StatusLabel.Caption := CustomMessage('StatusFirewall');
   RunHidden(SysTool('netsh.exe'), 'advfirewall firewall delete rule name="' + FirewallRuleWeb + '"');
   RunHidden(SysTool('netsh.exe'), 'advfirewall firewall add rule name="' + FirewallRuleWeb + '"' +
     ' dir=in action=allow protocol=TCP localport={#WebPort} remoteip=localsubnet profile=private,domain enable=no' +
     ' program="' + ExpandConstant('{app}\service\SplitPlay.Service.exe') + '"' +
     ' description="SplitPlay web UI and API from the local network (enabled by the service when LAN access is on)"');
+end;
+
+{ Turns Remote Desktop on for loopback desks and, with the TermWrap component, swaps TermService's ServiceDll.
+  Every previous value goes to ProgramData\SplitPlay\host-tuning.json for "host revert". }
+procedure PrepareHost;
+var
+  Params: String;
+  Code: Integer;
+begin
+  WizardForm.StatusLabel.Caption := CustomMessage('StatusHost');
+  Params := 'host prepare';
+  if not WizardIsComponentSelected('termwrap') then
+    Params := Params + ' --skip-termwrap'
+  else if ParamIsSet('SkipTermWrap') then
+  begin
+    Log('/SkipTermWrap=1: TermWrap files installed, TermService left alone');
+    Params := Params + ' --skip-termwrap';
+  end;
+  Code := RunHidden(ExpandConstant('{app}\service\splitplay.exe'), Params);
+  if Code = ExitRebootRequired then
+  begin
+    Log('host prepare: a restart is required before desks can start');
+    HostRebootRequired := True;
+  end
+  else if Code <> 0 then
+    SuppressibleMsgBox(FmtMessage(CustomMessage('HostPrepareFailed'), [IntToStr(Code)]), mbError, MB_OK, IDOK);
+end;
+
+function NeedRestart: Boolean;
+begin
+  Result := HostRebootRequired;
+end;
+
+function UninstallNeedRestart: Boolean;
+begin
+  Result := UninstallRebootRequired;
 end;
 
 procedure InstallAndStartService;
@@ -383,8 +438,7 @@ begin
     Exit;
   SecureDataDir;
   AddFirewallRules;
-  if WizardIsComponentSelected('termwrap') then
-    Log('TermWrap placeholder selected: nothing to install in this build');
+  PrepareHost;
   InstallAndStartService;
   if WebView2Downloaded then
   begin
@@ -396,6 +450,7 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Purge: Boolean;
+  Code: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
@@ -403,6 +458,7 @@ begin
     RunHidden(SysTool('taskkill.exe'), '/F /IM SplitPlay.Tray.exe');
     if ServiceExists then
     begin
+      { Stopping the service stops every desk (worker, then seat, which logs the desk session off). }
       RunHidden(ExpandConstant('{app}\service\splitplay.exe'), 'service uninstall');
       if ServiceExists then
       begin
@@ -411,7 +467,14 @@ begin
         RunHidden(SysTool('sc.exe'), 'delete ' + ServiceName);
       end;
     end;
+    { Restore the exact Remote Desktop settings recorded by "host prepare" (TermService's ServiceDll included). }
+    Code := RunHidden(ExpandConstant('{app}\service\splitplay.exe'), 'host revert');
+    if Code = ExitRebootRequired then
+      UninstallRebootRequired := True;
     RunHidden(SysTool('netsh.exe'), 'advfirewall firewall delete rule name="' + FirewallRuleWeb + '"');
+    { netsh cannot delete by wildcard. }
+    RunHidden(SysTool('WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' +
+      '"Get-NetFirewallRule -DisplayName ''' + FirewallRuleDeskPattern + ''' -ErrorAction SilentlyContinue | Remove-NetFirewallRule"');
   end
   else if CurUninstallStep = usPostUninstall then
   begin

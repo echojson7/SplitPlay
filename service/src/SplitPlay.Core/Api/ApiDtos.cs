@@ -73,6 +73,11 @@ public sealed class DeskDto
 
     public ProfileConfig Profile { get; set; } = new();
 
+    public bool DisableBluetoothUserService { get; set; } = true;
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? WorkerSettings { get; set; }
+
     public DeskMetricsDto Metrics { get; set; } = new();
 
     public string? LastError { get; set; }

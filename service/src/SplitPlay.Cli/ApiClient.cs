@@ -90,9 +90,10 @@ internal sealed class ApiClient : IDisposable
     public Task<DeskDto> StopDeskAsync(string id) =>
         SendAsync(HttpMethod.Post, $"desks/{Uri.EscapeDataString(id)}/stop", null, SplitPlayJsonContext.Default.DeskDto);
 
-    public async Task DeleteDeskAsync(string id)
+    public async Task DeleteDeskAsync(string id, bool deleteUser = false)
     {
-        using var response = await SendRawAsync(HttpMethod.Delete, $"desks/{Uri.EscapeDataString(id)}", null).ConfigureAwait(false);
+        using var response = await SendRawAsync(HttpMethod.Delete, $"desks/{Uri.EscapeDataString(id)}{(deleteUser ? "?deleteUser=true" : "")}", null)
+            .ConfigureAwait(false);
     }
 
     public async Task<byte[]> ExportConfigAsync()

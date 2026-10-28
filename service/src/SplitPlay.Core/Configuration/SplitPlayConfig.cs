@@ -63,6 +63,19 @@ public sealed class DeskConfig
     public string Gpu { get; set; } = "auto";
 
     public ProfileConfig Profile { get; set; } = new();
+
+    /// <summary>
+    /// Stop the per-user <c>BluetoothUserService_*</c> instance in the desk session (GitHub issue #3): several running
+    /// instances compete for the radio and can reset the console user's Bluetooth devices. Default true.
+    /// </summary>
+    public bool DisableBluetoothUserService { get; set; } = true;
+
+    /// <summary>
+    /// Extra Sunshine settings passed verbatim to the worker as trailing <c>name=value</c> arguments (after
+    /// <c>port=&lt;basePort&gt;</c>); they override the worker's <c>sunshine.conf</c>. See worker/README.md.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? WorkerSettings { get; set; }
 }
 
 /// <summary>Streaming profile. All fields optional; absent means "keep current / use default".</summary>

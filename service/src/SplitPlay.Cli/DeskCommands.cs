@@ -99,10 +99,11 @@ internal static class DeskCommands
             case "delete":
             {
                 var id = args.Positional(0, "id");
+                var deleteUser = args.Flag("delete-user");
                 args.EnsureNoUnknownOptions();
                 using var client = api();
-                await client.DeleteDeskAsync(id).ConfigureAwait(false);
-                Console.WriteLine($"Deleted desk '{id}'.");
+                await client.DeleteDeskAsync(id, deleteUser).ConfigureAwait(false);
+                Console.WriteLine(deleteUser ? $"Deleted desk '{id}' and its Windows account." : $"Deleted desk '{id}'.");
                 return 0;
             }
 

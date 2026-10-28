@@ -10,17 +10,21 @@ using SplitPlay.Core.Lifecycle;
 using SplitPlay.Service.Api;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Hosting;
+using SplitPlay.Service.Platform;
 
 namespace SplitPlay.Service.Supervision;
 
 /// <summary>
-/// Owns every desk's lifecycle: drives the <see cref="DeskStateMachine"/>, creates the control pipe, launches and
-/// watches the child, restarts it with backoff and shuts it down. Also coordinates desk CRUD with the configuration.
+/// Owns every desk's lifecycle: drives the <see cref="DeskStateMachine"/>, provisions the account, launches and
+/// watches the seat and the worker, restarts them with backoff and shuts them down. Also coordinates desk CRUD with the
+/// configuration.
 /// </summary>
 /// <remarks>
-/// Stage 2 maps the lifecycle onto a single child (the worker or stub worker):
-/// Provisioning is a no-op, the child's <c>hello</c> stands in for "session ready" (seat), sending <c>welcome</c> for
-/// "display ready" (IDD) and the child's <c>ready</c> for Ready. Stage 3 inserts the seat and the IDD steps.
+/// Lifecycle (brief "Service lifecycle"): Provisioning (account, DPAPI password, host check, firewall rules) →
+/// Connecting (seat launched, welcome with the RDP target) → SessionReady (seat <c>ready</c> with a session) →
+/// DisplayReady (immediate in the MVP) → worker launched in the session → Ready (worker <c>ready</c>).
+/// A worker failure relaunches only the worker; a seat failure kills the worker and reconnects. Stop shuts the worker
+/// down first, then the seat, which logs the session off. With <c>Supervisor:Seat=none</c> the seat steps are skipped.
 /// </remarks>
 public sealed class DeskSupervisor : IHostedService
 {
@@ -34,14 +38,16 @@ public sealed class DeskSupervisor : IHostedService
     private readonly ILogger<DeskSupervisor> _logger;
     private readonly ILogger _childLogger;
     private readonly GpuInventory _gpus;
+    private readonly IDeskPlatform _platform;
     private readonly DateTimeOffset _startedAt;
     private TimeSpan _lastCpu;
     private DateTimeOffset _lastCpuAt;
 
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
-        TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus)
+        TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform)
     {
         _gpus = gpus;
+        _platform = platform;
         _childLogger = loggerFactory.CreateLogger(Logging.LogStoreLoggerProvider.ChildCategory);
         _config = config;
         _paths = paths;
@@ -104,7 +110,8 @@ public sealed class DeskSupervisor : IHostedService
             }
         }
 
-        var limit = TimeSpan.FromMilliseconds(_options.Value.ShutdownTimeoutMs + 2000);
+        // Worker shutdown, then seat shutdown (twice as long: it logs the session off).
+        var limit = TimeSpan.FromMilliseconds(_options.Value.ShutdownTimeoutMs * 3L + 2000);
         try
         {
             await Task.WhenAll(tasks).WaitAsync(limit, cancellationToken).ConfigureAwait(false);
@@ -172,6 +179,17 @@ public sealed class DeskSupervisor : IHostedService
 
             var rt = AddRuntime(saved);
             _logger.LogInformation("Created desk {Desk} (base port {Port}, user {User})", saved.Id, saved.BasePort, saved.User);
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    _platform.EnsureFirewallRules(saved);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning("Desk {Desk}: could not add firewall rules: {Message}", saved.Id, ex.Message);
+                }
+            });
             Publish(rt);
             return rt.ToDto();
         }
@@ -203,7 +221,9 @@ public sealed class DeskSupervisor : IHostedService
             desk.Profile ??= new ProfileConfig();
 
             if (!idle && (desk.Name != current.Name || !string.Equals(desk.User, current.User, StringComparison.OrdinalIgnoreCase)
-                          || desk.BasePort != current.BasePort || desk.Autostart != current.Autostart || desk.Gpu != current.Gpu))
+                          || desk.BasePort != current.BasePort || desk.Autostart != current.Autostart || desk.Gpu != current.Gpu
+                          || desk.DisableBluetoothUserService != current.DisableBluetoothUserService
+                          || !SameSettings(desk.WorkerSettings, current.WorkerSettings)))
             {
                 throw ApiException.Conflict(ApiErrorCodes.InvalidState, $"desk '{id}' is running: only 'profile' can change; stop it first");
             }
@@ -245,15 +265,39 @@ public sealed class DeskSupervisor : IHostedService
                 }
             }
 
-            if (deleteUser)
+            DeskConfig config;
+            lock (rt.Gate)
             {
-                throw ApiException.NotImplemented("deleting the Windows account arrives with account provisioning (Stage 3)");
+                config = rt.Config;
+            }
+
+            try
+            {
+                _platform.DeleteDesk(config, deleteUser);
+            }
+            catch (DeskProvisioningException ex)
+            {
+                throw new ApiException(StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden, ex.Message);
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException)
+            {
+                throw new ApiException(StatusCodes.Status500InternalServerError, ApiErrorCodes.Internal,
+                    $"could not delete {(deleteUser ? "the Windows account or " : "")}the stored password of desk '{id}': {ex.Message}");
+            }
+
+            try
+            {
+                _platform.RemoveFirewallRules(id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning("Desk {Desk}: could not remove firewall rules: {Message}", id, ex.Message);
             }
 
             _config.Update(cfg => cfg.Desks.RemoveAll(d => d.Id == id));
             _desks.TryRemove(id, out _);
             TryDeleteDirectory(_paths.DeskDirectory(id));
-            _logger.LogInformation("Deleted desk {Desk}", id);
+            _logger.LogInformation("Deleted desk {Desk}{User}", id, deleteUser ? $" and Windows account {config.User}" : "");
         }
     }
 
@@ -334,7 +378,7 @@ public sealed class DeskSupervisor : IHostedService
         {
             try
             {
-                await task.WaitAsync(TimeSpan.FromMilliseconds(_options.Value.ShutdownTimeoutMs + 2000)).ConfigureAwait(false);
+                await task.WaitAsync(TimeSpan.FromMilliseconds(_options.Value.ShutdownTimeoutMs * 3L + 2000)).ConfigureAwait(false);
             }
             catch (TimeoutException)
             {
@@ -459,12 +503,44 @@ public sealed class DeskSupervisor : IHostedService
         }
     }
 
+    /// <summary>
+    /// The desk's run loop: Provisioning, then repeated runs (seat, worker) with backoff until stopped or Faulted.
+    /// The seat survives worker restarts; a seat failure also ends the worker.
+    /// </summary>
     private async Task RunAsync(DeskRuntime rt, CancellationToken stop)
     {
         try
         {
-            // Provisioning: account, RDU rights and LSA password arrive in Stage 3.
+            DeskConfig config;
+            lock (rt.Gate)
+            {
+                config = rt.Config;
+                rt.RelogonDone = false;
+            }
+
             Directory.CreateDirectory(_paths.DeskDirectory(rt.Id));
+            DeskCredentials? credentials = null;
+            try
+            {
+                credentials = await Task.Run(() =>
+                {
+                    var c = _platform.Provision(config);
+                    _platform.EnsureFirewallRules(config);
+                    return c;
+                }, stop).ConfigureAwait(false);
+            }
+            catch (DeskProvisioningException ex)
+            {
+                Fire(rt, DeskTrigger.Fail, ex.Message);
+                return;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogError(ex, "Provisioning desk {Desk} failed", rt.Id);
+                Fire(rt, DeskTrigger.Fail, $"provisioning failed: {ex.Message}");
+                return;
+            }
+
             if (!Fire(rt, DeskTrigger.Provisioned))
             {
                 return;
@@ -472,7 +548,7 @@ public sealed class DeskSupervisor : IHostedService
 
             while (true)
             {
-                var reason = await RunChildOnceAsync(rt, stop).ConfigureAwait(false);
+                var reason = await RunOnceAsync(rt, credentials, stop).ConfigureAwait(false);
                 lock (rt.Gate)
                 {
                     if (!rt.Machine.TryFire(DeskTrigger.Fail, out _, reason) || rt.Machine.State == DeskState.Faulted)
@@ -500,6 +576,9 @@ public sealed class DeskSupervisor : IHostedService
         }
         finally
         {
+            // Stop order: the worker is already gone here (RunOnceAsync shuts it down); the seat goes last and logs
+            // the session off.
+            await StopSeatAsync(rt).ConfigureAwait(false);
             lock (rt.Gate)
             {
                 rt.Running = false;
@@ -507,6 +586,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.SessionId = null;
                 rt.ChildPid = null;
                 rt.ChildState = null;
+                rt.SessionLost = false;
                 rt.Metrics = new DeskMetricsDto();
                 if (rt.Machine.State == DeskState.Stopping)
                 {
@@ -546,230 +626,528 @@ public sealed class DeskSupervisor : IHostedService
         }
     }
 
-    /// <summary>Runs one child from launch to failure. Returns the failure reason; throws when stopped.</summary>
-    private async Task<string> RunChildOnceAsync(DeskRuntime rt, CancellationToken stop)
+    /// <summary>
+    /// One run from Connecting: ensures the seat and its session, then runs one worker until something fails.
+    /// Returns the failure reason; throws <see cref="OperationCanceledException"/> when stopped (after shutting the
+    /// worker down; the seat is shut down by the caller).
+    /// </summary>
+    private async Task<string> RunOnceAsync(DeskRuntime rt, DeskCredentials? credentials, CancellationToken stop)
     {
         var o = _options.Value;
-        int attempt;
         DeskConfig config;
         lock (rt.Gate)
         {
-            attempt = ++rt.Attempt;
             config = rt.Config;
         }
 
-        var localPipe = PipeNames.Local(o.ChildRole, rt.Id, o.PipeNamespace);
-        var fullPipe = PipeNames.WindowsPrefix + localPipe;
-        var deskDirectory = _paths.DeskDirectory(rt.Id);
-        Directory.CreateDirectory(deskDirectory);
+        // ---- seat and session
+        int? session;
+        if (o.UseSeat)
+        {
+            var seatFailure = await EnsureSeatAsync(rt, config, credentials, stop).ConfigureAwait(false);
+            if (seatFailure is not null)
+            {
+                return seatFailure;
+            }
 
-        NamedPipeServerStream server;
-        try
-        {
-            server = PipeServerFactory.Create(localPipe);
+            lock (rt.Gate)
+            {
+                session = rt.Seat!.Session;
+            }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        else
         {
-            return $"cannot create pipe {fullPipe}: {ex.Message}";
-        }
-
-        await using var serverGuard = server.ConfigureAwait(false);
-
-        IChildProcess child;
-        try
-        {
-            child = await _launcher.LaunchAsync(new ChildLaunchRequest(rt.Id, o.ChildRole, fullPipe, deskDirectory, attempt), stop)
-                .ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (stop.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            return $"launch failed: {ex.Message}";
+            session = await Task.Run(() => ResolveWorkerSession(o), stop).ConfigureAwait(false);
         }
 
-        await using var childGuard = child.ConfigureAwait(false);
         lock (rt.Gate)
         {
-            rt.ChildPid = child.Pid;
+            rt.SessionId = session;
+            if (!rt.Machine.TryFire(DeskTrigger.SessionReady, out _))
+            {
+                stop.ThrowIfCancellationRequested();
+                return $"unexpected state {rt.Machine.State}";
+            }
+
+            // DisplayReady is immediate in the MVP (no IDD yet).
+            if (!rt.Machine.TryFire(DeskTrigger.DisplayReady, out _))
+            {
+                stop.ThrowIfCancellationRequested();
+                return $"unexpected state {rt.Machine.State}";
+            }
         }
 
-        var connection = new IpcConnection(server, ownsStream: false);
-        using var io = new CancellationTokenSource();
+        // ---- worker
+        int attempt;
+        lock (rt.Gate)
+        {
+            attempt = ++rt.Attempt;
+            rt.WorkerAbort = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        var request = WorkerLaunchRequest(rt.Id, config, session, attempt);
+        var opened = await ChildChannel.OpenAsync(request, PipeNames.Local(IpcProtocol.Roles.Worker, rt.Id, o.PipeNamespace),
+            [IpcProtocol.Roles.Worker, IpcProtocol.Roles.StubWorker], _launcher, o, _time, _logger, stop).ConfigureAwait(false);
+        if (opened.Channel is not { } worker)
+        {
+            return opened.Failure!;
+        }
+
+        await using var workerGuard = worker.ConfigureAwait(false);
         try
         {
-            var hello = await HandshakeAsync(rt, server, connection, child, stop).ConfigureAwait(false);
-            if (hello.Failure is not null)
-            {
-                return hello.Failure;
-            }
-
             lock (rt.Gate)
             {
-                rt.SessionId = hello.Message!.Session;
-                rt.ChildPid = hello.Message.Pid;
+                rt.ChildPid = worker.Hello.Pid;
                 rt.LastHeartbeat = _time.GetUtcNow();
-                if (!rt.Machine.TryFire(DeskTrigger.SessionReady, out _))
-                {
-                    stop.ThrowIfCancellationRequested();
-                    return $"unexpected state {rt.Machine.State}";
-                }
             }
 
-            await connection.SendAsync(new WelcomeMessage { Profile = DeskRuntime.ToIpcProfile(config.Profile) }, stop).ConfigureAwait(false);
+            if (session is int expected && worker.Hello.Session is int reported && reported != expected)
+            {
+                _logger.LogWarning("Desk {Desk}: the worker reports session {Reported}, expected {Expected}", rt.Id, reported, expected);
+            }
 
+            await worker.Connection.SendAsync(new WelcomeMessage { Profile = DeskRuntime.ToIpcProfile(config.Profile) }, stop).ConfigureAwait(false);
             lock (rt.Gate)
             {
-                rt.LastHeartbeat = _time.GetUtcNow();
-                if (!rt.Machine.TryFire(DeskTrigger.DisplayReady, out _))
-                {
-                    stop.ThrowIfCancellationRequested();
-                    return $"unexpected state {rt.Machine.State}";
-                }
-
-                rt.Connection = connection;
+                rt.Connection = worker.Connection;
             }
 
-            var readyDeadline = _time.GetUtcNow() + TimeSpan.FromMilliseconds(o.ReadyTimeoutMs);
-            var reader = ReadLoopAsync(rt, connection, io.Token);
-            var watchdog = WatchdogAsync(rt, readyDeadline, io.Token);
+            worker.Run((m, ct) => HandleWorkerMessageAsync(rt, worker, m, ct), TimeSpan.FromMilliseconds(o.ReadyTimeoutMs));
+
+            Task<string> seatLost;
+            TaskCompletionSource<string> abort;
+            lock (rt.Gate)
+            {
+                seatLost = rt.Seat?.Completion ?? new TaskCompletionSource<string>().Task;
+                abort = rt.WorkerAbort!;
+            }
+
             var stopped = Task.Delay(Timeout.Infinite, stop);
-            var winner = await Task.WhenAny(reader, watchdog, child.Exited, stopped).ConfigureAwait(false);
-
+            var winner = await Task.WhenAny(worker.Completion, seatLost, abort.Task, stopped).ConfigureAwait(false);
             if (winner == stopped)
             {
-                await ShutdownChildAsync(rt, connection, child).ConfigureAwait(false);
+                await worker.ShutdownAsync(TimeSpan.FromMilliseconds(o.ShutdownTimeoutMs)).ConfigureAwait(false);
                 stop.ThrowIfCancellationRequested();
             }
 
-            if (winner == child.Exited)
+            if (winner == seatLost)
             {
-                return $"child exited with code {await child.Exited.ConfigureAwait(false)}";
+                // The session is gone or unusable: the worker goes with it, the next run reconnects.
+                var reason = await seatLost.ConfigureAwait(false);
+                worker.Process.Kill();
+                await DropSeatAsync(rt).ConfigureAwait(false);
+                return reason;
             }
 
-            return await ((Task<string>)winner).ConfigureAwait(false);
+            if (winner == abort.Task)
+            {
+                worker.Process.Kill();
+                return await abort.Task.ConfigureAwait(false);
+            }
+
+            return await worker.Completion.ConfigureAwait(false);
         }
         catch (IOException ex) when (!stop.IsCancellationRequested)
         {
-            return $"pipe broken: {ex.Message}";
+            return $"worker pipe broken: {ex.Message}";
         }
         finally
         {
             lock (rt.Gate)
             {
-                if (ReferenceEquals(rt.Connection, connection))
+                if (ReferenceEquals(rt.Connection, worker.Connection))
                 {
                     rt.Connection = null;
                 }
 
-                rt.SessionId = null;
+                rt.WorkerAbort = null;
+                rt.ChildPid = null;
                 rt.Metrics = new DeskMetricsDto();
             }
-
-            await io.CancelAsync().ConfigureAwait(false);
-            await connection.DisposeAsync().ConfigureAwait(false);
         }
     }
 
-    private readonly record struct HandshakeResult(HelloMessage? Message, string? Failure);
+    private int? ResolveWorkerSession(SupervisorOptions o)
+    {
+        var value = o.WorkerSession.Trim();
+        if (value.Length == 0)
+        {
+            return null;
+        }
 
-    private async Task<HandshakeResult> HandshakeAsync(DeskRuntime rt, NamedPipeServerStream server, IpcConnection connection,
-        IChildProcess child, CancellationToken stop)
+        if (string.Equals(value, "console", StringComparison.OrdinalIgnoreCase))
+        {
+            return _platform.ConsoleSessionId() ?? throw new InvalidOperationException("there is no console session to start the worker in");
+        }
+
+        return int.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>The worker command line (ipc.md "Child command lines") plus the desk's extra Sunshine settings.</summary>
+    private ChildLaunchRequest WorkerLaunchRequest(string deskId, DeskConfig config, int? session, int attempt)
     {
         var o = _options.Value;
-        using var helloCts = CancellationTokenSource.CreateLinkedTokenSource(stop);
-        helloCts.CancelAfter(TimeSpan.FromMilliseconds(o.HelloTimeoutMs));
+        var pipe = PipeNames.Full(IpcProtocol.Roles.Worker, deskId, o.PipeNamespace);
+        var deskDirectory = _paths.DeskDirectory(deskId);
+        var args = new List<string>(SupervisorOptions.SplitArguments(o.WorkerArguments));
+        if (o.StubWorker)
+        {
+            args.AddRange(["--pipe", pipe, "--desk", deskId]);
+        }
+        else
+        {
+            args.AddRange(["--desk-dir", deskDirectory, "--pipe", pipe, "--desk", deskId]);
+            args.Add(FormattableString.Invariant($"port={config.BasePort}"));
+            foreach (var (name, value) in config.WorkerSettings ?? [])
+            {
+                args.Add($"{name}={value}");
+            }
+        }
+
+        return new ChildLaunchRequest(deskId, IpcProtocol.Roles.Worker, pipe, deskDirectory, attempt)
+        {
+            Executable = o.ResolveWorkerExecutable(),
+            Arguments = args,
+            SessionId = session,
+        };
+    }
+
+    // ------------------------------------------------------------------ seat
+
+    /// <summary>Makes sure a seat with a logged-on session runs. Returns a failure reason, or null when ready.</summary>
+    private async Task<string?> EnsureSeatAsync(DeskRuntime rt, DeskConfig config, DeskCredentials? credentials, CancellationToken stop)
+    {
+        ChildChannel? existing;
+        lock (rt.Gate)
+        {
+            existing = rt.Seat;
+        }
+
+        if (existing is { IsAlive: true, Session: not null })
+        {
+            return null;
+        }
+
+        if (existing is not null)
+        {
+            await DropSeatAsync(rt).ConfigureAwait(false);
+        }
+
+        if (credentials is null)
+        {
+            return "no desk credentials";
+        }
+
+        var failure = await StartSeatAsync(rt, config, credentials, stop).ConfigureAwait(false);
+        if (failure is not null)
+        {
+            return failure;
+        }
+
+        int session;
+        lock (rt.Gate)
+        {
+            session = rt.Seat!.Session!.Value;
+        }
+
+        bool relogon;
+        try
+        {
+            relogon = await Task.Run(() => _platform.OnSessionLogon(config, session, _paths.DeskDirectory(rt.Id)), stop)
+                .WaitAsync(TimeSpan.FromSeconds(30), stop).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !stop.IsCancellationRequested)
+        {
+            _logger.LogWarning("Desk {Desk}: first-logon actions failed: {Message}", rt.Id, ex.Message);
+            relogon = false;
+        }
+
+        bool again;
+        lock (rt.Gate)
+        {
+            again = relogon && _options.Value.RelogonAfterLayoutCopy && !rt.RelogonDone;
+            rt.RelogonDone |= again;
+        }
+
+        if (again)
+        {
+            // Windows loads the keyboard layout list at logon: log the new profile off once so the copied layouts apply.
+            _logger.LogInformation("Desk {Desk}: logging the new session off once so that the copied keyboard layouts apply", rt.Id);
+            await StopSeatAsync(rt).ConfigureAwait(false);
+            failure = await StartSeatAsync(rt, config, credentials, stop).ConfigureAwait(false);
+            if (failure is not null)
+            {
+                return failure;
+            }
+
+            lock (rt.Gate)
+            {
+                session = rt.Seat!.Session!.Value;
+            }
+        }
+
+        StartSessionJanitor(rt, config, session);
+        return null;
+    }
+
+    /// <summary>Launches the seat, sends welcome with the RDP target and waits for its ready with a session.</summary>
+    private async Task<string?> StartSeatAsync(DeskRuntime rt, DeskConfig config, DeskCredentials credentials, CancellationToken stop)
+    {
+        var o = _options.Value;
+        var pipe = PipeNames.Full(IpcProtocol.Roles.Seat, rt.Id, o.PipeNamespace);
+        var attempt = Interlocked.Increment(ref rt.SeatAttempts);
+        var request = new ChildLaunchRequest(rt.Id, IpcProtocol.Roles.Seat, pipe, _paths.DeskDirectory(rt.Id), attempt)
+        {
+            Executable = o.ResolveSeatExecutable(),
+            Arguments = [.. SupervisorOptions.SplitArguments(o.SeatArguments), "--pipe", pipe, "--desk", rt.Id],
+        };
+
+        var opened = await ChildChannel.OpenAsync(request, PipeNames.Local(IpcProtocol.Roles.Seat, rt.Id, o.PipeNamespace),
+            [IpcProtocol.Roles.Seat], _launcher, o, _time, _logger, stop).ConfigureAwait(false);
+        if (opened.Channel is not { } seat)
+        {
+            return opened.Failure;
+        }
+
+        var ready = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (rt.Gate)
+        {
+            rt.Seat = seat;
+            rt.SessionLost = false;
+        }
 
         try
         {
-            var connect = server.WaitForConnectionAsync(helloCts.Token);
-            if (await Task.WhenAny(connect, child.Exited).ConfigureAwait(false) != connect)
+            var port = await Task.Run(_platform.RdpPort, stop).ConfigureAwait(false);
+            var profile = config.Profile;
+            await seat.Connection.SendAsync(new WelcomeMessage
             {
-                return new(null, $"child exited with code {await child.Exited.ConfigureAwait(false)} before connecting");
+                Profile = DeskRuntime.ToIpcProfile(profile),
+                Rdp = new IpcRdpTarget
+                {
+                    Host = o.RdpHost,
+                    Port = port,
+                    User = credentials.User,
+                    Domain = credentials.Domain,
+                    Password = credentials.Password,
+                    Width = profile.Width ?? 1920,
+                    Height = profile.Height ?? 1080,
+                },
+            }, stop).ConfigureAwait(false);
+
+            seat.Run((m, ct) => HandleSeatMessageAsync(rt, seat, m, ready, ct), TimeSpan.FromMilliseconds(o.SeatReadyTimeoutMs));
+            var stopped = Task.Delay(Timeout.Infinite, stop);
+            var winner = await Task.WhenAny(ready.Task, seat.Completion, stopped).ConfigureAwait(false);
+            stop.ThrowIfCancellationRequested();
+            var failure = winner == ready.Task ? await ready.Task.ConfigureAwait(false) : await seat.Completion.ConfigureAwait(false);
+            if (failure is null)
+            {
+                _logger.LogInformation("Desk {Desk}: session {Session} is logged on for {User}", rt.Id, seat.Session, credentials.User);
+                return null;
             }
 
-            await connect.ConfigureAwait(false);
-
-            var receive = connection.ReceiveAsync(helloCts.Token);
-            if (await Task.WhenAny(receive, child.Exited).ConfigureAwait(false) != receive)
-            {
-                return new(null, $"child exited with code {await child.Exited.ConfigureAwait(false)} before hello");
-            }
-
-            var first = await receive.ConfigureAwait(false);
-            var allowedRoles = o.ChildRole == IpcProtocol.Roles.Worker
-                ? new[] { IpcProtocol.Roles.Worker, IpcProtocol.Roles.StubWorker }
-                : new[] { o.ChildRole };
-
-            return first switch
-            {
-                null => new(null, "pipe closed before hello"),
-                HelloMessage { Protocol: not IpcProtocol.Version } h => new(null, $"child speaks protocol {h.Protocol}, expected {IpcProtocol.Version}"),
-                HelloMessage h when h.Desk != rt.Id => new(null, $"child announced desk '{h.Desk}', expected '{rt.Id}'"),
-                HelloMessage h when !allowedRoles.Contains(h.Role) => new(null, $"child announced role '{h.Role}', expected {string.Join(" or ", allowedRoles)}"),
-                HelloMessage h => new(h, null),
-                _ => new(null, $"expected hello, got '{first.Type}'"),
-            };
-        }
-        catch (OperationCanceledException) when (!stop.IsCancellationRequested)
-        {
-            return new(null, $"child did not connect and say hello within {o.HelloTimeoutMs} ms");
-        }
-        catch (IpcProtocolException ex)
-        {
-            return new(null, $"protocol error: {ex.Message}");
+            await DropSeatAsync(rt).ConfigureAwait(false);
+            return failure;
         }
         catch (IOException ex) when (!stop.IsCancellationRequested)
         {
-            return new(null, $"pipe broken before hello: {ex.Message}");
+            await DropSeatAsync(rt).ConfigureAwait(false);
+            return $"seat pipe broken: {ex.Message}";
         }
     }
 
-    private async Task<string> ReadLoopAsync(DeskRuntime rt, IpcConnection connection, CancellationToken ct)
+    private async Task HandleSeatMessageAsync(DeskRuntime rt, ChildChannel seat, IpcMessage message, TaskCompletionSource<string?> ready,
+        CancellationToken ct)
     {
-        while (true)
+        switch (message)
         {
-            IpcMessage? message;
-            try
+            case ReadyMessage r when r.Session is int session:
+                seat.Session = session;
+                seat.MarkReady();
+                ready.TrySetResult(null);
+                break;
+
+            case ReadyMessage r:
+                ready.TrySetResult($"seat is up but reported no session (connector '{r.Connector ?? "null"}'): the RDP connection did not log on");
+                break;
+
+            case EventMessage { Name: IpcProtocol.Events.SessionLost } e:
+                lock (rt.Gate)
+                {
+                    rt.SessionLost = true;
+                }
+
+                _logger.LogWarning("Desk {Desk}: RDP session lost ({Reason}); the seat is reconnecting", rt.Id, EventString(e, "reason") ?? "unknown");
+                break;
+
+            case EventMessage { Name: IpcProtocol.Events.SessionRestored } e:
             {
-                message = await connection.ReceiveAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return "cancelled";
-            }
-            catch (IpcProtocolException ex)
-            {
-                return $"protocol error: {ex.Message}";
-            }
-            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
-            {
-                return $"pipe broken: {ex.Message}";
+                var restored = EventInt(e, "session");
+                int? previous;
+                TaskCompletionSource<string>? abort;
+                lock (rt.Gate)
+                {
+                    rt.SessionLost = false;
+                    previous = seat.Session;
+                    if (restored is int s)
+                    {
+                        seat.Session = s;
+                    }
+
+                    abort = rt.WorkerAbort;
+                }
+
+                if (restored is int now && previous is int before && now != before)
+                {
+                    _logger.LogWarning("Desk {Desk}: the RDP session came back as session {Now} (was {Before}); restarting the worker there",
+                        rt.Id, now, before);
+                    abort?.TrySetResult($"desk session changed from {before} to {now} after a reconnect");
+                }
+                else
+                {
+                    _logger.LogInformation("Desk {Desk}: RDP session restored (session {Session})", rt.Id, restored ?? previous);
+                }
+
+                break;
             }
 
-            if (message is null)
-            {
-                return "pipe closed by child";
-            }
+            case EventMessage other:
+                _logger.LogInformation("Desk {Desk} seat event {Event}", rt.Id, other.Name);
+                break;
 
-            try
-            {
-                await HandleMessageAsync(rt, connection, message, ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return "cancelled";
-            }
-            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
-            {
-                return $"pipe broken: {ex.Message}";
-            }
+            case LogMessage log:
+                _childLogger.Log(MapLevel(log.Level), "[{Desk}/seat] {Message}", rt.Id, log.Message);
+                break;
+
+            case HeartbeatMessage:
+                break;
+
+            default:
+                _logger.LogDebug("Desk {Desk}: ignoring '{Type}' from the seat", rt.Id, message.Type);
+                break;
+        }
+
+        await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    /// <summary>Stops the per-session janitor and shuts the seat down gracefully (it logs the session off).</summary>
+    private async Task StopSeatAsync(DeskRuntime rt)
+    {
+        ChildChannel? seat;
+        lock (rt.Gate)
+        {
+            seat = rt.Seat;
+        }
+
+        if (seat is null)
+        {
+            return;
+        }
+
+        CancelSessionJanitor(rt);
+        try
+        {
+            await seat.ShutdownAsync(TimeSpan.FromMilliseconds(_options.Value.ShutdownTimeoutMs * 2L)).ConfigureAwait(false);
+        }
+        finally
+        {
+            await DropSeatAsync(rt).ConfigureAwait(false);
         }
     }
 
-    private async Task HandleMessageAsync(DeskRuntime rt, IpcConnection connection, IpcMessage message, CancellationToken ct)
+    /// <summary>Forgets the seat and kills whatever is left of it.</summary>
+    private async Task DropSeatAsync(DeskRuntime rt)
+    {
+        ChildChannel? seat;
+        lock (rt.Gate)
+        {
+            seat = rt.Seat;
+            rt.Seat = null;
+            rt.SessionLost = false;
+        }
+
+        CancelSessionJanitor(rt);
+        if (seat is not null)
+        {
+            await seat.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    // ------------------------------------------------------------------ per-session janitor (Bluetooth)
+
+    private void StartSessionJanitor(DeskRuntime rt, DeskConfig config, int session)
+    {
+        CancelSessionJanitor(rt);
+        if (!config.DisableBluetoothUserService)
+        {
+            return;
+        }
+
+        var cts = new CancellationTokenSource();
+        lock (rt.Gate)
+        {
+            rt.SeatScope = cts;
+        }
+
+        _ = Task.Run(() => BluetoothJanitorAsync(rt.Id, session, cts.Token), CancellationToken.None);
+    }
+
+    private void CancelSessionJanitor(DeskRuntime rt)
+    {
+        CancellationTokenSource? cts;
+        lock (rt.Gate)
+        {
+            cts = rt.SeatScope;
+            rt.SeatScope = null;
+        }
+
+        if (cts is not null)
+        {
+            cts.Cancel();
+            cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// GitHub issue #3: several BluetoothUserService instances fight over the radio and can reset the console user's
+    /// devices. Stops the desk session's instance, and again whenever Windows restarts it, while the session lives.
+    /// </summary>
+    private async Task BluetoothJanitorAsync(string deskId, int session, CancellationToken ct)
+    {
+        var stops = 0;
+        var period = TimeSpan.FromMilliseconds(Math.Max(100, _options.Value.BluetoothPollMs));
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    var stopped = await Task.Run(() => _platform.StopBluetoothUserService(session), ct)
+                        .WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+                    foreach (var name in stopped)
+                    {
+                        stops++;
+                        _logger.LogInformation("Desk {Desk}: stopped {Service} in session {Session}{Again}", deskId, name, session,
+                            stops > 1 ? " again (Windows restarted it)" : "");
+                    }
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug("Desk {Desk}: Bluetooth user service check failed: {Message}", deskId, ex.Message);
+                }
+
+                await Task.Delay(period, _time, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    // ------------------------------------------------------------------ worker messages
+
+    private async Task HandleWorkerMessageAsync(DeskRuntime rt, ChildChannel worker, IpcMessage message, CancellationToken ct)
     {
         switch (message)
         {
@@ -784,6 +1162,7 @@ public sealed class DeskSupervisor : IHostedService
                 break;
 
             case ReadyMessage:
+                worker.MarkReady();
                 lock (rt.Gate)
                 {
                     rt.LastHeartbeat = _time.GetUtcNow();
@@ -803,6 +1182,10 @@ public sealed class DeskSupervisor : IHostedService
                 Fire(rt, DeskTrigger.ClientDisconnected);
                 break;
 
+            case EventMessage { Name: IpcProtocol.Events.ModeRequested } e:
+                _ = ForwardModeAsync(rt, EventInt(e, "width"), EventInt(e, "height"), EventInt(e, "fps"));
+                break;
+
             case EventMessage other:
                 _logger.LogInformation("Desk {Desk} event {Event}", rt.Id, other.Name);
                 break;
@@ -811,88 +1194,63 @@ public sealed class DeskSupervisor : IHostedService
                 _childLogger.Log(MapLevel(log.Level), "[{Desk}] {Message}", rt.Id, log.Message);
                 break;
 
-            case ResultMessage:
-                // Completed by IpcConnection; a result nobody waits for (late answer) is dropped.
-                break;
-
-            case UnknownIpcMessage { Id: long id } unknown:
-                await connection.ReplyAsync(id, ok: false, errorCode: IpcProtocol.ErrorCodes.UnknownType,
-                    errorMessage: $"unknown message type '{unknown.TypeName}'", cancellationToken: ct).ConfigureAwait(false);
-                break;
-
-            case IIpcRequest request:
-                await connection.ReplyAsync(request.Id, ok: false, errorCode: IpcProtocol.ErrorCodes.Unsupported,
-                    errorMessage: $"the service does not accept '{message.Type}'", cancellationToken: ct).ConfigureAwait(false);
-                break;
-
             default:
                 _logger.LogDebug("Desk {Desk}: ignoring '{Type}'", rt.Id, message.Type);
                 break;
         }
+
+        await Task.CompletedTask.ConfigureAwait(false);
     }
 
-    private async Task<string> WatchdogAsync(DeskRuntime rt, DateTimeOffset readyDeadline, CancellationToken ct)
+    /// <summary>A Moonlight client asked for a mode: resize the session through the seat (<c>set_mode</c>).</summary>
+    private async Task ForwardModeAsync(DeskRuntime rt, int? width, int? height, int? fps)
     {
-        var o = _options.Value;
-        var period = TimeSpan.FromMilliseconds(Math.Max(10, o.HeartbeatIntervalMs / 4));
-        using var timer = new PeriodicTimer(period, _time);
+        if (width is not (> 0) || height is not (> 0))
+        {
+            _logger.LogWarning("Desk {Desk}: mode_requested without a valid width and height", rt.Id);
+            return;
+        }
+
+        IpcConnection? seat;
+        lock (rt.Gate)
+        {
+            seat = rt.Seat?.Connection;
+        }
+
+        if (seat is null)
+        {
+            _logger.LogInformation("Desk {Desk}: Moonlight asked for {Width}x{Height}@{Fps} but there is no seat to resize the session",
+                rt.Id, width, height, fps);
+            return;
+        }
+
         try
         {
-            while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
+            var result = await seat.RequestAsync(id => new SetModeMessage { Id = id, Width = width.Value, Height = height.Value },
+                TimeSpan.FromMilliseconds(_options.Value.RequestTimeoutMs)).ConfigureAwait(false);
+            if (result.Ok)
             {
-                var now = _time.GetUtcNow();
-                lock (rt.Gate)
-                {
-                    var silence = now - rt.LastHeartbeat;
-                    if (silence > o.HeartbeatTimeout)
-                    {
-                        return $"no heartbeat for {(long)silence.TotalMilliseconds} ms ({o.MissedHeartbeats} missed): child hung";
-                    }
-
-                    if (rt.Machine.State == DeskState.DisplayReady && now > readyDeadline)
-                    {
-                        return $"child not ready within {o.ReadyTimeoutMs} ms";
-                    }
-                }
+                _logger.LogInformation("Desk {Desk}: session resized to {Width}x{Height} for Moonlight ({Fps} fps)", rt.Id, width, height, fps);
+            }
+            else
+            {
+                _logger.LogInformation("Desk {Desk}: the seat could not resize to {Width}x{Height}: {Code} {Message}",
+                    rt.Id, width, height, result.Error?.Code, result.Error?.Message);
             }
         }
-        catch (OperationCanceledException)
+        catch (Exception ex) when (ex is TimeoutException or IOException or ObjectDisposedException or EndOfStreamException or InvalidOperationException)
         {
-        }
-
-        return "cancelled";
-    }
-
-    private async Task ShutdownChildAsync(DeskRuntime rt, IpcConnection connection, IChildProcess child)
-    {
-        var timeout = TimeSpan.FromMilliseconds(_options.Value.ShutdownTimeoutMs);
-        var deadline = _time.GetUtcNow() + timeout;
-        try
-        {
-            var result = await connection.RequestAsync(id => new ShutdownMessage { Id = id }, timeout).ConfigureAwait(false);
-            _logger.LogDebug("Desk {Desk}: shutdown answered ok={Ok}", rt.Id, result.Ok);
-        }
-        catch (Exception ex) when (ex is TimeoutException or IOException or ObjectDisposedException or EndOfStreamException)
-        {
-            _logger.LogDebug("Desk {Desk}: shutdown request failed: {Message}", rt.Id, ex.Message);
-        }
-
-        var remaining = deadline - _time.GetUtcNow();
-        try
-        {
-            if (remaining <= TimeSpan.Zero)
-            {
-                throw new TimeoutException();
-            }
-
-            await child.Exited.WaitAsync(remaining).ConfigureAwait(false);
-        }
-        catch (TimeoutException)
-        {
-            _logger.LogWarning("Desk {Desk}: child {Pid} did not exit within {Timeout}; killing it", rt.Id, child.Pid, timeout);
-            child.Kill();
+            _logger.LogWarning("Desk {Desk}: set_mode failed: {Message}", rt.Id, ex.Message);
         }
     }
+
+    private static int? EventInt(EventMessage e, string name) =>
+        e.Data is { ValueKind: System.Text.Json.JsonValueKind.Object } d && d.TryGetProperty(name, out var v) && v.TryGetInt32(out var i) ? i : null;
+
+    private static string? EventString(EventMessage e, string name) =>
+        e.Data is { ValueKind: System.Text.Json.JsonValueKind.Object } d && d.TryGetProperty(name, out var v)
+            ? v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : v.ToString()
+            : null;
 
     private async Task PushProfileAsync(string id, IpcConnection connection, ProfileConfig profile)
     {
@@ -910,6 +1268,10 @@ public sealed class DeskSupervisor : IHostedService
             _logger.LogWarning("Desk {Desk}: could not push the new profile: {Message}", id, ex.Message);
         }
     }
+
+    private static bool SameSettings(Dictionary<string, string>? a, Dictionary<string, string>? b) =>
+        (a is null || a.Count == 0) && (b is null || b.Count == 0)
+        || (a is not null && b is not null && a.Count == b.Count && a.All(kv => b.TryGetValue(kv.Key, out var v) && v == kv.Value));
 
     private static LogLevel MapLevel(string? level) => level switch
     {

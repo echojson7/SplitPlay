@@ -7,6 +7,7 @@ using SplitPlay.Core.Configuration;
 using SplitPlay.Service.Api;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Logging;
+using SplitPlay.Service.Platform;
 using SplitPlay.Service.Supervision;
 
 namespace SplitPlay.Service.Hosting;
@@ -72,6 +73,14 @@ public static class ServiceHost
                 "process" => sp.GetRequiredService<ProcessChildLauncher>(),
                 var other => throw new InvalidOperationException($"unknown Supervisor:Launcher '{other}' (expected process or fake)"),
             });
+        builder.Services.AddSingleton<FakeDeskPlatform>();
+        builder.Services.AddSingleton<IDeskPlatform>(sp =>
+            sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch
+            {
+                "fake" => sp.GetRequiredService<FakeDeskPlatform>(),
+                "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsDeskPlatform>(sp),
+                var other => throw new InvalidOperationException($"unsupported Supervisor:Platform '{other}' (expected windows or fake)"),
+            });
         builder.Services.AddSingleton<DeskSupervisor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<DeskSupervisor>());
         builder.Services.AddSingleton<EventHub>();
@@ -84,8 +93,10 @@ public static class ServiceHost
 
         var app = builder.Build();
         var logger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("SplitPlay.Service");
-        logger.LogInformation("SplitPlay service {Version} starting; data root {Root}; web port {Port}; launcher {Launcher}",
-            BuildInfo.Version, paths.Root, port, app.Services.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectiveLauncher);
+        var supervisor = app.Services.GetRequiredService<IOptions<SupervisorOptions>>().Value;
+        logger.LogInformation(
+            "SplitPlay service {Version} starting; data root {Root}; web port {Port}; launcher {Launcher}; platform {Platform}; seat {Seat}; worker {Worker}",
+            BuildInfo.Version, paths.Root, port, supervisor.EffectiveLauncher, supervisor.EffectivePlatform, supervisor.Seat, supervisor.Worker);
         if (loaded.MigratedFrom is int from)
         {
             logger.LogInformation("Migrated {File} from schema {From} to {To}", paths.ConfigFile, from, SplitPlayConfig.CurrentSchemaVersion);

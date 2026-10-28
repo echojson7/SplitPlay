@@ -167,6 +167,21 @@ This mirrors the `.reg` files, with SplitPlay's own install path.
 `sc qc` does not show. If they differ, it reports "reboot required". One way to read the loaded DLL is to check
 whether `TermWrap.dll` appears in the module list of `TermService`'s svchost process.
 
+### RDP listener settings the seat needs
+
+These are not part of TermWrap, but `host prepare` sets them at the same time. All of them are under
+`HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server`, and all are measured in CI (`native.yml`, RDP step):
+
+| Value | Set to | Why |
+|---|---|---|
+| `fDenyTSConnections` | `0` | Enables the RDP listener |
+| `WinStations\RDP-Tcp\UserAuthentication` | `1` | NLA (the seat only does NLA) |
+| `WinStations\RDP-Tcp\fInheritColorDepth` | `1` | Uses the colour depth the client asks for (32 bpp) |
+| `WinStations\RDP-Tcp\ColorDepth` | `5` | Raises the cap to 32 bpp. The default `3` with `fInheritColorDepth=0` gives the desk session **16 bpp**. With `fInheritColorDepth=1` alone, it stays at 16 bpp |
+
+TermService reads these values only when it starts, so the reboot after `host prepare` covers them. The seat logs
+the depth it got (`RDP: session colour depth N bpp`). Like `ServiceDll`, `revert` restores the recorded values.
+
 ### EndpWrap (optional, not installed by default)
 
 Upstream's notes cover audio recording (microphone) redirection on Home and Server editions. It needs `EndpWrap.dll`

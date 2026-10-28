@@ -108,6 +108,9 @@ public sealed class DeskDto
 /// </summary>
 public sealed record HostUserDto(string Name, string? FullName, bool IsAdmin, bool IsConsoleUser, bool CreatedBySplitPlay);
 
+/// <summary><c>GET /host/network</c>: LAN IPv4 addresses of the host, those with a default gateway first.</summary>
+public sealed record HostNetworkDto(IReadOnlyList<string> Addresses);
+
 /// <summary><c>GET /auth/session</c>: <c>{setupRequired, authenticated, csrfToken?}</c>.</summary>
 public sealed record AuthSessionDto(
     bool SetupRequired,

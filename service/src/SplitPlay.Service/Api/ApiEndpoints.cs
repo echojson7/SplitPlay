@@ -180,6 +180,8 @@ public static partial class ApiEndpoints
 
         api.MapGet("/host/users", (IDeskPlatform platform) => Results.Json(platform.ListUsers().ToList(), Ctx.ListHostUserDto));
 
+        api.MapGet("/host/network", () => Results.Json(new HostNetworkDto(HostNetwork.Addresses()), Ctx.HostNetworkDto));
+
         api.MapPost("/desks", async (HttpRequest request, DeskSupervisor s) =>
         {
             var (desk, password) = await ReadDeskBodyAsync(request).ConfigureAwait(false);

@@ -1,0 +1,36 @@
+<!-- SPDX-License-Identifier: MIT -->
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>SplitPlay.Service</RootNamespace>
+    <AssemblyName>SplitPlay.Service</AssemblyName>
+    <!-- DXGI adapter enumeration uses COM vtable calls. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+  <!-- A RID-specific publish (dotnet publish -r win-x64) is self-contained: no .NET runtime needed on the host. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SplitPlay.Core\SplitPlay.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The SPA is built by web/ and dropped into wwwroot by the installer; this placeholder keeps "/" working. -->
+    <None Include="wwwroot\**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SplitPlay.Service.Tests" />
+  </ItemGroup>
+</Project>

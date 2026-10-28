@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: MIT
+# Builds and tests the .NET part (service/), publishes SplitPlay.Service, splitplay (CLI) and SplitPlay.Tray as
+# self-contained win-x64 apps, smoke-tests them (console mode, CLI, Windows service install/uninstall, tray) and
+# uploads the publish output as the "service-win-x64" artifact.
+name: service
+
+on:
+  push:
+    branches: ['stage2/**', 'main']
+    paths:
+      - 'service/**'
+      - '.github/workflows/service.yml'
+  pull_request:
+    paths:
+      - 'service/**'
+      - '.github/workflows/service.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: service-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build, test, publish, smoke
+    runs-on: windows-2022
+    timeout-minutes: 40
+    env:
+      DOTNET_NOLOGO: '1'
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_SKIP_FIRST_TIME_EXPERIENCE: '1'
+      NUGET_PACKAGES: ${{ github.workspace }}\.nuget\packages
+      PUBLISH_DIR: ${{ github.workspace }}\artifacts\service-win-x64
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: service
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: NuGet cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.NUGET_PACKAGES }}
+          key: nuget-${{ runner.os }}-${{ hashFiles('service/**/*.csproj', 'service/Directory.Packages.props', 'service/Directory.Build.props', 'service/global.json') }}
+          restore-keys: |
+            nuget-${{ runner.os }}-
+
+      - name: Restore
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          dotnet --info
+          dotnet restore SplitPlay.sln
+
+      - name: Build (Release)
+        run: dotnet build SplitPlay.sln -c Release --no-restore
+
+      - name: Test
+        run: >
+          dotnet test SplitPlay.sln -c Release --no-build
+          --logger "trx;LogFilePrefix=results" --logger "console;verbosity=normal"
+          --results-directory "${{ runner.temp }}\test-results"
+
+      - name: Publish (self-contained win-x64)
+        run: |
+          $PSNativeCommandUseErrorActionPreference = $true
+          dotnet publish src/SplitPlay.Service/SplitPlay.Service.csproj -c Release -r win-x64 -o "$env:PUBLISH_DIR\service"
+          dotnet publish src/SplitPlay.Cli/SplitPlay.Cli.csproj -c Release -r win-x64 -o "$env:PUBLISH_DIR\cli"
+          dotnet publish src/SplitPlay.Tray/SplitPlay.Tray.csproj -c Release -r win-x64 -o "$env:PUBLISH_DIR\tray"
+          foreach ($d in 'service', 'cli', 'tray') {
+            $files = Get-ChildItem "$env:PUBLISH_DIR\$d" -Recurse -File
+            '{0}: {1} files, {2:N1} MB' -f $d, $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB)
+          }
+          Get-ChildItem "$env:PUBLISH_DIR" -Recurse -Include 'SplitPlay*.exe', 'splitplay.exe', 'index.html' | ForEach-Object FullName
+
+      - name: Smoke test (console mode, CLI, Windows service, tray)
+        run: ./build/smoke-test.ps1 -Publish "$env:PUBLISH_DIR" -Work "${{ runner.temp }}\smoke"
+
+      - name: Upload service-win-x64
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-win-x64
+          path: ${{ env.PUBLISH_DIR }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: service-diagnostics
+          path: |
+            ${{ runner.temp }}\test-results
+            ${{ runner.temp }}\smoke
+            C:\ProgramData\SplitPlay\logs
+          if-no-files-found: ignore
+          retention-days: 7

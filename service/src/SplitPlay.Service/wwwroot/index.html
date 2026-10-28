@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Placeholder. The real UI is built from web/ and copied over this folder by the installer. -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SplitPlay</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #f6f7f9; --fg: #1b1f24; --muted: #5b6470; --card: #ffffff; --line: #d9dde3; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #14171b; --fg: #e8eaed; --muted: #9aa3ad; --card: #1d2126; --line: #2d333a; } }
+    body { margin: 0; font: 15px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+    main { max-width: 720px; margin: 48px auto; padding: 0 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; }
+    code { font-family: ui-monospace, monospace; }
+    .muted { color: var(--muted); }
+    ul { padding-left: 20px; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>SplitPlay</h1>
+  <p class="muted">The service is running. The web interface has not been installed in this build.</p>
+  <div class="card">
+    <p>Status: <span id="status">checking…</span></p>
+    <ul id="desks"></ul>
+    <p class="muted">API: <code>/api/v1</code> (see docs/contracts/web-api.md)</p>
+  </div>
+</main>
+<script>
+  fetch('/api/v1/health').then(r => r.json()).then(h => {
+    document.getElementById('status').textContent = h.status + ' · version ' + h.version + ' · up ' + h.uptimeSeconds + ' s';
+    return fetch('/api/v1/desks');
+  }).then(r => r.json()).then(desks => {
+    const list = document.getElementById('desks');
+    for (const d of desks) {
+      const li = document.createElement('li');
+      li.textContent = d.id + ' (' + (d.name || d.id) + '): ' + d.state;
+      list.appendChild(li);
+    }
+  }).catch(e => { document.getElementById('status').textContent = 'unreachable: ' + e; });
+</script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# NuGet WDK/SDK packages (restored, about 1.5 GB unpacked)
+/packages/
+# MSBuild output and packaged drivers
+/build/
+/out/
+*.user
+.vs/

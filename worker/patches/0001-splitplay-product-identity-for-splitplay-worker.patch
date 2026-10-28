@@ -1,0 +1,475 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:00:00 +0000
+Subject: [PATCH] splitplay: product identity for splitplay-worker
+
+Turn the Sunshine executable into the SplitPlay desk worker:
+
+- The executable is named splitplay-worker (OUTPUT_NAME; the CMake target
+  keeps its upstream name so the rest of the build is untouched), and the
+  Windows version resource names it.
+- SPLITPLAY_VERSION and SPLITPLAY_UPSTREAM_COMMIT cache variables feed a
+  version string ("splitplay-worker 0.1.0 (SplitPlay desk worker, based on
+  Sunshine cf52f4b6)") printed by --version before anything touches the
+  disk, at the top of --help and in the log.
+- New option --desk-dir <dir> (also --desk-dir=<dir>): platf::appdata()
+  returns it on Windows, so sunshine.conf, sunshine_state.json,
+  credentials/, apps.json, covers/ and sunshine.log all live in the
+  per-desk directory that SplitPlay.Service passes. The options are read
+  from GetCommandLineW() because the upstream config defaults call
+  appdata() during static initialisation, and they are removed from argv
+  before the upstream parser sees them.
+- The working directory is set to the executable's directory so that the
+  relative assets path resolves wherever the service starts the worker.
+- The tray icon is off by default (SUNSHINE_ENABLE_TRAY=OFF), and
+  launch_ui() only logs the URL instead of opening a browser.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index 7e733bb94e59cb706808c69938d67d6447ec6b13..40cd529ef58adc9e9021e6a9f880dc0573e5eb4b 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -170,6 +170,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/round_robin.h"
+         "${CMAKE_SOURCE_DIR}/src/stat_trackers.h"
+         "${CMAKE_SOURCE_DIR}/src/stat_trackers.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/options.h"
+         ${PLATFORM_TARGET_FILES})
+ 
+ if(NOT SUNSHINE_ASSETS_DIR_DEF)
+@@ -177,6 +179,10 @@ if(NOT SUNSHINE_ASSETS_DIR_DEF)
+ endif()
+ list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_ASSETS_DIR="${SUNSHINE_ASSETS_DIR_DEF}")
+ 
++# SplitPlay product identity
++list(APPEND SUNSHINE_DEFINITIONS SPLITPLAY_VERSION="${SPLITPLAY_VERSION}")
++list(APPEND SUNSHINE_DEFINITIONS SPLITPLAY_UPSTREAM_COMMIT="${SPLITPLAY_UPSTREAM_COMMIT}")
++
+ # Publisher metadata
+ list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_PUBLISHER_NAME="${SUNSHINE_PUBLISHER_NAME}")
+ list(APPEND SUNSHINE_DEFINITIONS SUNSHINE_PUBLISHER_WEBSITE="${SUNSHINE_PUBLISHER_WEBSITE}")
+diff --git a/cmake/compile_definitions/windows.cmake b/cmake/compile_definitions/windows.cmake
+index f255d38ab678a2b3362452e5d59ca707e6e9fe5e..33c601cb8d77da8f638dffbd1dbec77a5bbbff77 100644
+--- a/cmake/compile_definitions/windows.cmake
++++ b/cmake/compile_definitions/windows.cmake
+@@ -58,7 +58,7 @@ add_library(sunshine_rc_object OBJECT "${CMAKE_SOURCE_DIR}/src/platform/windows/
+ # Set minimal properties for RC compilation - only what's needed for the resource file
+ # Otherwise compilation can fail due to "line too long" errors
+ set_target_properties(sunshine_rc_object PROPERTIES
+-    COMPILE_DEFINITIONS "PROJECT_ICON_PATH=${SUNSHINE_ICON_PATH};PROJECT_NAME=${PROJECT_NAME};PROJECT_VENDOR=${SUNSHINE_PUBLISHER_NAME};PROJECT_VERSION=${PROJECT_VERSION};PROJECT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR};PROJECT_VERSION_MINOR=${PROJECT_VERSION_MINOR};PROJECT_VERSION_PATCH=${PROJECT_VERSION_PATCH};RC_VERSION_BUILD=${RC_VERSION_BUILD};RC_VERSION_REVISION=${RC_VERSION_REVISION}"  # cmake-lint: disable=C0301
++    COMPILE_DEFINITIONS "PROJECT_ICON_PATH=${SUNSHINE_ICON_PATH};PROJECT_NAME=splitplay-worker;PROJECT_VENDOR=${SUNSHINE_PUBLISHER_NAME};PROJECT_VERSION=${PROJECT_VERSION};PROJECT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR};PROJECT_VERSION_MINOR=${PROJECT_VERSION_MINOR};PROJECT_VERSION_PATCH=${PROJECT_VERSION_PATCH};RC_VERSION_BUILD=${RC_VERSION_BUILD};RC_VERSION_REVISION=${RC_VERSION_REVISION}"  # cmake-lint: disable=C0301
+     INCLUDE_DIRECTORIES ""
+ )
+ 
+diff --git a/cmake/prep/options.cmake b/cmake/prep/options.cmake
+index 4b2455bf295c666cc6d81cb64a030a434ee3eb1c..942054837ce4b68ae20f9ef1210f4a0cc1b04f7e 100644
+--- a/cmake/prep/options.cmake
++++ b/cmake/prep/options.cmake
+@@ -16,7 +16,14 @@ option(BUILD_WERROR "Enable -Werror flag." OFF)
+ # if this option is set, the build will exit after configuring special package configuration files
+ option(SUNSHINE_CONFIGURE_ONLY "Configure special files only, then exit." OFF)
+ 
+-option(SUNSHINE_ENABLE_TRAY "Enable system tray icon." ON)
++# SplitPlay: the worker runs headless under SplitPlay.Service, so the tray icon is off by default.
++option(SUNSHINE_ENABLE_TRAY "Enable system tray icon." OFF)
++
++# SplitPlay product identity
++set(SPLITPLAY_VERSION "0.0.0-dev"
++        CACHE STRING "SplitPlay version reported by splitplay-worker --version and in the IPC hello message.")
++set(SPLITPLAY_UPSTREAM_COMMIT "unknown"
++        CACHE STRING "Upstream Sunshine commit the worker is built from (worker/upstream.lock).")
+ 
+ if(WIN32)
+     option(SUNSHINE_USE_STATIC_QT
+diff --git a/cmake/targets/common.cmake b/cmake/targets/common.cmake
+index e89f3d81903bd155ef3ccb2cbf3447052eda3d3c..c1432e53e6965d7dfb79694f5a44cc35cf819bd2 100644
+--- a/cmake/targets/common.cmake
++++ b/cmake/targets/common.cmake
+@@ -6,6 +6,8 @@ if(APPLE AND NOT SUNSHINE_BUILD_HOMEBREW)
+ else()
+     add_executable(sunshine ${SUNSHINE_TARGET_FILES})
+ endif()
++# SplitPlay: the executable is splitplay-worker; the CMake target keeps its upstream name.
++set_target_properties(sunshine PROPERTIES OUTPUT_NAME splitplay-worker)
+ foreach(dep ${SUNSHINE_TARGET_DEPENDENCIES})
+     add_dependencies(sunshine ${dep})  # compile these before sunshine
+ endforeach()
+diff --git a/src/entry_handler.cpp b/src/entry_handler.cpp
+index e5e18920b6b81842d8a46d7d3fd1afb4d3627a21..ff7edb2417e763cc3e7fd70a1bbccd1e0202992a 100644
+--- a/src/entry_handler.cpp
++++ b/src/entry_handler.cpp
+@@ -31,7 +31,8 @@ void launch_ui(const std::optional<std::string> &path) {
+   if (path) {
+     url += *path;
+   }
+-  platf::open_url(url);
++  // SplitPlay: the worker never opens a browser; pairing and configuration go through SplitPlay.Service.
++  BOOST_LOG(info) << "Web UI is available at "sv << url << " (not opened by the SplitPlay worker)"sv;
+ }
+ 
+ namespace args {
+diff --git a/src/main.cpp b/src/main.cpp
+index 78ec6565c932d8b9b5ebac1a58e712136e1210e9..57bf210fa36e40b0274037a3074d070cbfa98f8d 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -26,6 +26,7 @@
+ #include "main.h"
+ #include "nvhttp.h"
+ #include "process.h"
++#include "splitplay/options.h"
+ #include "system_tray.h"
+ #include "upnp.h"
+ #include "video.h"
+@@ -182,6 +183,20 @@ int main(int argc, char *argv[]) {
+   }
+ #endif
+ 
++  // SplitPlay: handle the worker options before Sunshine parses the command line.
++  splitplay::capture_command_line(argc, argv);
++  if (const auto &opts = splitplay::options(); !opts.error.empty()) {
++    std::cerr << "splitplay-worker: "sv << opts.error << std::endl;
++    return 2;
++  } else if (opts.version) {
++    std::cout << splitplay::version_string() << std::endl;
++    return 0;
++  } else if (opts.help) {
++    splitplay::print_help_header(std::cout);
++  }
++  argc = splitplay::strip_args(argc, argv);
++  splitplay::use_executable_directory_as_cwd();
++
+   lifetime::argv = argv;
+ 
+   task_pool_util::TaskPool::task_id_t force_shutdown = nullptr;
+@@ -216,6 +231,8 @@ int main(int argc, char *argv[]) {
+   // if anything is logged prior to this point, it will appear in stdout, but not in the log viewer in the UI
+   // the version should be printed to the log before anything else
+   BOOST_LOG(info) << PROJECT_NAME << " version: " << PROJECT_VERSION << " commit: " << PROJECT_VERSION_COMMIT;
++  BOOST_LOG(info) << splitplay::version_string();
++  BOOST_LOG(info) << "Desk directory: "sv << platf::appdata().string();
+ 
+   // Log publisher metadata
+   log_publisher_data();
+diff --git a/src/platform/windows/misc.cpp b/src/platform/windows/misc.cpp
+index 01065d05c2a93e04aa22c086dca5b163a438610e..eb0cda7c8966eac40fe282e115e8125855cc37d6 100644
+--- a/src/platform/windows/misc.cpp
++++ b/src/platform/windows/misc.cpp
+@@ -49,6 +49,7 @@
+ #include "src/globals.h"
+ #include "src/logging.h"
+ #include "src/platform/common.h"
++#include "src/splitplay/options.h"
+ #include "src/utility.h"
+ #include "utf_utils.h"
+ 
+@@ -145,6 +146,11 @@ namespace platf {
+   decltype(WlanSetInterface) *fn_WlanSetInterface = nullptr;  ///< Fn wlan set interface.
+ 
+   std::filesystem::path appdata() {
++    // SplitPlay: SplitPlay.Service passes a per-desk directory with --desk-dir.
++    if (const auto &desk_dir = splitplay::options().desk_dir; !desk_dir.empty()) {
++      return desk_dir;
++    }
++
+     WCHAR sunshine_path[MAX_PATH];
+     GetModuleFileNameW(nullptr, sunshine_path, _countof(sunshine_path));
+     return std::filesystem::path {sunshine_path}.remove_filename() / L"config"sv;
+diff --git a/src/splitplay/options.cpp b/src/splitplay/options.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..5bdc183cd35de2ba6b9a8b2d3d29ea40f68d853b
+--- /dev/null
++++ b/src/splitplay/options.cpp
+@@ -0,0 +1,208 @@
++/**
++ * @file src/splitplay/options.cpp
++ * @brief Command-line options of the SplitPlay worker (splitplay-worker.exe).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++// standard includes
++#include <algorithm>
++#include <mutex>
++#include <string_view>
++#include <system_error>
++#include <vector>
++
++#ifdef _WIN32
++  // platform includes
++  #include <windows.h>
++  #include <shellapi.h>
++#endif
++
++// local includes
++#include "options.h"
++
++#ifndef SPLITPLAY_VERSION
++  #define SPLITPLAY_VERSION "0.0.0-dev"
++#endif
++#ifndef SPLITPLAY_UPSTREAM_COMMIT
++  #define SPLITPLAY_UPSTREAM_COMMIT "unknown"
++#endif
++
++using namespace std::literals;
++
++namespace splitplay {
++  namespace {
++    /** Options that take a value, given as `--name value` or `--name=value`. */
++    constexpr std::string_view value_options[] = {
++      "--desk-dir"sv,
++    };
++
++    std::vector<std::string> captured_args;  ///< Arguments recorded by capture_command_line().
++
++    /**
++     * @brief Split `arg` into a SplitPlay value option name and an optional inline value.
++     *
++     * @return True when `arg` is one of `value_options`.
++     */
++    bool match_value_option(std::string_view arg, std::string_view &name, std::string_view &inline_value, bool &has_inline) {
++      for (auto option : value_options) {
++        if (arg == option) {
++          name = option;
++          has_inline = false;
++          return true;
++        }
++        if (arg.size() > option.size() && arg.starts_with(option) && arg[option.size()] == '=') {
++          name = option;
++          inline_value = arg.substr(option.size() + 1);
++          has_inline = true;
++          return true;
++        }
++      }
++      return false;
++    }
++
++    std::filesystem::path path_from_utf8(const std::string &value) {
++      std::u8string u8(value.begin(), value.end());
++      std::error_code ec;
++      auto path = std::filesystem::absolute(std::filesystem::path {u8}, ec);
++      return ec ? std::filesystem::path {u8} : path.lexically_normal();
++    }
++
++    /**
++     * @brief Store the value of a SplitPlay option.
++     */
++    void apply_value(options_t &opts, std::string_view name, const std::string &value) {
++      if (name == "--desk-dir"sv) {
++        opts.desk_dir = path_from_utf8(value);
++      }
++    }
++
++    options_t parse(const std::vector<std::string> &args) {
++      options_t opts;
++      for (std::size_t i = 1; i < args.size(); ++i) {
++        std::string_view arg = args[i];
++        if (arg == "--version"sv) {
++          opts.version = true;
++          continue;
++        }
++        if (arg == "--help"sv) {
++          opts.help = true;
++          continue;
++        }
++
++        std::string_view name, inline_value;
++        bool has_inline = false;
++        if (!match_value_option(arg, name, inline_value, has_inline)) {
++          continue;
++        }
++
++        std::string value;
++        if (has_inline) {
++          value = std::string {inline_value};
++        } else if (i + 1 < args.size()) {
++          value = args[++i];
++        }
++        if (value.empty()) {
++          opts.error = std::string {name} + " requires a value";
++          break;
++        }
++        apply_value(opts, name, value);
++      }
++      return opts;
++    }
++
++#ifdef _WIN32
++    std::string to_utf8(const wchar_t *wide) {
++      const int size = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
++      if (size <= 1) {
++        return {};
++      }
++      std::string out(static_cast<std::size_t>(size - 1), '\0');
++      WideCharToMultiByte(CP_UTF8, 0, wide, -1, out.data(), size, nullptr, nullptr);
++      return out;
++    }
++
++    std::vector<std::string> process_args() {
++      std::vector<std::string> args;
++      int count = 0;
++      LPWSTR *wide = CommandLineToArgvW(GetCommandLineW(), &count);
++      if (wide == nullptr) {
++        return args;
++      }
++      for (int i = 0; i < count; ++i) {
++        args.push_back(to_utf8(wide[i]));
++      }
++      LocalFree(wide);
++      return args;
++    }
++#else
++    std::vector<std::string> process_args() {
++      return captured_args;
++    }
++#endif
++  }  // namespace
++
++  void capture_command_line(int argc, char **argv) {
++    captured_args.assign(argv, argv + argc);
++  }
++
++  const options_t &options() {
++    static const options_t opts = parse(process_args());
++    return opts;
++  }
++
++  int strip_args(int argc, char **argv) {
++    int out = 1;
++    for (int i = 1; i < argc; ++i) {
++      std::string_view name, inline_value;
++      bool has_inline = false;
++      if (match_value_option(argv[i], name, inline_value, has_inline)) {
++        if (!has_inline) {
++          ++i;  // skip the value
++        }
++        continue;
++      }
++      argv[out++] = argv[i];
++    }
++    if (out < argc) {
++      argv[out] = nullptr;
++    }
++    return out;
++  }
++
++  std::string version() {
++    return SPLITPLAY_VERSION;
++  }
++
++  std::string version_string() {
++    return "splitplay-worker "s + SPLITPLAY_VERSION + " (SplitPlay desk worker, based on Sunshine "s + SPLITPLAY_UPSTREAM_COMMIT + ")"s;
++  }
++
++  void print_help_header(std::ostream &out) {
++    out << version_string() << '\n'
++        << "Licensed under GPL-3.0. Source: https://github.com/echojson7/SplitPlay (worker/)\n"
++        << '\n'
++        << "SplitPlay options (removed before the Sunshine options below are parsed):\n"
++        << "    --desk-dir <dir>          | per-desk directory for sunshine.conf, state, credentials and logs\n"
++        << "                              | (default: <executable dir>\\config)\n"
++        << "    --version                 | print the version and exit\n"
++        << '\n';
++  }
++
++  void use_executable_directory_as_cwd() {
++#ifdef _WIN32
++    std::wstring path(MAX_PATH, L'\0');
++    for (;;) {
++      const DWORD len = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
++      if (len == 0) {
++        return;
++      }
++      if (len < path.size()) {
++        path.resize(len);
++        break;
++      }
++      path.resize(path.size() * 2);
++    }
++    std::error_code ec;
++    std::filesystem::current_path(std::filesystem::path {path}.parent_path(), ec);
++#endif
++  }
++}  // namespace splitplay
+diff --git a/src/splitplay/options.h b/src/splitplay/options.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..6c351aff55d4090edea86afcddc1cbc98585f36e
+--- /dev/null
++++ b/src/splitplay/options.h
+@@ -0,0 +1,76 @@
++/**
++ * @file src/splitplay/options.h
++ * @brief Command-line options of the SplitPlay worker (splitplay-worker.exe).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++#pragma once
++
++// standard includes
++#include <filesystem>
++#include <ostream>
++#include <string>
++
++namespace splitplay {
++  /**
++   * @brief Options that SplitPlay.Service passes to the worker in addition to the upstream Sunshine options.
++   */
++  struct options_t {
++    std::filesystem::path desk_dir;  ///< Per-desk directory for config, state, credentials and logs. Empty: upstream default.
++    bool version = false;  ///< `--version` was given.
++    bool help = false;  ///< `--help` was given.
++    std::string error;  ///< Non-empty when the command line is invalid.
++  };
++
++  /**
++   * @brief Record the process arguments on platforms without a native wide command line.
++   * On Windows the options are read from `GetCommandLineW()`, so this call is optional there.
++   *
++   * @param argc Argument count from `main`.
++   * @param argv Argument vector from `main`.
++   */
++  void capture_command_line(int argc, char **argv);
++
++  /**
++   * @brief Options parsed from the process command line.
++   * Safe to call during static initialisation (the upstream config defaults call `platf::appdata()` before `main`).
++   *
++   * @return Parsed options, computed once.
++   */
++  const options_t &options();
++
++  /**
++   * @brief Remove the SplitPlay options from `argv` so that the upstream parser never sees them.
++   *
++   * @param argc Argument count.
++   * @param argv Argument vector, compacted in place.
++   * @return The new argument count.
++   */
++  int strip_args(int argc, char **argv);
++
++  /**
++   * @brief Product version string, e.g. `splitplay-worker 0.1.0 (SplitPlay desk worker, Sunshine cf52f4b6)`.
++   *
++   * @return Version string.
++   */
++  std::string version_string();
++
++  /**
++   * @brief Bare SplitPlay version, e.g. `0.1.0`.
++   *
++   * @return Version.
++   */
++  std::string version();
++
++  /**
++   * @brief Print the SplitPlay part of `--help`; the upstream usage follows it.
++   *
++   * @param out Output stream.
++   */
++  void print_help_header(std::ostream &out);
++
++  /**
++   * @brief Make the executable's directory the working directory so that the relative assets path resolves
++   * no matter where the service starts the worker from.
++   */
++  void use_executable_directory_as_cwd();
++}  // namespace splitplay

@@ -1,0 +1,128 @@
+# SplitPlay worker (GPL-3.0): pinned upstream Sunshine + worker/patches, built with Sunshine's own
+# Windows toolchain (MSYS2 UCRT64, CMake + Ninja). See worker/README.md.
+name: worker
+
+on:
+  push:
+    branches:
+      - 'stage2/**'
+      - main
+    paths:
+      - 'worker/**'
+      - 'native/include/splitplay/**'
+      - '.github/workflows/worker.yml'
+  pull_request:
+    paths:
+      - 'worker/**'
+      - 'native/include/splitplay/**'
+      - '.github/workflows/worker.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-worker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: worker-win-x64
+    runs-on: windows-2022
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: msys2 {0}
+    env:
+      CCACHE_DIR: ${{ github.workspace }}\.ccache
+      CCACHE_MAXSIZE: 3G
+      CCACHE_COMPILERCHECK: content
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Setup Node.js (Sunshine web UI)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 'lts/*'
+
+      - name: Node.js path
+        shell: pwsh
+        run: |
+          $nodeDir = Split-Path -Parent (Get-Command node).Source
+          "NODEJS_PATH=$nodeDir" >> $env:GITHUB_ENV
+
+      # Package list of Sunshine's ci-windows.yml at the pinned commit, minus qt6-static (tray), graphviz (docs)
+      # and nsis (installer), which the worker build turns off, plus ccache and ninja. boost is left out too:
+      # the pinned tree wants exactly Boost 1.89 and builds it from source (FetchContent) when the MSYS2 package
+      # has another version, so the package would only put a second, unused set of Boost headers on the system path.
+      - name: Setup MSYS2 UCRT64
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
+        with:
+          msystem: UCRT64
+          update: true
+          cache: true
+          install: >-
+            git
+            mingw-w64-ucrt-x86_64-ccache
+            mingw-w64-ucrt-x86_64-cmake
+            mingw-w64-ucrt-x86_64-cppwinrt
+            mingw-w64-ucrt-x86_64-curl-winssl
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-miniupnpc
+            mingw-w64-ucrt-x86_64-MinHook
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-onevpl
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-opus
+            mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Toolchain versions
+        run: |
+          gcc --version | head -n 1
+          cmake --version | head -n 1
+          ninja --version
+          ccache --version | head -n 1
+          git --version
+
+      - name: Fetch upstream and apply patches
+        run: worker/scripts/fetch.sh
+
+      - name: Licence check (worker/ with the patch queue and the patched tree)
+        run: worker/scripts/check-licenses.sh worker
+
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: ccache-worker-${{ hashFiles('worker/upstream.lock') }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-worker-${{ hashFiles('worker/upstream.lock') }}-
+            ccache-worker-
+
+      - name: Build
+        id: build
+        run: worker/scripts/build.sh
+
+      - name: Save ccache
+        if: always() && steps.build.outcome != 'skipped'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ github.workspace }}\.ccache
+          key: ccache-worker-${{ hashFiles('worker/upstream.lock') }}-${{ github.run_id }}
+
+      - name: Licence check (tree, npm packages and downloaded dependencies)
+        run: worker/scripts/check-licenses.sh worker/build/src worker/build/cmake/_deps
+
+      - name: Smoke test
+        shell: pwsh
+        run: ./worker/scripts/smoke-test.ps1 -Exe worker/out/splitplay-worker.exe -WorkDir "$env:RUNNER_TEMP\splitplay-worker-smoke"
+
+      - name: Upload worker-win-x64
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: worker-win-x64
+          path: worker/out/
+          if-no-files-found: error

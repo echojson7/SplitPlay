@@ -1,0 +1,67 @@
+# SPDX-License-Identifier: MIT
+# Builds the SplitPlay UMDF2 driver packages (SplitPlayIdd, SplitPlayPad) with MSBuild and the WDK/SDK from
+# NuGet (drivers/packages.config), runs host-side smoke tests and InfVerif, creates catalogs, test-signs them
+# with a throwaway self-signed certificate and uploads the packages. Nothing is installed on the runner.
+name: drivers
+
+on:
+  push:
+    branches: ['stage2/**', 'main']
+    paths:
+      - 'drivers/**'
+      - '.github/workflows/drivers.yml'
+  pull_request:
+    paths:
+      - 'drivers/**'
+      - '.github/workflows/drivers.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-drivers-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: drivers (Release|x64)
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      # The three NuGet packages are ~2 GB unpacked; cache them keyed on the pinned versions.
+      - name: Cache WDK/SDK NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: drivers/packages
+          key: wdk-nuget-${{ runner.os }}-${{ hashFiles('drivers/packages.config') }}
+
+      - name: Build, verify and package
+        run: >
+          ./drivers/scripts/Build-Drivers.ps1
+          -Configuration Release -Platform x64
+          -DriverVersion 0.1.0.${{ github.run_number }}
+          -TestSign
+
+      - name: Upload driver packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: drivers-win-x64
+          path: drivers/out/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload MSBuild binlog
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: drivers-binlog
+          path: drivers/build/logs/
+          if-no-files-found: ignore
+          retention-days: 7

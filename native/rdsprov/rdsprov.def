@@ -1,0 +1,7 @@
+; SPDX-License-Identifier: MIT
+LIBRARY splitplay-rdsprov
+EXPORTS
+  DllGetClassObject   PRIVATE
+  DllCanUnloadNow     PRIVATE
+  DllRegisterServer   PRIVATE
+  DllUnregisterServer PRIVATE

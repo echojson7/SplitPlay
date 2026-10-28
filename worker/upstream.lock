@@ -1,0 +1,6 @@
+# Pinned upstream Sunshine for the SplitPlay worker.
+# This is the last upstream commit before libvirtualhid (LizardByte Source-Available License) was added in 687e12d0.
+# Do not move the pin past 687e12d0 without removing every SAL-licensed file from the build.
+repo=https://github.com/LizardByte/Sunshine.git
+commit=cf52f4b6f33cc9d143f0f6bb67c9891fe3563e54
+date=2026-08-11

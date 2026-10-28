@@ -1,0 +1,144 @@
+# SPDX-License-Identifier: MIT
+# Web UI (lint, type-check, test, build) and installer preview (compile against a fake stage, silent
+# install/upgrade/uninstall smoke test). The end-to-end installer built from the real component
+# artifacts lives in the integration workflow.
+name: web-installer
+
+on:
+  push:
+    branches: ['stage2/**', main]
+    paths:
+      - 'web/**'
+      - 'installer/**'
+      - 'LICENSE'
+      - 'NOTICE.md'
+      - '.github/workflows/web-installer.yml'
+  pull_request:
+    paths:
+      - 'web/**'
+      - 'installer/**'
+      - 'LICENSE'
+      - 'NOTICE.md'
+      - '.github/workflows/web-installer.yml'
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-web-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: Web UI
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type-check
+        run: npm run type-check
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 14
+
+  installer:
+    name: Installer preview
+    needs: web
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: web-dist
+          path: build/web-dist
+
+      - name: Locate Inno Setup
+        run: |
+          function Find-Iscc {
+            foreach ($root in ${env:ProgramFiles(x86)}, $env:ProgramFiles) {
+              foreach ($v in '6', '7') {
+                $p = Join-Path $root "Inno Setup $v\ISCC.exe"
+                if (Test-Path $p) { return $p }
+              }
+            }
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            Write-Host 'Inno Setup is not preinstalled; installing it with Chocolatey'
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed ($LASTEXITCODE)" }
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw 'ISCC.exe not found' }
+          Write-Host "ISCC: $iscc ($((Get-Item $iscc).VersionInfo.ProductVersion))"
+          "ISCC=$iscc" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Create fake stage
+        run: ./installer/ci/New-FakeStage.ps1 -Stage build/stage -WebDist build/web-dist
+
+      - name: Check that an incomplete stage is refused
+        run: |
+          New-Item -ItemType Directory -Force build/empty-stage | Out-Null
+          & $env:ISCC /Qp "/DStageDir=$PWD\build\empty-stage" "/DOutputDir=$PWD\build\empty-out" installer\splitplay.iss
+          if ($LASTEXITCODE -eq 0) { throw 'ISCC accepted an empty stage folder' }
+          Write-Host "ISCC refused the empty stage as expected (exit code $LASTEXITCODE)"
+          $global:LASTEXITCODE = 0
+
+      - name: Compile installer
+        run: |
+          & $env:ISCC "/DStageDir=$PWD\build\stage" "/DAppVersion=0.1.0-ci.${{ github.run_number }}" "/DOutputDir=$PWD\build\installer" installer\splitplay.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+          Get-ChildItem build/installer
+
+      - name: Smoke test (silent install, upgrade, uninstall)
+        run: |
+          $setup = Get-ChildItem build/installer/SplitPlay-Setup-*.exe | Select-Object -First 1
+          ./installer/ci/Test-Installer.ps1 -Setup $setup.FullName -LogDir build/logs
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: installer-preview
+          path: build/installer/SplitPlay-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: installer-logs
+          path: build/logs
+          if-no-files-found: ignore
+          retention-days: 7

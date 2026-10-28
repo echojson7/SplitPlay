@@ -1,0 +1,80 @@
+; SPDX-License-Identifier: MIT
+;
+; SplitPlayPad.inf - SplitPlay virtual gamepad parent device (UMDF2 upper filter over the in-box VHF).
+;
+; The service creates one root-enumerated device ROOT\SplitPlayPad. The in-box Virtual HID Framework
+; (hidvhf.inf, vhfservice) is its function driver; WUDFRd and SplitPlayPad.dll sit above it as an upper filter
+; and create one VHF HID child per virtual pad on request of a desk worker.
+; Section layout follows libvirtualgamepad (MIT). Processed by StampInf: $ARCH$, DriverVer, $UMDFVERSION$.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider    = %ManufacturerName%
+CatalogFile = SplitPlayPad.cat
+DriverVer   = 01/01/2026,0.1.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+%ManufacturerName% = SplitPlay, NT$ARCH$.10.0...26100
+
+[SplitPlay.NT$ARCH$.10.0...26100]
+%DeviceName% = SplitPlayPad_Install, ROOT\SplitPlayPad
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+SplitPlayPad.dll = 1
+
+[DestinationDirs]
+; 13 = run from the driver store (driver package isolation).
+SplitPlayPad_CopyFiles = 13
+
+; ================================== Device ========================================
+
+[SplitPlayPad_Install.NT]
+Include   = WUDFRD.inf, hidvhf.inf
+Needs     = WUDFRD_UpperFilter.NT, vhfservice.NT
+CopyFiles = SplitPlayPad_CopyFiles
+
+[SplitPlayPad_Install.NT.HW]
+Include = WUDFRD.inf, hidvhf.inf
+Needs   = WUDFRD_UpperFilter.NT.HW, vhfservice.NT.HW
+AddReg  = SplitPlayPad_HW_AddReg
+
+[SplitPlayPad_HW_AddReg]
+; Only SYSTEM (desk workers run with a SYSTEM token) and Administrators may create pads, so that a user in one
+; desk cannot inject controllers. UD = UMDF host, required for the driver's own local VHF target.
+HKR,,"Security",,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;UD)"
+
+[SplitPlayPad_Install.NT.Services]
+Include = WUDFRD.inf, hidvhf.inf
+Needs   = WUDFRD_UpperFilter.NT.Services, vhfservice.NT.Services
+
+[SplitPlayPad_Install.NT.Filters]
+Include = WUDFRD.inf
+Needs   = WUDFRD_UpperFilter.NT.Filters
+
+[SplitPlayPad_Install.NT.Wdf]
+UmdfService                = SplitPlayPad, SplitPlayPad_UmdfService
+UmdfServiceOrder           = SplitPlayPad
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+; The local VHF target is opened without a file name.
+UmdfFileObjectPolicy       = AllowNullAndUnknownFileObjects
+UmdfFsContextUsePolicy     = CannotUseFsContexts
+
+[SplitPlayPad_UmdfService]
+UmdfLibraryVersion = $UMDFVERSION$
+ServiceBinary      = %13%\SplitPlayPad.dll
+
+[SplitPlayPad_CopyFiles]
+SplitPlayPad.dll
+
+; ===================================== Strings ====================================
+
+[Strings]
+ManufacturerName = "SplitPlay"
+DiskName         = "SplitPlay Virtual Gamepad Driver Disk"
+DeviceName       = "SplitPlay Virtual Gamepad Bus"

@@ -1,0 +1,22 @@
+<!-- SPDX-License-Identifier: MIT -->
+<Project>
+  <PropertyGroup>
+    <Version>0.1.0</Version>
+    <Company>SplitPlay</Company>
+    <Product>SplitPlay</Product>
+    <Copyright>Copyright (c) SplitPlay contributors</Copyright>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <MSBuildTreatWarningsAsErrors>true</MSBuildTreatWarningsAsErrors>
+    <!-- Windows-targeted projects must build on Linux too (developer machines, analysis). -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <Deterministic>true</Deterministic>
+    <!-- PDBs inside the assemblies: one file less per assembly for the installer, stack traces keep line numbers. -->
+    <DebugType>embedded</DebugType>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+</Project>

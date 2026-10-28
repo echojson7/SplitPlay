@@ -1,0 +1,71 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:02:00 +0000
+Subject: [PATCH] splitplay: serve the worker's own session, not the console
+
+Upstream Sunshine assumes it serves the active console session:
+retrieve_users_token() asks WTSGetActiveConsoleSessionId() for the session
+whose user token launches apps and prep commands. A SplitPlay worker runs
+as SYSTEM with TokenSessionId set to its desk's RDP loopback session, so
+the console is the wrong session (and usually another user).
+
+Add platf::target_session_id(), which returns the session of the worker
+process itself (ProcessIdToSessionId), and use it in
+retrieve_users_token(). This was the only WTSGetActiveConsoleSessionId()
+call in src/ at the pinned commit; tools/sunshinesvc.cpp also uses it but
+is not part of the worker.
+
+Input (SendInput/OpenInputDesktop), DXGI capture and WASAPI already act
+on the calling process's session.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/src/platform/windows/misc.cpp b/src/platform/windows/misc.cpp
+index eb0cda7c8966eac40fe282e115e8125855cc37d6..aae501198ac6e997081e0d47413c2c7ad9deb84a 100644
+--- a/src/platform/windows/misc.cpp
++++ b/src/platform/windows/misc.cpp
+@@ -291,6 +291,23 @@ namespace platf {
+     return ret;
+   }
+ 
++  /**
++   * @brief Session whose user the worker serves.
++   *
++   * SplitPlay: upstream Sunshine serves the active console session. The SplitPlay worker is started by the
++   * service with TokenSessionId set to its desk's (RDP loopback) session, so it serves its own session instead.
++   *
++   * @return Session id of the current process, or 0xFFFFFFFF on failure.
++   */
++  DWORD target_session_id() {
++    DWORD session_id = 0xFFFFFFFF;
++    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session_id)) {
++      BOOST_LOG(error) << "ProcessIdToSessionId failed: "sv << GetLastError();
++      return 0xFFFFFFFF;
++    }
++    return session_id;
++  }
++
+   /**
+    * @brief Obtain the current sessions user's primary token with elevated privileges.
+    * @return The user's token. If user has admin capability it will be elevated, otherwise it will be a limited token. On error, `nullptr`.
+@@ -303,15 +320,15 @@ namespace platf {
+     TOKEN_ELEVATION_TYPE elevationType;
+     DWORD dwSize;
+ 
+-    // Get the session ID of the active console session
+-    consoleSessionId = WTSGetActiveConsoleSessionId();
++    // SplitPlay: use the worker's own session, not the active console session
++    consoleSessionId = target_session_id();
+     if (0xFFFFFFFF == consoleSessionId) {
+-      // If there is no active console session, log a warning and return null
++      // If there is no session, log a warning and return null
+       BOOST_LOG(warning) << "There isn't an active user session, therefore it is not possible to execute commands under the users profile.";
+       return nullptr;
+     }
+ 
+-    // Get the user token for the active console session
++    // Get the user token for the worker's session
+     if (!WTSQueryUserToken(consoleSessionId, &userToken)) {
+       BOOST_LOG(debug) << "QueryUserToken failed, this would prevent commands from launching under the users profile.";
+       return nullptr;

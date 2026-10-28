@@ -215,6 +215,48 @@ TEST_CASE("handshake fails on protocol mismatch, close and timeout") {
   }
 }
 
+TEST_CASE("on_welcome sees the whole welcome before the profile, set_mode goes to on_request") {
+  std::string password;
+  std::atomic<int> order{0};
+  int welcome_at = 0, profile_at = 0;
+  Client::Handlers h;
+  h.on_welcome = [&](json& w) {
+    welcome_at = ++order;
+    if (json* rdp = w.contains("rdp") ? &w["rdp"] : nullptr; rdp && (*rdp)["password"].is_string()) {
+      password = (*rdp)["password"].get<std::string>();
+      secure_wipe((*rdp)["password"].get_ref<std::string&>());
+    }
+  };
+  h.on_profile = [&](const json&, bool) {
+    profile_at = ++order;
+    return Result::success();
+  };
+  h.on_request = [](const Message& m) -> std::optional<Result> {
+    if (m.type != "set_mode") return std::nullopt;
+    return Result::success(json{{"width", m.body.value("width", 0)}});
+  };
+  Fixture f(std::move(h));
+  std::optional<json> result;
+  std::thread t([&] { result = f.client->handshake(Hello{"seat", "desk-1", 77, "0.1.0", 2}); });
+  auto hello = f.service->next(2000ms);
+  REQUIRE(hello.has_value());
+  json welcome = make_welcome({{"fps", 60}});
+  welcome["rdp"] = {{"user", "u"}, {"password", "s3cret"}};
+  f.service->send(welcome);
+  t.join();
+  REQUIRE(result.has_value());
+  CHECK(password == "s3cret");
+  CHECK(welcome_at == 1);
+  CHECK(profile_at == 2);
+
+  f.service->send(make_request("set_mode", 21, {{"width", 1280}, {"height", 720}}));
+  auto r = f.service->result(21, 1000ms);
+  REQUIRE(r.has_value());
+  CHECK(r->body.value("ok", false));
+  CHECK(r->body["data"]["width"] == 1280);
+  f.client->stop();
+}
+
 TEST_CASE("malformed lines are ignored") {
   Fixture f;
   REQUIRE(f.handshake().has_value());

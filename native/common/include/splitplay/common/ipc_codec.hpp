@@ -54,6 +54,17 @@ class LineFramer {
 // The service -> child message types defined by protocol version 1.
 bool is_known_service_message(std::string_view type) noexcept;
 
+// Overwrites the bytes of a buffer or string that held a secret (the RDP password in `welcome`) before it is freed
+// or reused. The volatile writes are not optimised away.
+inline void secure_wipe(char* data, size_t size) noexcept {
+  volatile char* p = data;
+  for (size_t i = 0; i < size; ++i) p[i] = 0;
+}
+inline void secure_wipe(std::string& s) noexcept {
+  secure_wipe(s.data(), s.size());
+  s.clear();
+}
+
 // ---- builders (child -> service) ----------------------------------------------------------------
 struct Hello {
   std::string role;     // "worker", "seat" or "stubworker"

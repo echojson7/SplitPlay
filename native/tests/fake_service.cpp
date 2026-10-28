@@ -6,6 +6,12 @@
 // Creates the control pipe, starts the child in a kill-on-close job object, checks hello -> welcome -> ready,
 // heartbeats, error answers and role-specific behaviour, then either requests shutdown (child must answer and exit 0)
 // or breaks the pipe (child must exit on its own with kExitPipeBroken). Exit code 0 means the scenario passed.
+//
+//   sp_fake_service --child <seat exe> --role seat --scenario rdp --rdp-user <local user>   (SP_TEST_RDP_PASSWORD)
+//
+// Real-session test: sends `welcome` with RDP credentials, waits for `ready` with a session id that WTS reports as
+// active for that user, resizes it with set_mode, then sends `shutdown` and checks that the session is logged off.
+// Needs RDP enabled on the machine and the user in Remote Desktop Users (see .github/workflows/native.yml).
 #include <windows.h>
 
 #include <algorithm>
@@ -29,6 +35,7 @@
 #include "splitplay/common/shared_memory.hpp"
 #include "splitplay/common/version.hpp"
 #include "splitplay/common/win_util.hpp"
+#include "wts_session.hpp"
 
 using namespace splitplay;
 using namespace std::chrono_literals;
@@ -191,6 +198,7 @@ int run(const std::string& exe, const std::string& role, const std::string& scen
 
   std::string child_args = std::format("--pipe {} --desk {} --namespace local", pipe_name, desk);
   if (role == "stubworker") child_args += " --adapter warp";
+  if (role == "seat") child_args += " --connector null";  // the IPC scenarios run without an RDP stack
   std::fprintf(stderr, "fake-service: starting %s %s\n", exe.c_str(), child_args.c_str());
   Child child = launch(exe, child_args);
 
@@ -301,17 +309,219 @@ int run(const std::string& exe, const std::string& role, const std::string& scen
   return 0;
 }
 
+// ---- rdp: a real RDP-loopback session ------------------------------------------------------------------------------
+
+struct RdpScenario {
+  std::string user;
+  std::string password;  // from the environment, never from the command line
+  std::string host = "127.0.0.2";
+  int port = 0;          // 0: read RDP-Tcp\PortNumber like the service does
+  int ready_timeout_s = 240;
+  int logoff_timeout_s = 120;
+};
+
+int rdp_port_from_registry() {
+  DWORD port = 0;
+  DWORD size = sizeof(port);
+  if (RegGetValueW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Terminal Server\\WinStations\\RDP-Tcp",
+                   L"PortNumber", RRF_RT_REG_DWORD, nullptr, &port, &size) != ERROR_SUCCESS)
+    return 3389;
+  return static_cast<int>(port);
+}
+
+void dump_sessions() {
+  std::string err;
+  auto sessions = seat::wts::list_sessions(&err);
+  if (!err.empty()) std::fprintf(stderr, "fake-service: %s\n", err.c_str());
+  for (const auto& s : sessions) {
+    std::fprintf(stderr, "fake-service:   session %u %-12s user=%s\\%s client=%s\n", s.id, seat::wts::state_name(s.state),
+                 win::narrow(s.domain).c_str(), win::narrow(s.user).c_str(), win::narrow(s.client_name).c_str());
+  }
+}
+
+bool same_user(const std::wstring& a, const std::string& b) {
+  const std::wstring w = win::widen(b);
+  return a.size() == w.size() &&
+         CompareStringOrdinal(a.data(), static_cast<int>(a.size()), w.data(), static_cast<int>(w.size()), TRUE) ==
+             CSTR_EQUAL;
+}
+
+int run_rdp(const std::string& exe, const RdpScenario& sc) {
+  const std::string desk = std::format("rdp-{}", GetCurrentProcessId());
+  const std::string pipe_name = control_pipe_name("seat", desk);
+  std::string err;
+  auto server = ipc::PipeServer::create(pipe_name, &err);
+  expect(server != nullptr, err);
+
+  const std::string child_args =
+      std::format("--pipe {} --desk {} --namespace local --connector freerdp --log-level debug", pipe_name, desk);
+  std::fprintf(stderr, "fake-service: starting %s %s\n", exe.c_str(), child_args.c_str());
+  std::fprintf(stderr, "fake-service: sessions before the test:\n");
+  dump_sessions();
+  Child child = launch(exe, child_args);
+  uint32_t sid = 0;
+
+  try {
+    auto transport = server->accept(15s, &err);
+    expect(transport != nullptr, "child did not connect: " + err);
+    Inbox inbox(transport.get());
+
+    auto hello = inbox.next_of("hello", 10s);
+    expect(hello.has_value(), "no hello");
+    expect(ipc::get_string(hello->body, "role") == std::string("seat"), "hello.role mismatch");
+
+    const int port = sc.port > 0 ? sc.port : rdp_port_from_registry();
+    json welcome = ipc::make_welcome({{"fps", 60}, {"width", 1280}, {"height", 720}});
+    welcome["rdp"] = {{"host", sc.host},     {"port", port},       {"user", sc.user}, {"domain", "."},
+                      {"password", sc.password}, {"width", 1280}, {"height", 720}};
+    std::fprintf(stderr, "fake-service: welcome with rdp %s:%d user .\\%s (password not shown)\n", sc.host.c_str(),
+                 port, sc.user.c_str());
+    expect(send(*transport, welcome), "cannot send welcome");
+
+    // ready arrives only once the session is logged on and active.
+    auto ready = inbox.next_of("ready", std::chrono::seconds(sc.ready_timeout_s));
+    if (!ready) {
+      dump_sessions();
+      if (auto code = wait_exit(child, 5s))
+        fail(std::format("the seat exited with code {} before ready (4 = RDP connection given up)", *code));
+      fail(std::format("no ready within {} s (or the pipe closed)", sc.ready_timeout_s));
+    }
+    std::fprintf(stderr, "fake-service: ready %s\n", ready->body.dump().c_str());
+    expect(ipc::get_string(ready->body, "connector") == std::string("freerdp"), "ready.connector is not freerdp");
+    const auto session = ipc::get_int(ready->body, "session");
+    expect(session.has_value() && *session > 0, "ready without a session id");
+    sid = static_cast<uint32_t>(*session);
+
+    auto info = seat::wts::query_session(sid);
+    dump_sessions();
+    expect(info.has_value(), std::format("WTS does not know session {}", sid));
+    expect(info->active(), std::format("session {} is {}, not active", sid, seat::wts::state_name(info->state)));
+    expect(same_user(info->user, sc.user),
+           std::format("session {} belongs to '{}', not '{}'", sid, win::narrow(info->user), sc.user));
+    std::fprintf(stderr, "fake-service: session %u is active for %s (client %s)\n", sid, sc.user.c_str(),
+                 win::narrow(info->client_name).c_str());
+
+    // Heartbeats report the session.
+    inbox.drop("heartbeat");
+    auto hb = inbox.next_of("heartbeat", 3s);
+    expect(hb.has_value(), "no heartbeat after ready");
+    const json* metrics = ipc::get_object(hb->body, "metrics");
+    expect(metrics && ipc::get_int(*metrics, "session") == static_cast<int64_t>(sid), "heartbeat without the session");
+    expect(ipc::get_string(hb->body, "state") == std::string("logged_on"), "heartbeat state is not logged_on");
+
+    // Display control: resize the session.
+    send(*transport, ipc::make_request("set_mode", 10, {{"width", 1600}, {"height", 900}}));
+    auto r = inbox.result(10, 10s);
+    expect(r.has_value(), "no answer to set_mode");
+    std::fprintf(stderr, "fake-service: set_mode -> %s\n", r->body.dump().c_str());
+    expect(r->body.value("ok", false), "set_mode failed: " + r->body.dump());
+    send(*transport, ipc::make_request("set_mode", 11, {{"width", 0}}));
+    check_error_result(inbox.result(11, 5s), ipc::kErrBadRequest, "set_mode without a size");
+    send(*transport, ipc::make_request("send_sas", 12));
+    check_error_result(inbox.result(12, 5s), ipc::kErrUnsupported, "send_sas");
+
+    // Give the session a moment, then make sure no session_lost was reported.
+    std::this_thread::sleep_for(3s);
+    auto lost = inbox.next_where(
+        [](const ipc::Message& m) { return m.type == "event" && ipc::get_string(m.body, "name") == std::string("session_lost"); },
+        0ms);
+    expect(!lost.has_value(), "unexpected session_lost: " + (lost ? lost->body.dump() : std::string()));
+
+    // Connection loss: the server drops the RDP connection (WTSDisconnectSession). The seat must report
+    // session_lost, reconnect on its own and report session_restored with the same session.
+    expect(seat::wts::disconnect(sid, &err), err);
+    std::fprintf(stderr, "fake-service: disconnected session %u from the server side\n", sid);
+    auto is_event = [](const char* name) {
+      return [name](const ipc::Message& m) {
+        return m.type == "event" && ipc::get_string(m.body, "name") == std::string(name);
+      };
+    };
+    lost = inbox.next_where(is_event("session_lost"), 30s);
+    expect(lost.has_value(), "no session_lost within 30 s of WTSDisconnectSession");
+    std::fprintf(stderr, "fake-service: %s\n", lost->body.dump().c_str());
+    auto restored = inbox.next_where(is_event("session_restored"), 120s);
+    if (!restored) dump_sessions();
+    expect(restored.has_value(), "no session_restored within 120 s");
+    std::fprintf(stderr, "fake-service: %s\n", restored->body.dump().c_str());
+    const json* rdata = ipc::get_object(restored->body, "data");
+    expect(rdata && ipc::get_int(*rdata, "session") == static_cast<int64_t>(sid),
+           "session_restored does not carry the same session: " + restored->body.dump());
+    // The restored connection must hold: no further session_lost, session still active.
+    std::this_thread::sleep_for(10s);
+    lost = inbox.next_where(is_event("session_lost"), 0ms);
+    expect(!lost.has_value(), "session_lost after session_restored: " + (lost ? lost->body.dump() : std::string()));
+    info = seat::wts::query_session(sid);
+    expect(info && info->active(), std::format("session {} is not active after the reconnect", sid));
+
+    // shutdown: the seat logs the session off and exits.
+    send(*transport, ipc::make_request("shutdown", 100));
+    auto sr = inbox.result(100, 5s);
+    expect(sr && sr->body.value("ok", false), "shutdown not acknowledged");
+    auto code = wait_exit(child, 10s);
+    expect(code.has_value(), "the seat did not exit within 10 s of shutdown");
+    expect(*code == static_cast<DWORD>(kExitOk), std::format("seat exit code {} after shutdown", *code));
+    expect(!inbox.malformed(), "the seat sent malformed lines");
+  } catch (...) {
+    TerminateJobObject(child.job.get(), 1);
+    throw;
+  }
+
+  // The session must go away (logged off), not linger as disconnected.
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(sc.logoff_timeout_s);
+  for (;;) {
+    auto info = seat::wts::query_session(sid);
+    const bool gone = !info || info->user.empty() || !same_user(info->user, sc.user);
+    if (gone) break;
+    if (std::chrono::steady_clock::now() > deadline) {
+      dump_sessions();
+      fail(std::format("session {} still exists ({}) {} s after shutdown", sid, seat::wts::state_name(info->state),
+                       sc.logoff_timeout_s));
+    }
+    std::this_thread::sleep_for(1s);
+  }
+  std::fprintf(stderr, "fake-service: session %u logged off\n", sid);
+  dump_sessions();
+  std::fprintf(stderr, "fake-service: seat/rdp PASSED\n");
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   std::string err;
   auto args = Args::parse(argc, argv, {}, &err);
   if (!args || !args->get("child") || !args->get("role") || !args->get("scenario")) {
-    std::fprintf(stderr, "usage: sp_fake_service --child <exe> --role seat|stubworker --scenario shutdown|break\n");
+    std::fprintf(stderr,
+                 "usage: sp_fake_service --child <exe> --role seat|stubworker --scenario shutdown|break\n"
+                 "       sp_fake_service --child <seat exe> --role seat --scenario rdp --rdp-user <name>\n"
+                 "                       [--rdp-host 127.0.0.2] [--rdp-port N] [--ready-timeout-s N]\n"
+                 "       (rdp: the password is read from the SP_TEST_RDP_PASSWORD environment variable)\n");
     return 2;
   }
   const std::string role = *args->get("role");
   const std::string scenario = *args->get("scenario");
+  if (role == "seat" && scenario == "rdp") {
+    RdpScenario sc;
+    sc.user = args->get_or("rdp-user", "");
+    sc.host = args->get_or("rdp-host", sc.host);
+    bool ok = true;
+    if (auto p = args->get_int("rdp-port", &ok)) sc.port = static_cast<int>(*p);
+    if (auto t = args->get_int("ready-timeout-s", &ok)) sc.ready_timeout_s = static_cast<int>(*t);
+    wchar_t pw[512];
+    const DWORD len = GetEnvironmentVariableW(L"SP_TEST_RDP_PASSWORD", pw, static_cast<DWORD>(std::size(pw)));
+    if (len > 0 && len < std::size(pw)) sc.password = win::narrow(std::wstring_view(pw, len));
+    SecureZeroMemory(pw, sizeof(pw));
+    if (!ok || sc.user.empty() || sc.password.empty()) {
+      std::fprintf(stderr, "sp_fake_service: rdp needs --rdp-user and SP_TEST_RDP_PASSWORD\n");
+      return 2;
+    }
+    try {
+      return run_rdp(*args->get("child"), sc);
+    } catch (const Failure& f) {
+      std::fprintf(stderr, "fake-service: seat/rdp FAILED: %s\n", f.what.c_str());
+      return 1;
+    }
+  }
   if ((role != "seat" && role != "stubworker") || (scenario != "shutdown" && scenario != "break")) {
     std::fprintf(stderr, "sp_fake_service: bad --role or --scenario\n");
     return 2;

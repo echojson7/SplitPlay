@@ -22,9 +22,10 @@ if(WIN32)
   splitplay_add_test(test_win_objects test_win_objects.cpp)
 
   # Plays the service: creates the control pipe, launches a child and drives the protocol.
-  add_executable(sp_fake_service fake_service.cpp)
+  # The `rdp` scenario (real session, run by native.yml, not by CTest) uses the seat's WTS helpers.
+  add_executable(sp_fake_service fake_service.cpp "${PROJECT_SOURCE_DIR}/seat/src/wts_session.cpp")
   target_link_libraries(sp_fake_service PRIVATE splitplay::common)
-  target_include_directories(sp_fake_service PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+  target_include_directories(sp_fake_service PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}" "${PROJECT_SOURCE_DIR}/seat/src")
 
   add_test(NAME seat_ipc_shutdown
     COMMAND sp_fake_service --child $<TARGET_FILE:splitplay-seat> --role seat --scenario shutdown)

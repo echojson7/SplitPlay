@@ -19,7 +19,8 @@ enum ExitCode : int {
   kExitFailure = 1,         // generic runtime failure, self-test failed
   kExitUsage = 2,           // bad command line
   kExitConnectFailed = 3,   // could not connect to the pipe or the handshake failed
-  kExitPipeBroken = 4,      // the service went away (the child never runs unsupervised)
+  kExitPipeBroken = 3,      // the service went away (the child never runs unsupervised); ipc.md "pipe lost" = 3
+  kExitRdpGaveUp = 4,       // seat only: the RDP connection was lost (or never came up) and reconnecting gave up
 };
 
 }  // namespace splitplay

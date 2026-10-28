@@ -2,6 +2,7 @@
 #include "splitplay/common/ipc_client.hpp"
 
 #include <array>
+#include <vector>
 
 #include "splitplay/common/log.hpp"
 #include "splitplay/common/version.hpp"
@@ -90,9 +91,13 @@ void Client::reader_loop() {
       return;
     }
     const size_t oversized_before = framer.oversized_lines();
-    for (const std::string& line : framer.push(std::string_view(buffer.data(), static_cast<size_t>(n)))) {
+    std::vector<std::string> lines = framer.push(std::string_view(buffer.data(), static_cast<size_t>(n)));
+    // Control messages are small and rare: wipe every raw copy, because `welcome` carries the RDP password.
+    secure_wipe(buffer.data(), static_cast<size_t>(n));
+    for (std::string& line : lines) {
       std::string err;
       auto msg = parse_line(line, &err);
+      secure_wipe(line);
       if (!msg) {
         log_warn("ipc: ignoring malformed message: {}", err);
         continue;
@@ -103,7 +108,7 @@ void Client::reader_loop() {
   }
 }
 
-void Client::dispatch(const Message& msg) {
+void Client::dispatch(Message& msg) {
   const std::string& type = msg.type;
 
   if (type == "welcome") {
@@ -116,6 +121,7 @@ void Client::dispatch(const Message& msg) {
       cv_.notify_all();
       return;
     }
+    if (handlers_.on_welcome) handlers_.on_welcome(msg.body);
     const json* profile = get_object(msg.body, "profile");
     json p = profile ? *profile : json::object();
     if (handlers_.on_profile) {

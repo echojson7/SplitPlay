@@ -1,0 +1,82 @@
+; SPDX-License-Identifier: MIT
+;
+; SplitPlayIdd.inf - SplitPlay remote-session indirect display driver (UMDF2 + IddCx 1.4+).
+;
+; The OS remote-desktop stack creates one remote display adapter devnode per session with the hardware id
+; that the SplitPlay protocol provider returns from IWRdsWddmIddProps::GetHardwareId (SplitPlay_RemoteIdd).
+; This INF is processed by StampInf at build time: $ARCH$, DriverVer and $UMDFVERSION$ are filled in.
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = Display
+ClassGuid   = {4D36E968-E325-11CE-BFC1-08002BE10318}
+ClassVer    = 2.0
+Provider    = %ManufacturerName%
+CatalogFile = SplitPlayIdd.cat
+DriverVer   = 01/01/2026,0.1.0.0
+PnpLockdown = 1
+
+[Manufacturer]
+; Windows 11 24H2 (26100) or later: remote IddCx drivers are only supported on recent builds, see ARCHITECTURE.md.
+%ManufacturerName% = SplitPlay, NT$ARCH$.10.0...26100
+
+[SplitPlay.NT$ARCH$.10.0...26100]
+%DeviceName% = SplitPlayIdd_Install, SplitPlay_RemoteIdd
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+SplitPlayIdd.dll = 1
+
+[DestinationDirs]
+; 13 = run from the driver store (driver package isolation).
+SplitPlayIdd_CopyFiles = 13
+
+; ================================== UMDF device ===================================
+
+[SplitPlayIdd_Install.NT]
+Include   = WUDFRD.inf
+Needs     = WUDFRD.NT
+CopyFiles = SplitPlayIdd_CopyFiles
+
+[SplitPlayIdd_Install.NT.HW]
+Include = WUDFRD.inf
+Needs   = WUDFRD.NT.HW
+AddReg  = SplitPlayIdd_HW_AddReg
+
+[SplitPlayIdd_HW_AddReg]
+; IndirectKmd is the in-box kernel half of IddCx and sits above the reflector.
+HKR,,"UpperFilters",%REG_MULTI_SZ%,"IndirectKmd"
+; Only SYSTEM (the SplitPlay service), Administrators and the UMDF host may open the control interface.
+; NetworkService: TermService, which hosts the SplitPlay protocol provider (splitplay-rdsprov).
+HKR,,"Security",,"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;UD)(A;;GRGW;;;NS)"
+
+[SplitPlayIdd_Install.NT.Services]
+Include = WUDFRD.inf
+Needs   = WUDFRD.NT.Services
+
+[SplitPlayIdd_Install.NT.Wdf]
+UmdfService                = SplitPlayIdd, SplitPlayIdd_UmdfService
+UmdfServiceOrder           = SplitPlayIdd
+UmdfKernelModeClientPolicy = AllowKernelModeClients
+; One WUDFHost per adapter instance, i.e. per desk session: a crash or hang of one desk's display driver
+; cannot take another desk down (docs/research/06-review.md, crash-isolation ceiling).
+UmdfHostProcessSharing     = ProcessSharingDisabled
+
+[SplitPlayIdd_UmdfService]
+UmdfLibraryVersion = $UMDFVERSION$
+ServiceBinary      = %13%\SplitPlayIdd.dll
+; IddCx class extension (the name is fixed for every IddCx 1.x version).
+UmdfExtensions     = IddCx0102
+
+[SplitPlayIdd_CopyFiles]
+SplitPlayIdd.dll
+
+; ===================================== Strings ====================================
+
+[Strings]
+ManufacturerName = "SplitPlay"
+DiskName         = "SplitPlay Indirect Display Driver Disk"
+DeviceName       = "SplitPlay Remote Display Adapter"
+REG_MULTI_SZ     = 0x00010000

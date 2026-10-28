@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: MIT
+# Windows tooling (StampInf/InfVerif/Inf2Cat, Visual Studio) expects CRLF in these files.
+*.inf        text eol=crlf
+*.sln        text eol=crlf
+*.vcxproj    text eol=crlf
+*.props      text eol=crlf
+*.targets    text eol=crlf
+*.ps1        text eol=crlf

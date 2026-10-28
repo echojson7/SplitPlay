@@ -13,6 +13,19 @@ Protocol version: **1**.
 - Every message has `"type"`. Requests that expect an answer carry `"id"` (integer, unique per sender); the answer has `"type":"result"`, the same `"id"`, and either `"ok":true` with optional `"data"` or `"ok":false` with `"error":{"code":"...","message":"..."}`.
 - Unknown message types are answered with error code `unknown_type` (if they carry an id) and otherwise ignored. Unknown fields are ignored.
 
+## Child command lines
+
+```
+splitplay-worker.exe     --desk-dir %ProgramData%\SplitPlay\desks\<id> --pipe \\.\pipe\splitplay\worker-<id> --desk <id> port=<basePort> [name=value ...]
+splitplay-stubworker.exe --pipe \\.\pipe\splitplay\worker-<id> --desk <id>
+splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
+```
+
+- `--desk-dir` holds the worker's per-desk state (`sunshine.conf`, `sunshine_state.json` with pairings and unique id,
+  `credentials\`, `apps.json`, `sunshine.log`); trailing `name=value` pairs are Sunshine settings and override `sunshine.conf`.
+  The worker resolves `assets\` next to its executable. See `worker/README.md`.
+- Exit codes: 0 after `shutdown`, 2 invalid command line, 3 handshake failed or pipe lost; anything else is a crash.
+
 ## Lifecycle
 
 1. Child connects and sends `hello`.

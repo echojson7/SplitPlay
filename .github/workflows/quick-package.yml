@@ -1,0 +1,107 @@
+# SPDX-License-Identifier: MIT
+# Temporary: packs an installer from component artifacts of earlier runs, without rebuilding or testing.
+name: quick-package
+
+on:
+  push:
+    branches: ['quick/**']
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      APP_VERSION: 0.1.0-preview.3
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/download-artifact@v5
+        with:
+          path: build/artifacts
+          pattern: '{drivers,service,worker}-win-x64'
+          run-id: 40759947287
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: web-dist
+          path: build/artifacts/web-dist
+          run-id: 40759947287
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@v5
+        with:
+          name: native-win-x64
+          path: build/artifacts/native-win-x64
+          run-id: 40756890554
+          github-token: ${{ github.token }}
+
+      - name: Stage
+        run: |
+          $a = 'build/artifacts'; $s = 'build/stage'
+          if (Test-Path $s) { Remove-Item -Recurse -Force $s }
+          foreach ($d in 'service', 'tray', 'native', 'worker', 'drivers') { New-Item -ItemType Directory -Force "$s/$d" | Out-Null }
+          Copy-Item -Recurse "$a/service-win-x64/service/*" "$s/service"
+          Copy-Item "$a/service-win-x64/cli/splitplay.exe" "$s/service"
+          Remove-Item -Recurse -Force "$s/service/wwwroot"
+          Copy-Item -Recurse "$a/web-dist" "$s/service/wwwroot"
+          Copy-Item -Recurse "$a/service-win-x64/tray/*" "$s/tray"
+          Copy-Item -Recurse "$a/native-win-x64/*" "$s/native"
+          # TermWrap is built with the native part but installed to its own folder.
+          if (Test-Path "$s/native/termwrap") { Move-Item "$s/native/termwrap" "$s/termwrap" }
+          Copy-Item -Recurse "$a/worker-win-x64/*" "$s/worker"
+          Copy-Item -Recurse "$a/drivers-win-x64/*" "$s/drivers"
+          foreach ($d in Get-ChildItem $s -Directory) {
+            $files = Get-ChildItem $d.FullName -Recurse -File
+            '{0}: {1} files, {2:N1} MB' -f $d.Name, $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB)
+          }
+
+      - name: Locate Inno Setup
+        run: |
+          function Find-Iscc {
+            foreach ($root in ${env:ProgramFiles(x86)}, $env:ProgramFiles) {
+              foreach ($v in '6', '7') {
+                $p = Join-Path $root "Inno Setup $v\ISCC.exe"
+                if (Test-Path $p) { return $p }
+              }
+            }
+          }
+          $iscc = Find-Iscc
+          if (-not $iscc) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "choco install innosetup failed ($LASTEXITCODE)" }
+            $iscc = Find-Iscc
+          }
+          if (-not $iscc) { throw 'ISCC.exe not found' }
+          "ISCC=$iscc" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Compile installer
+        run: |
+          & $env:ISCC "/DStageDir=$PWD\build\stage" "/DAppVersion=$env:APP_VERSION" "/DOutputDir=$PWD\build\installer" installer\splitplay.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed ($LASTEXITCODE)" }
+          Get-ChildItem build/installer | ForEach-Object { '{0} {1:N1} MB' -f $_.Name, ($_.Length / 1MB) }
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: SplitPlay-Setup
+          path: build/installer/SplitPlay-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Smoke test (silent install, upgrade, uninstall)
+        run: ./installer/ci/Test-Installer.ps1 -Setup (Get-Item build/installer/SplitPlay-Setup-*.exe).FullName -LogDir build/logs
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: quick-logs
+          path: build/logs
+          if-no-files-found: ignore
+          retention-days: 7

@@ -272,7 +272,6 @@ bool FreeRdpConnector::create_context(std::string* reason) {
     std::lock_guard lock(context_mutex_);
     context_ = ctx;
   }
-  context_connected_once_ = false;
   if (!apply_settings(reason)) return false;
   if (freerdp_client_start(ctx) != 0) {
     *reason = "freerdp_client_start failed";
@@ -366,9 +365,10 @@ bool FreeRdpConnector::apply_settings(std::string* reason) {
   b(FreeRDP_DynamicResolutionUpdate, true);
   b(FreeRDP_SupportDynamicChannels, true);
 
-  // Reconnection: the server's auto-reconnect cookie is used by freerdp_reconnect; the retry loop is ours.
-  b(FreeRDP_AutoReconnectionEnabled, true);
-  u(FreeRDP_AutoReconnectMaxRetries, 0);
+  // Reconnection is our own retry loop with fresh contexts; FreeRDP's built-in auto-reconnect stays off.
+  b(FreeRDP_AutoReconnectionEnabled, false);
+  // Headless: no client-side decoding (also set in PostConnect; here so every copy of the settings has it).
+  b(FreeRDP_DeactivateClientDecoding, true);
   u(FreeRDP_TcpConnectTimeout, 10000);
 
   if (!ok) *reason = "cannot apply FreeRDP settings";
@@ -378,20 +378,6 @@ bool FreeRdpConnector::apply_settings(std::string* reason) {
 bool FreeRdpConnector::first_connect(std::string* reason) {
   if (!create_context(reason)) return false;
   if (!freerdp_connect(context_->instance)) {
-    *reason = describe_error();
-    return false;
-  }
-  context_connected_once_ = true;
-  return true;
-}
-
-bool FreeRdpConnector::reconnect(std::string* reason) {
-  // The password was wiped from the live settings after the last logon; put it back for NLA.
-  if (!set_str(context_->settings, FreeRDP_Password, params_.password)) {
-    *reason = "cannot set the password";
-    return false;
-  }
-  if (!freerdp_reconnect(context_->instance)) {
     *reason = describe_error();
     return false;
   }
@@ -417,15 +403,10 @@ void FreeRdpConnector::thread_main() {
   bool ever_logged_on = false;
   std::string reason;
   while (!should_stop()) {
-    bool connected;
-    // Reconnect on the same context while it has an established connection behind it (keeps the server's
-    // auto-reconnect cookie); otherwise, and after repeated failures, start over with a fresh context.
-    if (context_ && context_connected_once_ && failures < 3) {
-      connected = reconnect(&reason);
-    } else {
-      free_context();
-      connected = first_connect(&reason);
-    }
+    // Every attempt uses a fresh context: a new NLA logon of the same user reattaches the disconnected session
+    // (fSingleSessionPerUser), and freerdp_reconnect on a used context loses its codecs (gdi_bitmap_update fails).
+    free_context();
+    const bool connected = first_connect(&reason);
     if (should_stop()) break;
 
     if (connected) {
@@ -504,7 +485,7 @@ std::string FreeRdpConnector::run_session(bool* reached_logon) {
         logged_on = true;
         *reached_logon = true;
         session_.store(*sid);
-        // NLA and the logon are done: FreeRDP no longer needs its copy until a reconnect.
+        // NLA and the logon are done: this context no longer needs its copy (a retry builds a fresh context).
         wipe_settings_password(context_->settings);
         log_info("RDP: user {} logged on in session {}", params_.username, *sid);
         set_state(RdpState::logged_on, std::format("session {}", *sid));

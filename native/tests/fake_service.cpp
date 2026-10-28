@@ -446,6 +446,10 @@ int run_rdp(const std::string& exe, const RdpScenario& sc) {
     const json* rdata = ipc::get_object(restored->body, "data");
     expect(rdata && ipc::get_int(*rdata, "session") == static_cast<int64_t>(sid),
            "session_restored does not carry the same session: " + restored->body.dump());
+    // The restored connection must hold: no further session_lost, session still active.
+    std::this_thread::sleep_for(10s);
+    lost = inbox.next_where(is_event("session_lost"), 0ms);
+    expect(!lost.has_value(), "session_lost after session_restored: " + (lost ? lost->body.dump() : std::string()));
     info = seat::wts::query_session(sid);
     expect(info && info->active(), std::format("session {} is not active after the reconnect", sid));
 

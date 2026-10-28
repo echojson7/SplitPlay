@@ -65,7 +65,6 @@ class FreeRdpConnector final : public IRdpConnector {
   void free_context();
   bool apply_settings(std::string* reason);
   bool first_connect(std::string* reason);
-  bool reconnect(std::string* reason);
   // Runs the event loop until the connection ends or stop is requested. Returns the reason.
   std::string run_session(bool* reached_logon);
   void process_mode_request();
@@ -76,14 +75,13 @@ class FreeRdpConnector final : public IRdpConnector {
 
   Options options_;
   bool winsock_ = false;
-  RdpConnectParams params_;  // holds the password until the connector is destroyed (needed for reconnects)
+  RdpConnectParams params_;  // holds the password until the connector is destroyed (needed for retries)
   std::wstring user_w_;
   std::string client_name_;
   std::wstring client_name_w_;
 
   std::mutex context_mutex_;  // guards context_ against disconnect() from other threads
   rdp_context* context_ = nullptr;
-  bool context_connected_once_ = false;  // a freerdp_connect on this context succeeded (ARC cookie usable)
 
   std::thread thread_;
   std::atomic<bool> stop_{false};

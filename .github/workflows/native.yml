@@ -248,6 +248,9 @@ jobs:
             exit 1
           }
           Remove-LocalUser -Name $user
+          Write-Host 'RDP session test passed'
+          # `query user` exits 1 when no session is left (the expected state); the step result is the test's.
+          exit 0
 
       - name: Upload test and vcpkg logs
         if: failure()

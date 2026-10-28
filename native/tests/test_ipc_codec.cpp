@@ -121,10 +121,19 @@ TEST_CASE("line framer discards oversized lines and recovers") {
 }
 
 TEST_CASE("known service messages") {
-  for (const char* t : {"welcome", "set_profile", "pair", "list_clients", "unpair", "send_sas", "shutdown"})
+  for (const char* t : {"welcome", "set_profile", "pair", "list_clients", "unpair", "send_sas", "set_mode", "shutdown"})
     CHECK(is_known_service_message(t));
   CHECK(!is_known_service_message("reboot"));
   CHECK(!is_known_service_message("hello"));
+}
+
+TEST_CASE("secure_wipe zeroes and clears") {
+  std::string secret = "p@ss w0rd";
+  const char* data = secret.data();
+  const size_t n = secret.size();
+  secure_wipe(secret);
+  CHECK(secret.empty());
+  for (size_t i = 0; i < n; ++i) CHECK(data[i] == 0);
 }
 
 TEST_CASE("safe accessors never throw") {

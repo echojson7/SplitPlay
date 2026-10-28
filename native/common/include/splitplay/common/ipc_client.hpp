@@ -58,6 +58,9 @@ const char* to_string(ExitReason reason) noexcept;
 class Client {
  public:
   struct Handlers {
+    // Called once with the whole `welcome` message, before on_profile, on the reader thread. The handler may take
+    // and wipe fields that carry secrets (the seat's `rdp.password`); the message is discarded afterwards.
+    std::function<void(json& welcome)> on_welcome;
     // Live profile changes: the initial profile from `welcome` and every `set_profile`. Return failure to reject.
     std::function<Result(const json& profile, bool initial)> on_profile;
     // Any other request with an id (pair, list_clients, unpair, send_sas, ...). Return std::nullopt for
@@ -103,7 +106,7 @@ class Client {
  private:
   void reader_loop();
   void heartbeat_loop();
-  void dispatch(const Message& msg);
+  void dispatch(Message& msg);
   void reply(int64_t id, const Result& result);
   void set_exit(ExitReason reason);
 

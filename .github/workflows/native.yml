@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: MIT
-# Native components (native/): splitplay_common, splitplay-seat.exe, splitplay-rdsprov.dll,
-# splitplay-stubworker.exe and their tests. MSVC x64 Release on windows-2022; the stub pipeline self-test runs on
-# WARP, so no GPU is needed.
+# Native components (native/): splitplay_common, splitplay-seat.exe (FreeRDP 3 connector from vcpkg),
+# splitplay-rdsprov.dll, splitplay-stubworker.exe and their tests, plus TermWrap built from source at a pinned commit.
+# MSVC x64 Release on windows-2022; the stub pipeline self-test runs on WARP, so no GPU is needed. The last step opens
+# a real RDP-loopback session on the runner with splitplay-seat and logs it off again.
 name: native
 
 on:
   push:
-    branches: ["stage2/**", "main"]
+    branches: ["stage2/**", "stage3/**", "main"]
     paths:
       - "native/**"
       - ".github/workflows/native.yml"
@@ -24,11 +25,15 @@ concurrency:
   group: ${{ github.workflow }}-native-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # TermWrap (MIT, https://github.com/llccd/TermWrap), tag v0.7. Fetched at build time, never vendored.
+  TERMWRAP_COMMIT: 34029fcd46de1db06b7f0815b99a765e4c7ca471
+
 jobs:
   build-test:
     name: MSVC x64 build and tests
     runs-on: windows-2022
-    timeout-minutes: 45
+    timeout-minutes: 90
     defaults:
       run:
         shell: pwsh
@@ -48,9 +53,46 @@ jobs:
           Write-Host "No file contains $id"
           exit 0
 
-      - name: Configure
+      # ---- vcpkg (manifest mode, pinned to the builtin-baseline in native/vcpkg.json) ------------------------------
+      - name: Set up vcpkg
+        id: vcpkg
+        run: |
+          $baseline = (Get-Content native/vcpkg.json -Raw | ConvertFrom-Json).'builtin-baseline'
+          $root = Join-Path $env:RUNNER_TEMP 'vcpkg'
+          git init -q $root
+          git -C $root fetch -q --depth 1 https://github.com/microsoft/vcpkg $baseline
+          if ($LASTEXITCODE -ne 0) { throw "cannot fetch vcpkg $baseline" }
+          git -C $root checkout -q FETCH_HEAD
+          & "$root\bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          $cache = Join-Path $env:RUNNER_TEMP 'vcpkg-binary-cache'
+          New-Item -ItemType Directory -Force $cache | Out-Null
+          "VCPKG_ROOT=$root" >> $env:GITHUB_ENV
+          "VCPKG_BINARY_SOURCES=clear;files,$cache,readwrite" >> $env:GITHUB_ENV
+          "cache=$cache" >> $env:GITHUB_OUTPUT
+          # Compiler updates in the runner image change the package ABI hashes, so the image version is in the key.
+          "image=$env:ImageOS-$env:ImageVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Restore vcpkg binary cache
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.vcpkg.outputs.cache }}
+          key: vcpkg-bin-${{ steps.vcpkg.outputs.image }}-${{ hashFiles('native/vcpkg.json', 'native/triplets/**') }}
+          restore-keys: |
+            vcpkg-bin-${{ steps.vcpkg.outputs.image }}-
+            vcpkg-bin-
+
+      - name: Configure (installs FreeRDP through vcpkg)
         working-directory: native
         run: cmake --preset windows-x64
+
+      - name: Save vcpkg binary cache
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true' && steps.vcpkg.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ steps.vcpkg.outputs.cache }}
+          key: vcpkg-bin-${{ steps.vcpkg.outputs.image }}-${{ hashFiles('native/vcpkg.json', 'native/triplets/**') }}
 
       - name: Build (Release x64)
         working-directory: native
@@ -66,25 +108,108 @@ jobs:
           .\build\windows-x64\bin\Release\splitplay-stubworker.exe --self-test 600 --adapter warp --fps 240
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Upload test log
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: native-test-log
-          path: native/build/windows-x64/Testing/Temporary/LastTest*.log
-          if-no-files-found: ignore
-          retention-days: 7
+      # ---- TermWrap ---------------------------------------------------------------------------------------------------
+      - name: Build TermWrap (pinned commit, x64 Release)
+        run: |
+          $src = Join-Path $env:RUNNER_TEMP 'termwrap-src'
+          git clone -q https://github.com/llccd/TermWrap $src
+          if ($LASTEXITCODE -ne 0) { throw 'cannot clone TermWrap' }
+          git -C $src checkout -q $env:TERMWRAP_COMMIT
+          if ($LASTEXITCODE -ne 0) { throw "cannot check out TermWrap $env:TERMWRAP_COMMIT" }
+          $head = git -C $src rev-parse HEAD
+          if ($head -ne $env:TERMWRAP_COMMIT) { throw "TermWrap HEAD $head != $env:TERMWRAP_COMMIT" }
+          git -C $src submodule update --init --recursive
+          if ($LASTEXITCODE -ne 0) { throw 'cannot fetch the zydis submodule' }
+          git -C $src submodule status --recursive
+
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $msbuild = & $vswhere -latest -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\MSBuild.exe' | Select-Object -First 1
+          if (-not $msbuild) { throw 'MSBuild not found' }
+
+          # Zydis as a DLL with the static CRT (/MT): no VC++ redistributable. Upstream links the wrappers against the
+          # Zydis import library in zydis\msvc\bin\ReleaseX64; the wrappers themselves use no VC runtime (they link
+          # the system msvcrt.dll through TermWrap\msvcrt.def and set their own entry point).
+          & $msbuild "$src\zydis\msvc\zydis\Zydis.vcxproj" /m /nologo /v:minimal "/p:Configuration=Release MT DLL" /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { throw 'Zydis build failed' }
+          & $msbuild "$src\TermWrap.sln" /m /nologo /v:minimal /t:TermWrap /p:Configuration=Release /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { throw 'TermWrap build failed' }
+          & $msbuild "$src\TermWrap.sln" /m /nologo /v:minimal /t:UmWrap /p:Configuration=Release /p:Platform=x64
+          if ($LASTEXITCODE -ne 0) { throw 'UmWrap build failed' }
+          & $msbuild "$src\TermWrap.sln" /m /nologo /v:minimal /t:EndpWrap /p:Configuration=Release /p:Platform=x64
+          $endp = $LASTEXITCODE -eq 0
+          if (-not $endp) { Write-Host '::warning::EndpWrap (optional) did not build; shipping without it' }
+
+          $out = 'native/build/termwrap'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item "$src\x64\Release\TermWrap.dll", "$src\x64\Release\UmWrap.dll" $out
+          if ($endp) { Copy-Item "$src\x64\Release\EndpWrap.dll" $out }
+          Copy-Item "$src\zydis\msvc\bin\ReleaseX64\Zydis.dll" $out
+          Copy-Item "$src\LICENSE" "$out\LICENSE"
+          Copy-Item "$src\zydis\LICENSE" "$out\LICENSE.zydis"
+          "TermWrap $env:TERMWRAP_COMMIT (https://github.com/llccd/TermWrap), zydis $(git -C "$src\zydis" rev-parse HEAD)" |
+            Set-Content "$out\VERSION.txt" -Encoding ascii
+
+          # No DLL may need the VC++ redistributable.
+          $dumpbin = & $vswhere -latest -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\dumpbin.exe' | Select-Object -First 1
+          $bad = $false
+          foreach ($dll in Get-ChildItem $out -Filter *.dll) {
+            $deps = (& $dumpbin /nologo /dependents $dll.FullName) | Where-Object { $_ -match '^\s+\S+\.dll\s*$' } | ForEach-Object { $_.Trim() }
+            Write-Host ("{0}: {1}" -f $dll.Name, ($deps -join ', '))
+            if ($deps | Where-Object { $_ -match '^(vcruntime|msvcp|concrt|ucrtbased|vcruntime\d+d)' }) {
+              Write-Host "::error::$($dll.Name) depends on the VC++ runtime"
+              $bad = $true
+            }
+          }
+          if ($bad) { exit 1 }
+          Get-ChildItem $out | Format-Table Name, Length
+
+      - name: TermWrap release .reg files (reference for native/termwrap/README.md)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $rel = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } https://api.github.com/repos/llccd/TermWrap/releases/tags/v0.7
+          $dir = Join-Path $env:RUNNER_TEMP 'termwrap-release'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          foreach ($a in $rel.assets) {
+            Write-Host "asset: $($a.name) ($($a.size) bytes)"
+            $f = Join-Path $dir $a.name
+            Invoke-WebRequest -Uri $a.browser_download_url -OutFile $f
+            if ($a.name -like '*.zip') { Expand-Archive $f -DestinationPath (Join-Path $dir ($a.name + '.d')) -Force }
+          }
+          foreach ($r in Get-ChildItem $dir -Recurse -Filter *.reg) {
+            Write-Host "===== $($r.FullName.Substring($dir.Length + 1))"
+            Get-Content $r.FullName | ForEach-Object { Write-Host $_ }
+          }
+
+      # ---- artifact ---------------------------------------------------------------------------------------------------
+      - name: Stage native-win-x64
+        run: |
+          $bin = 'native/build/windows-x64/bin/Release'
+          $stage = 'native/build/artifact'
+          New-Item -ItemType Directory -Force "$stage/termwrap" | Out-Null
+          foreach ($f in 'splitplay-seat.exe', 'splitplay-seat.pdb', 'splitplay-stubworker.exe', 'splitplay-stubworker.pdb',
+                         'splitplay-rdsprov.dll', 'splitplay-rdsprov.pdb') {
+            Copy-Item "$bin/$f" $stage -ErrorAction Stop
+          }
+          Copy-Item native/build/termwrap/* "$stage/termwrap" -ErrorAction Stop
+          Get-ChildItem -Recurse $stage -File | ForEach-Object { '{0,-40} {1,12:N0}' -f $_.FullName.Substring((Resolve-Path $stage).Path.Length + 1), $_.Length }
 
       - name: Upload native-win-x64
         uses: actions/upload-artifact@v4
         with:
           name: native-win-x64
-          path: |
-            native/build/windows-x64/bin/Release/splitplay-seat.exe
-            native/build/windows-x64/bin/Release/splitplay-seat.pdb
-            native/build/windows-x64/bin/Release/splitplay-stubworker.exe
-            native/build/windows-x64/bin/Release/splitplay-stubworker.pdb
-            native/build/windows-x64/bin/Release/splitplay-rdsprov.dll
-            native/build/windows-x64/bin/Release/splitplay-rdsprov.pdb
+          path: native/build/artifact/
           if-no-files-found: error
           retention-days: 30
+
+      - name: Upload test and vcpkg logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-test-log
+          path: |
+            native/build/windows-x64/Testing/Temporary/LastTest*.log
+            native/build/windows-x64/vcpkg-manifest-install.log
+            ${{ runner.temp }}/vcpkg/buildtrees/*/*.log
+          if-no-files-found: ignore
+          retention-days: 7

@@ -3,7 +3,20 @@
   "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
   "configurePresets": [
     {
+      "name": "vcpkg",
+      "hidden": true,
+      "description": "FreeRDP from vcpkg (manifest mode, vcpkg.json). Needs VCPKG_ROOT pointing at a vcpkg checkout.",
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-rel",
+        "VCPKG_HOST_TRIPLET": "x64-windows-static-rel",
+        "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
+        "SPLITPLAY_WITH_FREERDP": "ON"
+      }
+    },
+    {
       "name": "windows-x64",
+      "inherits": "vcpkg",
       "displayName": "Windows x64, Visual Studio 2022 (MSVC)",
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
@@ -13,6 +26,7 @@
     },
     {
       "name": "windows-x64-ninja",
+      "inherits": "vcpkg",
       "displayName": "Windows x64, Ninja + MSVC (run from a VS x64 developer prompt)",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/windows-x64-ninja",

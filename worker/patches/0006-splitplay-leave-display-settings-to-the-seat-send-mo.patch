@@ -1,0 +1,204 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:05:00 +0000
+Subject: [PATCH] splitplay: leave display settings to the seat, send
+ mode_requested
+
+A SplitPlay worker runs in a desk's RDP loopback session. That session's
+display (RdpIdd) is resized by the seat through the RDP display-control
+channel; the worker must never change display settings, and above all
+never touch the console's displays.
+
+- display_device: on Windows no libdisplaydevice settings manager is
+  created. Every display_device call becomes a pass-through: nothing is
+  applied, reverted or "recovered" at start-up, map_output_name() returns
+  the configured name unchanged, and allow_encoder_probing() no longer
+  depends on libdisplaydevice's CCD view of the session.
+- configure_display() (Moonlight /launch and /resume with no other
+  stream running) sends the control event
+  {"type":"event","name":"mode_requested","data":{"width":W,"height":H,"fps":F}}
+  instead. If the desktop has another size, it then waits up to 3 s for
+  the size to change, so that encoder probing and capture start on the
+  new mode; any change ends the wait because the seat may round the size.
+  Standalone (no --pipe) the mode is left as it is.
+- dd_configuration_option is ignored, with a warning when it is set.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/src/display_device.cpp b/src/display_device.cpp
+index bcc81bdb7d0775a9b811f8f82bf2c7f328615ab1..7207e63c66859e460e40e383d1fcaace7e91584f 100644
+--- a/src/display_device.cpp
++++ b/src/display_device.cpp
+@@ -24,6 +24,7 @@
+ #include "audio.h"
+ #include "platform/common.h"
+ #include "rtsp.h"
++#include "splitplay/control_client.h"
+ 
+ // platform-specific includes
+ #ifdef _WIN32
+@@ -655,16 +656,12 @@ namespace display_device {
+      */
+     std::unique_ptr<SettingsManagerInterface> make_settings_manager([[maybe_unused]] const std::filesystem::path &persistence_filepath, [[maybe_unused]] const config::video_t &video_config) {
+ #ifdef _WIN32
+-      return std::make_unique<SettingsManager>(
+-        std::make_shared<WinDisplayDevice>(std::make_shared<WinApiLayer>()),
+-        std::make_shared<sunshine_audio_context_t>(),
+-        std::make_unique<PersistentState>(
+-          std::make_shared<FileSettingsPersistence>(persistence_filepath)
+-        ),
+-        WinWorkarounds {
+-          .m_hdr_blank_delay = video_config.dd.wa.hdr_toggle_delay != std::chrono::milliseconds::zero() ? std::make_optional(video_config.dd.wa.hdr_toggle_delay) : std::nullopt
+-        }
+-      );
++      // SplitPlay: the worker runs in a desk's RDP session, whose display belongs to that session and is resized
++      // by the seat (RDP display control). libdisplaydevice must never change, revert or "recover" display
++      // settings there (or, worse, on the console), and its CCD view of the session is not reliable enough to
++      // gate encoder probing. Without a settings manager every display_device call is a pass-through.
++      BOOST_LOG(info) << "SplitPlay: display settings belong to the desk session, libdisplaydevice is not used"sv;
++      return nullptr;
+ #elif defined(__APPLE__)
+       return std::make_unique<MacSettingsManager>(
+         std::make_shared<MacDisplayDevice>(std::make_shared<MacApiLayer>()),
+@@ -842,6 +839,15 @@ namespace display_device {
+   }
+ 
+   void configure_display(const config::video_t &video_config, const rtsp_stream::launch_session_t &session) {
++#ifdef _WIN32
++    // SplitPlay: ask the service (and through it the seat) for the client's mode instead of changing it here.
++    // The wait lets encoder probing and capture start on the new size; a refused request costs at most 3 s.
++    splitplay::control::request_mode(session.width, session.height, session.fps, std::chrono::seconds {3});
++    if (video_config.dd.configuration_option != config::video_t::dd_t::config_option_e::disabled) {
++      BOOST_LOG(warning) << "SplitPlay: dd_configuration_option is ignored in a desk, the seat sets the mode"sv;
++    }
++    return;
++#endif
+     const auto result {parse_configuration(video_config, session)};
+     if (const auto *parsed_config {std::get_if<SingleDisplayConfiguration>(&result)}; parsed_config) {
+       configure_display(*parsed_config);
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index 01c4e88533a34025e4556c0401c047d3c61eca33..b86eef58f7ab10f95379fb6ef16912970c26660c 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -18,6 +18,7 @@
+ #include <string>
+ #include <string_view>
+ #include <thread>
++#include <utility>
+ 
+ // lib includes
+ #include <nlohmann/json.hpp>
+@@ -192,6 +193,13 @@ namespace splitplay::control {
+         BOOST_LOG(info) << "SplitPlay: ready (base port "sv << config::sunshine.port << ')';
+       }
+ 
++      /**
++       * @brief Send `event` with `name` and `data` (child to service, no answer expected).
++       */
++      void send_event(const std::string &name, json data) {
++        send({{"type", "event"}, {"name", name}, {"data", std::move(data)}});
++      }
++
+       void shutdown() {
+         stopping = true;
+         if (stop_event) {
+@@ -461,6 +469,18 @@ namespace splitplay::control {
+     };
+ 
+     std::unique_ptr<client_t> client;
++
++    /**
++     * @brief Size of the session's primary display, {0, 0} when unknown.
++     */
++    std::pair<DWORD, DWORD> desktop_size() {
++      DEVMODEW mode {};
++      mode.dmSize = sizeof(mode);
++      if (!EnumDisplaySettingsExW(nullptr, ENUM_CURRENT_SETTINGS, &mode, 0)) {
++        return {0, 0};
++      }
++      return {mode.dmPelsWidth, mode.dmPelsHeight};
++    }
+   }  // namespace
+ 
+   int start() {
+@@ -489,6 +509,33 @@ namespace splitplay::control {
+     }
+   }
+ 
++  void request_mode(int width, int height, int fps, std::chrono::milliseconds timeout) {
++    const auto before = desktop_size();
++    BOOST_LOG(info) << "SplitPlay: client requests "sv << width << 'x' << height << '@' << fps << ", desktop is "sv << before.first << 'x' << before.second;
++    if (!client) {
++      BOOST_LOG(info) << "SplitPlay: standalone, the desktop mode is left as it is"sv;
++      return;
++    }
++    client->send_event("mode_requested", {{"width", width}, {"height", height}, {"fps", fps}});
++
++    const std::pair<DWORD, DWORD> wanted {static_cast<DWORD>(width), static_cast<DWORD>(height)};
++    if (width <= 0 || height <= 0 || before == wanted) {
++      return;
++    }
++    // The seat may round the size (RDP wants an even width) or refuse it, so any change ends the wait.
++    const auto deadline = std::chrono::steady_clock::now() + timeout;
++    auto now = before;
++    while (now == before && std::chrono::steady_clock::now() < deadline) {
++      std::this_thread::sleep_for(50ms);
++      now = desktop_size();
++    }
++    if (now == before) {
++      BOOST_LOG(warning) << "SplitPlay: the desktop is still "sv << now.first << 'x' << now.second << " after "sv << timeout.count() << " ms, streaming it as it is"sv;
++    } else {
++      BOOST_LOG(info) << "SplitPlay: desktop changed to "sv << now.first << 'x' << now.second;
++    }
++  }
++
+   void stop() {
+     client.reset();
+   }
+@@ -504,6 +551,9 @@ namespace splitplay::control {
+   void notify_ready() {
+   }
+ 
++  void request_mode(int, int, int, std::chrono::milliseconds) {
++  }
++
+   void stop() {
+   }
+ #endif
+diff --git a/src/splitplay/control_client.h b/src/splitplay/control_client.h
+index e829562a5a16118b62fdc1af5f6f08cbc873f0a4..69cbb360773281f4a03e097dc84b2177441121cd 100644
+--- a/src/splitplay/control_client.h
++++ b/src/splitplay/control_client.h
+@@ -5,6 +5,9 @@
+ // SPDX-License-Identifier: GPL-3.0-only
+ #pragma once
+ 
++// standard includes
++#include <chrono>
++
+ namespace splitplay::control {
+   /**
+    * @brief Connect to the pipe given with `--pipe`, send `hello` and wait for `welcome`.
+@@ -21,6 +24,21 @@ namespace splitplay::control {
+    */
+   void notify_ready();
+ 
++  /**
++   * @brief Ask the service for a desktop mode: event `mode_requested` (docs/contracts/ipc.md).
++   *
++   * In a desk the display belongs to the RDP session. The service forwards the request to the seat, which resizes
++   * the session through the RDP display-control channel; the worker never changes display settings itself.
++   * When a control pipe is connected and the desktop has another size, this waits up to `timeout` for the size
++   * to change, so that encoder probing and capture start on the new mode.
++   *
++   * @param width Requested width in pixels.
++   * @param height Requested height in pixels.
++   * @param fps Requested frame rate.
++   * @param timeout Longest wait for the desktop size to change.
++   */
++  void request_mode(int width, int height, int fps, std::chrono::milliseconds timeout);
++
+   /**
+    * @brief Stop the heartbeat and reader threads and close the pipe.
+    */

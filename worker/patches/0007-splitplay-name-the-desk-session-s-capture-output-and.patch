@@ -1,0 +1,134 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:06:00 +0000
+Subject: [PATCH] splitplay: name the desk session's capture output and adapter
+
+In a desk the worker runs as SYSTEM with TokenSessionId set to the desk's
+RDP session and lpDesktop winsta0\default. Everything DDA needs is already
+per session:
+
+- DXGI enumerates only this session's display: the RdpIdd output, listed
+  under the session's render adapter (the hardware GPU when the
+  bEnumerateHWBeforeSW policy is set, otherwise Microsoft Basic Render
+  Driver). The upstream search (first output attached to the desktop that
+  DuplicateOutput accepts) therefore picks the session's output and its
+  render adapter, and the capture D3D11 device, and with it NVENC/AMF/QSV,
+  lives on that adapter.
+- syncThreadDesktop() opens the input desktop of the process's window
+  station, i.e. session N's WinSta0, so the Winlogon/secure desktop (lock
+  screen, UAC) is followed in the desk session; as SYSTEM, DuplicateOutput
+  may capture it.
+
+What was missing is visibility on a real host:
+
+- The capture banner now also names the session, the DXGI output and the
+  adapter LUID.
+- When no output is found, every adapter and output DXGI shows this
+  session is logged.
+- When the session renders on Microsoft Basic Render Driver, a warning
+  (once) says that only software encoding is possible and how to put RDP
+  sessions on the GPU.
+- platf::target_session_id() (patch "serve the worker's own session") is
+  declared in misc.h.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/src/platform/windows/display_base.cpp b/src/platform/windows/display_base.cpp
+index b297b90ae232146726e0859f6af44d4369bc404e..b28fbbc5c0f81a8bc70c2ba062747972302619ce 100644
+--- a/src/platform/windows/display_base.cpp
++++ b/src/platform/windows/display_base.cpp
+@@ -447,6 +447,36 @@ namespace platf::dxgi {
+     }
+   }
+ 
++  /**
++   * @brief SplitPlay: log every adapter and output that DXGI shows this session.
++   * @details A desk worker only sees its own RDP session's display (RdpIdd), whose output DXGI lists under the
++   * session's render adapter (the hardware GPU when bEnumerateHWBeforeSW=1, otherwise Microsoft Basic Render Driver).
++   * @param factory DXGI factory to enumerate.
++   */
++  void log_session_outputs(factory1_t &factory) {
++    BOOST_LOG(warning) << "SplitPlay: DXGI adapters and outputs in session "sv << target_session_id() << ':';
++    adapter_t::pointer adapter_p;
++    for (UINT x = 0; factory->EnumAdapters1(x, &adapter_p) != DXGI_ERROR_NOT_FOUND; ++x) {
++      adapter_t adapter {adapter_p};
++      DXGI_ADAPTER_DESC1 desc;
++      adapter->GetDesc1(&desc);
++      BOOST_LOG(warning) << "  adapter "sv << x << ": "sv << utf_utils::to_utf8(desc.Description)
++                         << " [vendor 0x"sv << util::hex(desc.VendorId).to_string_view()
++                         << ", device 0x"sv << util::hex(desc.DeviceId).to_string_view()
++                         << ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) ? ", software]"sv : "]"sv);
++      output_t::pointer output_p;
++      for (UINT y = 0; adapter->EnumOutputs(y, &output_p) != DXGI_ERROR_NOT_FOUND; ++y) {
++        output_t output {output_p};
++        DXGI_OUTPUT_DESC od;
++        output->GetDesc(&od);
++        BOOST_LOG(warning) << "    output "sv << y << ": "sv << utf_utils::to_utf8(od.DeviceName) << ' '
++                           << (od.DesktopCoordinates.right - od.DesktopCoordinates.left) << 'x'
++                           << (od.DesktopCoordinates.bottom - od.DesktopCoordinates.top)
++                           << (od.AttachedToDesktop ? ", attached to the desktop"sv : ", not attached"sv);
++      }
++    }
++  }
++
+   int display_base_t::init(const ::video::config_t &config, const std::string &display_name) {
+     std::once_flag windows_cpp_once_flag;
+ 
+@@ -556,6 +586,7 @@ namespace platf::dxgi {
+ 
+     if (!output) {
+       BOOST_LOG(error) << "Failed to locate an output device"sv;
++      log_session_outputs(factory);
+       return -1;
+     }
+ 
+@@ -600,8 +631,13 @@ namespace platf::dxgi {
+     adapter->GetDesc(&adapter_desc);
+ 
+     auto description = utf_utils::to_utf8(adapter_desc.Description);
++    DXGI_OUTPUT_DESC output_desc {};
++    output->GetDesc(&output_desc);
+     BOOST_LOG(info)
+       << std::endl
++      << "SplitPlay session  : "sv << target_session_id() << std::endl
++      << "Output Name        : "sv << utf_utils::to_utf8(output_desc.DeviceName) << std::endl
++      << "Adapter LUID       : 0x"sv << util::hex(adapter_desc.AdapterLuid.HighPart).to_string_view() << util::hex(adapter_desc.AdapterLuid.LowPart).to_string_view() << std::endl
+       << "Device Description : " << description << std::endl
+       << "Device Vendor ID   : 0x"sv << util::hex(adapter_desc.VendorId).to_string_view() << std::endl
+       << "Device Device ID   : 0x"sv << util::hex(adapter_desc.DeviceId).to_string_view() << std::endl
+@@ -613,6 +649,16 @@ namespace platf::dxgi {
+       << "Offset             : "sv << offset_x << 'x' << offset_y << std::endl
+       << "Virtual Desktop    : "sv << env_width << 'x' << env_height;
+ 
++    // SplitPlay: Microsoft Basic Render Driver (WARP) means the desk session does not render on the GPU.
++    if (adapter_desc.VendorId == 0x1414 && adapter_desc.DeviceId == 0x8c) {
++      static std::once_flag warned;
++      std::call_once(warned, []() {
++        BOOST_LOG(warning) << "SplitPlay: this session renders on Microsoft Basic Render Driver, so only software encoding is possible. "sv
++                           << "On a GPU host enable \"Use hardware graphics adapters for all Remote Desktop Services sessions\" "sv
++                           << "(bEnumerateHWBeforeSW=1, splitplay host prepare) and start the desk again."sv;
++      });
++    }
++
+     // Bump up thread priority
+     {
+       const DWORD flags = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
+diff --git a/src/platform/windows/misc.h b/src/platform/windows/misc.h
+index ac866f281a1b86174f05c5ea752a9b54e6f8635b..d04b25cb43e08cf62b982d8e993c438f5c3e6c16 100644
+--- a/src/platform/windows/misc.h
++++ b/src/platform/windows/misc.h
+@@ -29,6 +29,13 @@ namespace platf {
+    */
+   HDESK syncThreadDesktop();
+ 
++  /**
++   * @brief Session the SplitPlay worker serves: its own (the desk's RDP session), not the console.
++   *
++   * @return Session id of the current process, or 0xFFFFFFFF on failure.
++   */
++  DWORD target_session_id();
++
+   /**
+    * @brief Read the current Windows high-resolution performance counter.
+    *

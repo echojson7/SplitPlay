@@ -1,0 +1,78 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:08:00 +0000
+Subject: [PATCH] splitplay: desk defaults (Desktop only, DDA capture, loopback
+ web UI)
+
+Defaults that hold for every desk, so that the worker does the right thing
+even before SplitPlay.Service passes any setting:
+
+- apps.json: a desk offers just "Desktop" (the desk session itself);
+  "Steam Big Picture" is gone. Only the default copied into a new desk
+  directory changes; an existing apps.json is kept.
+- capture = ddx: DXGI Desktop Duplication inside the desk session.
+  Windows.Graphics.Capture needs a user's session token and fails as
+  SYSTEM, so it is no longer tried as a fallback on every reinit.
+- origin_web_ui_allowed = pc: the desk is managed by the service through
+  the control pipe; Sunshine's own web UI (base port + 1) answers on
+  loopback only.
+- system_tray = off (the tray is also compiled out).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/src/config.cpp b/src/config.cpp
+index 69859ed264bb6211703caea43a33383c2fe66c67..fd25f1b2b036192b63fc45900cf3fed9ce29e086 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -769,7 +769,7 @@ namespace config {
+       2,  // vk.rc_mode (default: cbr)
+     },
+ 
+-    {},  // capture
++    "ddx"s,  // capture (SplitPlay: DXGI Desktop Duplication in the desk session; WGC needs a user, not SYSTEM)
+     {},  // encoder
+     {},  // adapter_name
+     {},  // output_name
+@@ -820,7 +820,7 @@ namespace config {
+    * @brief Default NVHTTP server configuration values used before file and CLI overrides.
+    */
+   nvhttp_t nvhttp {
+-    "lan",  // origin web manager
++    "pc",  // origin web manager (SplitPlay: the service manages desks, Sunshine's own web UI is loopback only)
+ 
+     PRIVATE_KEY_FILE,
+     CERTIFICATE_FILE,
+@@ -878,7 +878,7 @@ namespace config {
+     {},  // Bind address
+     platf::appdata().string() + "/sunshine.log",  // log file
+     false,  // notify_pre_releases
+-    true,  // system_tray
++    false,  // system_tray (SplitPlay: no tray icon in a desk)
+     {},  // prep commands
+   };
+ 
+diff --git a/src_assets/windows/assets/apps.json b/src_assets/windows/assets/apps.json
+index 9197dd84384fd5e8dedd3b3d12f642eafeb931a6..2bc777deed19518c8bc00e74791634a255f9a8b8 100644
+--- a/src_assets/windows/assets/apps.json
++++ b/src_assets/windows/assets/apps.json
+@@ -4,19 +4,6 @@
+     {
+       "name": "Desktop",
+       "image-path": "desktop.png"
+-    },
+-    {
+-      "name": "Steam Big Picture",
+-      "cmd": "steam://open/bigpicture",
+-      "prep-cmd": [
+-        {
+-          "do": "",
+-          "undo": "steam://close/bigpicture"
+-        }
+-      ],
+-      "auto-detach": true,
+-      "wait-all": true,
+-      "image-path": "steam.png"
+     }
+   ]
+ }

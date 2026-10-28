@@ -24,6 +24,7 @@ const form = reactive({
   gpu: d.gpu,
   autostart: d.autostart,
   bluetooth: d.disableBluetoothUserService ?? true,
+  steam: d.steamIsolation ?? true,
   basePort: String(d.basePort),
   fecPercent: d.profile.fecPercent === undefined ? '' : String(d.profile.fecPercent),
   minFps: d.profile.minFps === undefined ? '' : String(d.profile.minFps),
@@ -70,6 +71,7 @@ function toConfig(): DeskConfig {
     // The default (true) is left out unless the desk already had an explicit value.
     if (props.desk.disableBluetoothUserService !== undefined || !form.bluetooth)
       config.disableBluetoothUserService = form.bluetooth
+    if (props.desk.steamIsolation !== undefined || !form.steam) config.steamIsolation = form.steam
     const ws = parseWorkerSettings(form.workerSettings)
     if (Object.keys(ws).length > 0) config.workerSettings = ws
     else delete config.workerSettings
@@ -210,6 +212,10 @@ const gpuOptions = computed(() => {
       <label class="switch">
         <input v-model="form.bluetooth" type="checkbox" name="bluetooth" :disabled="running" />
         {{ t('adv.bluetooth') }}
+      </label>
+      <label class="switch">
+        <input v-model="form.steam" type="checkbox" name="steam" :disabled="running" />
+        {{ t('adv.steam') }}
       </label>
     </div>
 

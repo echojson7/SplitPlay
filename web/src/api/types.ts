@@ -51,6 +51,8 @@ export interface DeskConfig {
   profile: DeskProfile
   /** Stop the desk session's BluetoothUserService instance (default true). */
   disableBluetoothUserService?: boolean
+  /** Give the desk user's Steam its own IPC name so it runs next to the console user's Steam (default true). */
+  steamIsolation?: boolean
   /** Extra Sunshine settings passed to the worker verbatim. */
   workerSettings?: Record<string, string>
   /**

@@ -286,13 +286,25 @@ internal sealed class ChildChannel : IAsyncDisposable
     {
         var period = TimeSpan.FromMilliseconds(Math.Max(10, _options.HeartbeatIntervalMs / 4));
         using var timer = new PeriodicTimer(period, _time);
+        var lastTick = _time.GetUtcNow();
         try
         {
             while (await timer.WaitForNextTickAsync(ct).ConfigureAwait(false))
             {
                 var now = _time.GetUtcNow();
+                var late = now - lastTick - period;
+                lastTick = now;
                 lock (_gate)
                 {
+                    // A tick far behind schedule means the service itself stalled (thread pool starvation, GC, a
+                    // suspended VM): the reader could not take heartbeats either, so the stalled time is not the
+                    // child's silence. Without this, a busy host restarts healthy children.
+                    if (late > _options.HeartbeatInterval)
+                    {
+                        _lastHeartbeat = _lastHeartbeat + late > now ? now : _lastHeartbeat + late;
+                        continue;
+                    }
+
                     var silence = now - _lastHeartbeat;
                     if (silence > _options.HeartbeatTimeout)
                     {

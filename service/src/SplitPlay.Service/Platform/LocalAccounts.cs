@@ -35,6 +35,79 @@ public static class LocalAccounts
     public sealed record AccountInfo(string Name, string Comment, uint Flags)
     {
         public bool CreatedBySplitPlay => Comment.StartsWith(CommentPrefix, StringComparison.Ordinal);
+
+        public bool Disabled => (Flags & UF_ACCOUNTDISABLE) != 0;
+
+        public bool PasswordNeverExpires => (Flags & UF_DONT_EXPIRE_PASSWD) != 0;
+    }
+
+    /// <summary>An entry of <see cref="List"/>.</summary>
+    public sealed record ListedAccount(string Name, string FullName, bool IsAdmin, bool CreatedBySplitPlay);
+
+    private const uint USER_PRIV_ADMIN = 2;
+    private const int FILTER_NORMAL_ACCOUNT = 2;
+    private const int ERROR_MORE_DATA = 234;
+
+    /// <summary>
+    /// Enabled normal local accounts, without the built-in ones (RIDs 500 Administrator, 501 Guest, 503 DefaultAccount,
+    /// 504 WDAGUtilityAccount), sorted by name.
+    /// </summary>
+    public static IReadOnlyList<ListedAccount> List()
+    {
+        var result = new List<ListedAccount>();
+        var resume = 0;
+        int rc;
+        do
+        {
+            rc = NetUserEnum(null, 20, FILTER_NORMAL_ACCOUNT, out var buffer, -1, out var read, out _, ref resume);
+            if (rc != NERR_Success && rc != ERROR_MORE_DATA)
+            {
+                Check(rc, "NetUserEnum");
+            }
+
+            try
+            {
+                var size = Marshal.SizeOf<USER_INFO_20>();
+                for (var i = 0; i < read; i++)
+                {
+                    var info = Marshal.PtrToStructure<USER_INFO_20>(buffer + (i * size));
+                    if (info.usri20_name is not { } name || (info.usri20_flags & UF_ACCOUNTDISABLE) != 0
+                        || info.usri20_user_id is 500 or 501 or 503 or 504)
+                    {
+                        continue;
+                    }
+
+                    var isAdmin = false;
+                    var created = false;
+                    if (NetUserGetInfo(null, name, 1, out var detail) == NERR_Success)
+                    {
+                        try
+                        {
+                            var one = Marshal.PtrToStructure<USER_INFO_1>(detail);
+                            isAdmin = one.usri1_priv == USER_PRIV_ADMIN;
+                            created = (one.usri1_comment ?? "").StartsWith(CommentPrefix, StringComparison.Ordinal);
+                        }
+                        finally
+                        {
+                            NetApiBufferFree(detail);
+                        }
+                    }
+
+                    result.Add(new ListedAccount(name, info.usri20_full_name ?? "", isAdmin, created));
+                }
+            }
+            finally
+            {
+                if (buffer != IntPtr.Zero)
+                {
+                    NetApiBufferFree(buffer);
+                }
+            }
+        }
+        while (rc == ERROR_MORE_DATA);
+
+        result.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase));
+        return result;
     }
 
     public static AccountInfo? Get(string user)
@@ -138,6 +211,12 @@ public static class LocalAccounts
         return Marshal.GetLastWin32Error() != ERROR_LOGON_FAILURE;
     }
 
+    /// <summary>
+    /// Checks a password the owner typed with a network logon. False for a wrong user name or password; other
+    /// failures (logon type not granted, account restrictions) count as correct since the password itself matched.
+    /// </summary>
+    public static bool PasswordIsCorrect(string user, string password) => PasswordWorks(user, password);
+
     public static void Delete(string user, SecurityIdentifier? sid)
     {
         if (sid is not null)
@@ -177,6 +256,16 @@ public static class LocalAccounts
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct USER_INFO_20
+    {
+        public string? usri20_name;
+        public string? usri20_full_name;
+        public string? usri20_comment;
+        public uint usri20_flags;
+        public uint usri20_user_id;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct USER_INFO_1003
     {
         public string usri1003_password;
@@ -208,6 +297,10 @@ public static class LocalAccounts
 
     [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
     private static extern int NetUserDel(string? server, string user);
+
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern int NetUserEnum(string? server, int level, int filter, out IntPtr buf, int prefMaxLen, out int entriesRead,
+        out int totalEntries, ref int resumeHandle);
 
     [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
     private static extern int NetLocalGroupAddMembers(string? server, string group, int level, ref LOCALGROUP_MEMBERS_INFO_0 buf, int total);

@@ -129,7 +129,8 @@ function Assert-FirewallRules([string]$deskId, [bool]$present) {
 }
 
 function Get-FakeChildren {
-    @(Get-CimInstance Win32_Process -Filter "Name = 'SplitPlay.Service.exe'" | Where-Object { $_.CommandLine -like '*fake-child*' })
+    # "<exe> fake-child ...", not the console-mode service whose "--Supervisor:WorkerArguments=fake-child" has the word too.
+    @(Get-CimInstance Win32_Process -Filter "Name = 'SplitPlay.Service.exe'" | Where-Object { $_.CommandLine -match '\.exe"?\s+fake-child\s' })
 }
 
 function Set-ServiceEnvironment([string[]]$values) {
@@ -205,6 +206,40 @@ try {
         if (Get-LocalUser -Name 'smoke desk 1' -ErrorAction SilentlyContinue) { throw 'the desk account still exists' }
         if (Test-Path (Join-Path $consoleData 'secrets\desks\smoke-1.bin')) { throw 'the desk secret still exists' }
         Assert-FirewallRules 'smoke-1' $false
+
+        Step 'console mode: an existing Windows user with the owner''s password'
+        $existing = 'smoke owner2'
+        $existingPassword = 'Sm0ke-' + [guid]::NewGuid().ToString('N').Substring(0, 16) + '!'
+        Get-LocalUser -Name $existing -ErrorAction SilentlyContinue | Remove-LocalUser
+        New-LocalUser -Name $existing -Password (ConvertTo-SecureString $existingPassword -AsPlainText -Force) -Description 'owner account' | Out-Null
+        try {
+            $before = Get-LocalUser -Name $existing
+            # A wrong password is refused (400 validation_failed) and nothing is created.
+            'wrong-password' | & $cli desk create smoke-4 --user $existing --password-stdin
+            if ($LASTEXITCODE -eq 0) { throw 'desk create accepted a wrong password' }
+            $existingPassword | & $cli desk create smoke-4 --user $existing --password-stdin
+            if ($LASTEXITCODE -ne 0) { throw "desk create with the right password failed ($LASTEXITCODE)" }
+            $desk = Get-Desk 'smoke-4'
+            if ($desk.userManaged -ne $false -or $desk.hasPassword -ne $true) { throw "unexpected userManaged/hasPassword: $($desk | ConvertTo-Json -Compress)" }
+            if ((Get-Content (Join-Path $consoleData 'config.json') -Raw) -match [regex]::Escape($existingPassword)) { throw 'the password reached config.json' }
+            Invoke-Cli desk start smoke-4 --wait --timeout 60
+            $desk = Get-Desk 'smoke-4'
+            if ($desk.state -ne 'Ready') { throw "desk state is $($desk.state) ($($desk.lastError))" }
+            if ("$($desk.lastError)" -notmatch 'can expire') { throw "expected a password-expiry warning, got '$($desk.lastError)'" }
+            $after = Get-LocalUser -Name $existing
+            if ($after.Description -ne 'owner account' -or $after.PasswordExpires -ne $before.PasswordExpires -or $after.PasswordLastSet -ne $before.PasswordLastSet) {
+                throw 'SplitPlay changed the existing account'
+            }
+            if (-not @(Get-LocalGroupMember -SID 'S-1-5-32-555' | Where-Object { $_.SID -eq $after.SID })) { throw 'not added to Remote Desktop Users' }
+            Invoke-Cli desk stop smoke-4 --wait --timeout 30
+            & $cli desk delete smoke-4 --delete-user
+            if ($LASTEXITCODE -eq 0) { throw 'delete --delete-user removed an account SplitPlay did not create' }
+            if (-not (Get-LocalUser -Name $existing -ErrorAction SilentlyContinue)) { throw 'the existing account was deleted' }
+            Invoke-Cli desk delete smoke-4
+            $global:LASTEXITCODE = 0
+        } finally {
+            Remove-LocalUser -Name $existing -ErrorAction SilentlyContinue
+        }
 
         $metrics = Invoke-RestMethod -Uri "$base/metrics"
         Write-Host "metrics: $($metrics | ConvertTo-Json -Compress -Depth 5)"

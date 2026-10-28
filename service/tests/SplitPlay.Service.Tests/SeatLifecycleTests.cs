@@ -32,7 +32,7 @@ public sealed class SeatLifecycleTests
         Assert.Equal(3389, rdp.Port);
         Assert.Equal("splitplay desk 1", rdp.User);
         Assert.Equal(".", rdp.Domain);
-        Assert.Equal(svc.Platform.Accounts["splitplay desk 1"], rdp.Password);
+        Assert.Equal(svc.Platform.Accounts["splitplay desk 1"].Password, rdp.Password);
         Assert.Equal(32, rdp.Password.Length);
         Assert.Equal((2560, 1440), (rdp.Width, rdp.Height));
         Assert.DoesNotContain(rdp.Password, rdp.ToString(), StringComparison.Ordinal);
@@ -168,19 +168,19 @@ public sealed class SeatLifecycleTests
         await svc.WaitForStateAsync("desk-1", DeskState.Ready);
         await svc.PostDeskActionAsync("desk-1", "stop");
         await svc.WaitForStateAsync("desk-1", DeskState.Stopped);
-        var first = svc.Platform.Accounts["splitplay-desk1"];
+        var first = svc.Platform.Accounts["splitplay-desk1"].Password;
 
         // Same secret: same password on the next start.
         await svc.PostDeskActionAsync("desk-1", "start");
         await svc.WaitForStateAsync("desk-1", DeskState.Ready);
         await svc.PostDeskActionAsync("desk-1", "stop");
         await svc.WaitForStateAsync("desk-1", DeskState.Stopped);
-        Assert.Equal(first, svc.Platform.Accounts["splitplay-desk1"]);
+        Assert.Equal(first, svc.Platform.Accounts["splitplay-desk1"].Password);
 
         File.Delete(Path.Combine(svc.DataRoot, "secrets", "desks", "desk-1.bin"));
         await svc.PostDeskActionAsync("desk-1", "start");
         await svc.WaitForStateAsync("desk-1", DeskState.Ready);
-        var second = svc.Platform.Accounts["splitplay-desk1"];
+        var second = svc.Platform.Accounts["splitplay-desk1"].Password;
         Assert.NotEqual(first, second);
         var lastWelcome = svc.Launcher.Received.Last(m => m.Role == Seat && m.Message is WelcomeMessage).Message;
         Assert.Equal(second, ((WelcomeMessage)lastWelcome).Rdp!.Password);
@@ -279,6 +279,47 @@ public sealed class SeatLifecycleTests
         Assert.Equal(1, ready.SessionId);
         Assert.Equal(0, svc.Launcher.LaunchesOf(Seat));
         Assert.Equal(1, svc.Launcher.Requests.Single().SessionId);
+    }
+
+    [Fact]
+    public async Task New_resolution_of_a_running_desk_resizes_the_session_through_the_seat()
+    {
+        await using var svc = await TestService.StartAsync();
+        await svc.CreateDeskAsync("desk-1", ""","profile":{"width":1920,"height":1080}""");
+        await svc.PostDeskActionAsync("desk-1", "start");
+        await svc.WaitForStateAsync("desk-1", DeskState.Ready);
+
+        var response = await svc.Client.PutAsync("/api/v1/desks/desk-1",
+            new StringContent("""{"profile":{"width":2560,"height":1440,"fps":120}}""", System.Text.Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!svc.Launcher.Received.Any(m => m.Role == Seat && m.Message is SetModeMessage { Width: 2560, Height: 1440 }))
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the seat never got set_mode 2560x1440");
+            await Task.Delay(20);
+        }
+
+        await Task.Delay(100);
+        Assert.False((await svc.GetDeskAsync("desk-1")).ResolutionPendingRestart);
+    }
+
+    [Fact]
+    public async Task New_resolution_without_a_seat_applies_after_restart()
+    {
+        await using var svc = await TestService.StartAsync(["--Supervisor:Seat=none", "--Supervisor:WorkerSession=console"]);
+        await svc.CreateDeskAsync("desk-1");
+        await svc.PostDeskActionAsync("desk-1", "start");
+        await svc.WaitForStateAsync("desk-1", DeskState.Ready);
+        var response = await svc.Client.PutAsync("/api/v1/desks/desk-1",
+            new StringContent("""{"profile":{"width":3840,"height":2160}}""", System.Text.Encoding.UTF8, "application/json"));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await svc.WaitForAsync("desk-1", d => d.ResolutionPendingRestart, what: "resolutionPendingRestart");
+
+        await svc.PostDeskActionAsync("desk-1", "stop");
+        await svc.WaitForStateAsync("desk-1", DeskState.Stopped);
+        await svc.PostDeskActionAsync("desk-1", "start");
+        var ready = await svc.WaitForStateAsync("desk-1", DeskState.Ready);
+        Assert.False(ready.ResolutionPendingRestart);
     }
 
     private static async Task<string> WaitForLogAsync(TestService svc, string text)

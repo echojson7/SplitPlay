@@ -53,6 +53,16 @@ public sealed class DeskConfig
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? User { get; set; }
 
+    /// <summary>
+    /// True when SplitPlay created the Windows account (it then owns its password: never expires, rotated when the
+    /// stored secret is lost, deletable with <c>deleteUser=true</c>). False for an existing account the owner picked:
+    /// SplitPlay only stores the password the owner typed and never changes that account. Set by the service when the
+    /// desk is created or its user changes; null (older configs) means "decide by the account's comment".
+    /// The password itself never appears in config.json (DPAPI-protected in <c>secrets\desks\&lt;id&gt;.bin</c>).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? UserManaged { get; set; }
+
     /// <summary>Base port; when omitted the service allocates one (see <see cref="Ports.BasePortAllocator"/>).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? BasePort { get; set; }

@@ -20,6 +20,8 @@ namespace SplitPlay.Core.Json;
 [JsonSerializable(typeof(ApiErrorResponse))]
 [JsonSerializable(typeof(DeskDto))]
 [JsonSerializable(typeof(List<DeskDto>))]
+[JsonSerializable(typeof(HostUserDto))]
+[JsonSerializable(typeof(List<HostUserDto>))]
 [JsonSerializable(typeof(AuthSessionDto))]
 [JsonSerializable(typeof(LoginRequest))]
 [JsonSerializable(typeof(LoginResponse))]

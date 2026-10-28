@@ -68,6 +68,15 @@ internal sealed class DeskRuntime
     /// <summary>Seat launches since the service started (a field for <see cref="Interlocked"/>).</summary>
     public int SeatAttempts;
 
+    /// <summary>True when a password for the desk user is stored (mirrors the secret file; updated by the supervisor).</summary>
+    public bool HasPassword { get; set; }
+
+    /// <summary>A non-fatal provisioning problem (e.g. the picked account's password can expire), shown as lastError.</summary>
+    public string? Warning { get; set; }
+
+    /// <summary>The profile's resolution changed while running and the seat could not resize the session.</summary>
+    public bool ResolutionPendingRestart { get; set; }
+
     public DeskDto ToDto()
     {
         lock (Gate)
@@ -77,6 +86,9 @@ internal sealed class DeskRuntime
                 Id = Config.Id,
                 Name = Config.Name,
                 User = Config.User,
+                UserManaged = Config.UserManaged,
+                HasPassword = HasPassword,
+                ResolutionPendingRestart = ResolutionPendingRestart,
                 State = Machine.State,
                 SessionId = SessionId,
                 BasePort = Config.BasePort,
@@ -86,7 +98,7 @@ internal sealed class DeskRuntime
                 DisableBluetoothUserService = Config.DisableBluetoothUserService,
                 WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,
-                LastError = Machine.LastError,
+                LastError = Machine.LastError ?? Warning,
             };
         }
     }

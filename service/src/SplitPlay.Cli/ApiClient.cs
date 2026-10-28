@@ -81,8 +81,23 @@ internal sealed class ApiClient : IDisposable
 
     public Task<DeskDto> GetDeskAsync(string id) => GetAsync($"desks/{Uri.EscapeDataString(id)}", SplitPlayJsonContext.Default.DeskDto);
 
-    public Task<DeskDto> CreateDeskAsync(DeskConfig desk) =>
-        SendAsync(HttpMethod.Post, "desks", Json(desk, SplitPlayJsonContext.Default.DeskConfig), SplitPlayJsonContext.Default.DeskDto);
+    public Task<DeskDto> CreateDeskAsync(DeskConfig desk, string? password = null) =>
+        SendAsync(HttpMethod.Post, "desks", DeskBody(desk, password), SplitPlayJsonContext.Default.DeskDto);
+
+    public Task<DeskDto> ReplaceDeskAsync(DeskConfig desk, string? password = null) =>
+        SendAsync(HttpMethod.Put, $"desks/{Uri.EscapeDataString(desk.Id)}", DeskBody(desk, password), SplitPlayJsonContext.Default.DeskDto);
+
+    /// <summary>The desk object plus the optional <c>password</c> member the desk endpoints accept.</summary>
+    private static StringContent DeskBody(DeskConfig desk, string? password)
+    {
+        var node = System.Text.Json.Nodes.JsonNode.Parse(JsonSerializer.Serialize(desk, SplitPlayJsonContext.Default.DeskConfig))!.AsObject();
+        if (password is not null)
+        {
+            node["password"] = password;
+        }
+
+        return new StringContent(node.ToJsonString(), System.Text.Encoding.UTF8, "application/json");
+    }
 
     public Task<DeskDto> StartDeskAsync(string id) =>
         SendAsync(HttpMethod.Post, $"desks/{Uri.EscapeDataString(id)}/start", null, SplitPlayJsonContext.Default.DeskDto);

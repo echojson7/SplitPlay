@@ -52,6 +52,8 @@ public sealed class DeskSecretStore(string dataRoot, ISecretProtector protector)
         File.Move(temp, path, overwrite: true);
     }
 
+    public bool Exists(string deskId) => File.Exists(PathOf(deskId));
+
     public bool Delete(string deskId)
     {
         var path = PathOf(deskId);

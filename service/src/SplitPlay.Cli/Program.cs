@@ -21,6 +21,11 @@ public static class Program
         desk show <id> [--json]
         desk create <id> [--name N] [--user U] [--base-port P] [--autostart] [--gpu auto|0x…]
                          [--fps N] [--width N] [--height N] [--bitrate-kbps N] [--codec h264|hevc|av1]
+                         [--password-stdin | --ask-password]
+                                    --user may name an existing local account; its Windows password is then
+                                    required (read from stdin or a hidden prompt, never an argument)
+        desk set-password <id> [--password-stdin | --ask-password]
+                                    store (after verifying) the Windows password of the desk's user
         desk start <id> [--wait] [--timeout S]
         desk stop <id> [--wait] [--timeout S]
         desk delete <id> [--delete-user]    --delete-user also removes the desk's Windows account
@@ -41,7 +46,7 @@ public static class Program
         Exit codes: 0 ok, 1 error, 2 usage, 3 service unreachable, 4 timeout.
         """;
 
-    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "wait", "autostart", "start", "help", "skip-termwrap", "delete-user" };
+    private static readonly HashSet<string> Flags = new(StringComparer.Ordinal) { "json", "wait", "autostart", "start", "help", "skip-termwrap", "delete-user", "password-stdin", "ask-password" };
 
     public static async Task<int> Main(string[] argv)
     {

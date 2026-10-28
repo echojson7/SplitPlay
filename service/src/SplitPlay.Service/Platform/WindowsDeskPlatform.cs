@@ -6,6 +6,7 @@ using System.Runtime.Versioning;
 using System.Security.Principal;
 using Microsoft.Extensions.Options;
 using Microsoft.Win32;
+using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
 using SplitPlay.Core.Host;
 using SplitPlay.Core.Platform;
@@ -49,10 +50,16 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
     {
         ArgumentNullException.ThrowIfNull(desk);
         var user = desk.User ?? throw new DeskProvisioningException("the desk has no Windows user configured");
-        string password;
+        if (ConsoleUserName() is { } console && string.Equals(console, user, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new DeskProvisioningException(
+                $"'{user}' is signed in at the console; a desk with that user would take over the console session. Pick another user");
+        }
+
+        DeskCredentials credentials;
         try
         {
-            password = EnsureAccount(desk.Id, user);
+            credentials = EnsureAccount(desk, user);
         }
         catch (Win32Exception ex)
         {
@@ -64,30 +71,64 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         }
 
         CheckHost();
-        return new DeskCredentials(user, ".", password);
+        return credentials;
     }
 
-    private string EnsureAccount(string deskId, string user)
+    private DeskCredentials EnsureAccount(DeskConfig desk, string user)
     {
+        var deskId = desk.Id;
         var account = LocalAccounts.Get(user);
         var password = _secrets.Read(deskId);
+        var managed = desk.UserManaged ?? account?.CreatedBySplitPlay ?? true;
         if (account is null)
         {
-            password = PasswordGenerator.Generate();
+            if (!managed)
+            {
+                throw new DeskProvisioningException($"Windows account '{user}' does not exist any more; pick another user for this desk");
+            }
+
+            // The owner may have typed the password for the new account; otherwise SplitPlay picks one.
+            var generated = password is null;
+            password ??= PasswordGenerator.Generate();
             LocalAccounts.Create(user, password, $"{LocalAccounts.CommentPrefix} (desk {deskId})");
-            _secrets.Write(deskId, password);
+            if (generated)
+            {
+                _secrets.Write(deskId, password);
+            }
+
             _logger.LogInformation("Created Windows account {User} for desk {Desk}", user, deskId);
             account = LocalAccounts.Get(user) ?? throw new DeskProvisioningException($"account '{user}' vanished right after it was created");
         }
-        else if (password is null || !LocalAccounts.PasswordWorks(user, password))
+        else if (!managed || !account.CreatedBySplitPlay)
         {
-            if (!account.CreatedBySplitPlay)
+            // Someone else's account: use the password the owner typed, never change anything but RDP access.
+            if (password is null)
             {
-                throw new DeskProvisioningException(
-                    $"Windows account '{user}' already exists and was not created by SplitPlay; SplitPlay will not reset its password. " +
-                    "Choose another user for this desk or delete that account");
+                throw new DeskProvisioningException($"password required for {user}");
             }
 
+            if (!LocalAccounts.PasswordWorks(user, password))
+            {
+                throw new DeskProvisioningException($"wrong password for {user}: the stored password no longer works; enter the current password in the desk settings");
+            }
+
+            if (account.Disabled)
+            {
+                throw new DeskProvisioningException($"Windows account '{user}' is disabled");
+            }
+
+            LocalAccounts.AddToGroup(LocalAccounts.SidOf(user), LocalAccounts.RemoteDesktopUsersSid);
+            if (!account.PasswordNeverExpires)
+            {
+                var warning = $"the password of {user} can expire; when it does, the desk stops logging on until you enter the new password";
+                _logger.LogWarning("Desk {Desk}: {Warning}", deskId, warning);
+                return new DeskCredentials(user, ".", password) { Warning = warning };
+            }
+
+            return new DeskCredentials(user, ".", password);
+        }
+        else if (password is null || !LocalAccounts.PasswordWorks(user, password))
+        {
             password = PasswordGenerator.Generate();
             LocalAccounts.SetPassword(user, password);
             _secrets.Write(deskId, password);
@@ -98,7 +139,7 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         var sid = LocalAccounts.SidOf(user);
         LocalAccounts.AddToGroup(sid, LocalAccounts.UsersSid);
         LocalAccounts.AddToGroup(sid, LocalAccounts.RemoteDesktopUsersSid);
-        return password!;
+        return new DeskCredentials(user, ".", password);
     }
 
     private void CheckHost()
@@ -137,21 +178,16 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
     public void DeleteDesk(DeskConfig desk, bool deleteUser)
     {
         ArgumentNullException.ThrowIfNull(desk);
+        var account = deleteUser && desk.User is not null ? LocalAccounts.Get(desk.User) : null;
+        if (account is not null && (desk.UserManaged == false || !account.CreatedBySplitPlay))
+        {
+            throw new DeskUserNotManagedException($"Windows account '{desk.User}' was not created by SplitPlay; it is never deleted by SplitPlay");
+        }
+
         _secrets.Delete(desk.Id);
-        if (!deleteUser || desk.User is null)
+        if (account is null || desk.User is null)
         {
             return;
-        }
-
-        var account = LocalAccounts.Get(desk.User);
-        if (account is null)
-        {
-            return;
-        }
-
-        if (!account.CreatedBySplitPlay)
-        {
-            throw new DeskProvisioningException($"Windows account '{desk.User}' was not created by SplitPlay; delete it yourself if you want it gone");
         }
 
         SecurityIdentifier? sid = null;
@@ -232,8 +268,9 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
     public bool OnSessionLogon(DeskConfig desk, int sessionId, string deskDirectory)
     {
         ArgumentNullException.ThrowIfNull(desk);
-        if (desk.User is null)
+        if (desk.User is null || desk.UserManaged == false)
         {
+            // An account the owner picked keeps its own keyboard layouts.
             return false;
         }
 
@@ -328,6 +365,47 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
     {
         var id = WTSGetActiveConsoleSessionId();
         return id == 0xFFFFFFFF ? null : (int)id;
+    }
+
+    public string? ConsoleUserName()
+    {
+        if (ConsoleSessionId() is not int session)
+        {
+            return null;
+        }
+
+        var user = Wts.QueryString(session, Wts.WTSUserName);
+        var domain = Wts.QueryString(session, Wts.WTSDomainName);
+        if (string.IsNullOrEmpty(user))
+        {
+            return null;
+        }
+
+        // Only a local account can be a desk user.
+        return string.IsNullOrEmpty(domain) || string.Equals(domain, Environment.MachineName, StringComparison.OrdinalIgnoreCase) ? user : null;
+    }
+
+    public DeskAccount? FindAccount(string user)
+    {
+        var account = LocalAccounts.Get(user);
+        return account is null ? null : new DeskAccount(account.Name, account.CreatedBySplitPlay);
+    }
+
+    public bool VerifyPassword(string user, string password) => LocalAccounts.PasswordIsCorrect(user, password);
+
+    public void StorePassword(string deskId, string password) => _secrets.Write(deskId, password);
+
+    public void ForgetPassword(string deskId) => _secrets.Delete(deskId);
+
+    public bool HasPassword(string deskId) => _secrets.Exists(deskId);
+
+    public IReadOnlyList<HostUserDto> ListUsers()
+    {
+        var console = ConsoleUserName();
+        return LocalAccounts.List()
+            .Select(a => new HostUserDto(a.Name, string.IsNullOrWhiteSpace(a.FullName) ? null : a.FullName, a.IsAdmin,
+                string.Equals(a.Name, console, StringComparison.OrdinalIgnoreCase), a.CreatedBySplitPlay))
+            .ToList();
     }
 
     [DllImport("kernel32.dll")]

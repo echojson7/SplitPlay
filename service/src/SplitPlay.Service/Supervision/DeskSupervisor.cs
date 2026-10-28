@@ -28,6 +28,11 @@ namespace SplitPlay.Service.Supervision;
 /// </remarks>
 public sealed class DeskSupervisor : IHostedService
 {
+    /// <summary>Desk session size when the profile has none.</summary>
+    private const int DefaultWidth = 1920;
+
+    private const int DefaultHeight = 1080;
+
     private readonly ConcurrentDictionary<string, DeskRuntime> _desks = new(StringComparer.Ordinal);
     private readonly object _registryGate = new();
     private readonly ConfigService _config;
@@ -156,7 +161,11 @@ public sealed class DeskSupervisor : IHostedService
 
     // ------------------------------------------------------------------ CRUD
 
-    public DeskDto Create(DeskConfig desk)
+    /// <summary>
+    /// Creates a desk. <paramref name="password"/> is the Windows password of <c>desk.user</c>: verified when the
+    /// account exists, used for the new account otherwise; stored DPAPI-protected, never in config.json.
+    /// </summary>
+    public DeskDto Create(DeskConfig desk, string? password = null)
     {
         ArgumentNullException.ThrowIfNull(desk);
         if (!ConfigValidator.IsValidDeskId(desk.Id))
@@ -171,11 +180,23 @@ public sealed class DeskSupervisor : IHostedService
                 throw ApiException.Conflict(ApiErrorCodes.AlreadyExists, $"desk '{desk.Id}' already exists");
             }
 
+            desk.User ??= ConfigStore.DefaultUserName(desk.Id, _config.Snapshot().Desks.Select(d => d.User));
+            desk.UserManaged = CheckUser(desk.User, password);
             var saved = _config.Update(cfg =>
             {
                 cfg.Desks.Add(desk);
                 return desk;
             });
+
+            if (password is not null)
+            {
+                _platform.StorePassword(saved.Id, password);
+            }
+            else
+            {
+                // A secret left behind by an earlier desk with the same id belongs to another account.
+                _platform.ForgetPassword(saved.Id);
+            }
 
             var rt = AddRuntime(saved);
             _logger.LogInformation("Created desk {Desk} (base port {Port}, user {User})", saved.Id, saved.BasePort, saved.User);
@@ -195,7 +216,8 @@ public sealed class DeskSupervisor : IHostedService
         }
     }
 
-    public DeskDto Replace(string id, DeskConfig desk)
+    /// <summary>Replaces a desk's settings; <paramref name="password"/> as in <see cref="Create"/>.</summary>
+    public DeskDto Replace(string id, DeskConfig desk, string? password = null)
     {
         ArgumentNullException.ThrowIfNull(desk);
         lock (_registryGate)
@@ -219,6 +241,8 @@ public sealed class DeskSupervisor : IHostedService
             desk.User ??= current.User;
             desk.Name ??= current.Name;
             desk.Profile ??= new ProfileConfig();
+            var userChanged = !string.Equals(desk.User, current.User, StringComparison.OrdinalIgnoreCase);
+            desk.UserManaged = userChanged || password is not null ? CheckUser(desk.User!, password) : current.UserManaged;
 
             if (!idle && (desk.Name != current.Name || !string.Equals(desk.User, current.User, StringComparison.OrdinalIgnoreCase)
                           || desk.BasePort != current.BasePort || desk.Autostart != current.Autostart || desk.Gpu != current.Gpu
@@ -235,16 +259,32 @@ public sealed class DeskSupervisor : IHostedService
                 return desk;
             });
 
+            if (password is not null)
+            {
+                _platform.StorePassword(id, password);
+            }
+            else if (userChanged)
+            {
+                _platform.ForgetPassword(id);
+            }
+
             IpcConnection? connection;
             lock (rt.Gate)
             {
                 rt.Config = saved;
+                rt.HasPassword = _platform.HasPassword(id);
                 connection = rt.Connection;
             }
 
             if (connection is not null)
             {
                 _ = PushProfileAsync(id, connection, saved.Profile);
+            }
+
+            // A new resolution for a running desk: resize the RDP session if the seat can, else it applies at the next start.
+            if (!idle && (saved.Profile.Width != current.Profile.Width || saved.Profile.Height != current.Profile.Height))
+            {
+                _ = ApplyResolutionAsync(rt, saved.Profile.Width ?? DefaultWidth, saved.Profile.Height ?? DefaultHeight);
             }
 
             Publish(rt);
@@ -275,9 +315,9 @@ public sealed class DeskSupervisor : IHostedService
             {
                 _platform.DeleteDesk(config, deleteUser);
             }
-            catch (DeskProvisioningException ex)
+            catch (DeskUserNotManagedException ex)
             {
-                throw new ApiException(StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden, ex.Message);
+                throw ApiException.Conflict(ApiErrorCodes.UserNotManaged, ex.Message);
             }
             catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or IOException or UnauthorizedAccessException)
             {
@@ -423,10 +463,42 @@ public sealed class DeskSupervisor : IHostedService
     private DeskRuntime Find(string id) =>
         _desks.TryGetValue(id, out var rt) ? rt : throw ApiException.NotFound($"desk '{id}' not found");
 
+    /// <summary>
+    /// Checks a desk user before it is saved: never the console user (409), and a password given for an existing
+    /// account must be right (400). Returns <see cref="DeskConfig.UserManaged"/>: true when SplitPlay creates the
+    /// account (or created it earlier), false for an existing account the owner picked.
+    /// </summary>
+    private bool CheckUser(string user, string? password)
+    {
+        if (!ConfigValidator.IsValidUserName(user))
+        {
+            throw ApiException.Validation($"desk.user: must be a valid local Windows account name (1-{ConfigValidator.MaxUserNameLength} characters)");
+        }
+
+        if (_platform.ConsoleUserName() is { } console && string.Equals(console, user, StringComparison.OrdinalIgnoreCase))
+        {
+            throw ApiException.Conflict(ApiErrorCodes.ConsoleUser,
+                $"'{user}' is signed in at this PC's console; a desk with that user would take over the console session. Pick another user");
+        }
+
+        var account = _platform.FindAccount(user);
+        if (account is null)
+        {
+            return true;
+        }
+
+        if (password is not null && !_platform.VerifyPassword(user, password))
+        {
+            throw ApiException.Validation($"wrong password for {user}");
+        }
+
+        return account.CreatedBySplitPlay;
+    }
+
     private DeskRuntime AddRuntime(DeskConfig desk)
     {
         var machine = new DeskStateMachine(_time, _options.Value.ToRecoveryPolicy());
-        var rt = new DeskRuntime(desk, machine);
+        var rt = new DeskRuntime(desk, machine) { HasPassword = _platform.HasPassword(desk.Id) };
         machine.Transitioned += t => OnTransition(rt, t);
         _desks[desk.Id] = rt;
         return rt;
@@ -516,6 +588,8 @@ public sealed class DeskSupervisor : IHostedService
             {
                 config = rt.Config;
                 rt.RelogonDone = false;
+                rt.Warning = null;
+                rt.ResolutionPendingRestart = false;
             }
 
             Directory.CreateDirectory(_paths.DeskDirectory(rt.Id));
@@ -539,6 +613,12 @@ public sealed class DeskSupervisor : IHostedService
                 _logger.LogError(ex, "Provisioning desk {Desk} failed", rt.Id);
                 Fire(rt, DeskTrigger.Fail, $"provisioning failed: {ex.Message}");
                 return;
+            }
+
+            lock (rt.Gate)
+            {
+                rt.HasPassword = true;
+                rt.Warning = credentials.Warning;
             }
 
             if (!Fire(rt, DeskTrigger.Provisioned))
@@ -931,8 +1011,8 @@ public sealed class DeskSupervisor : IHostedService
                     User = credentials.User,
                     Domain = credentials.Domain,
                     Password = credentials.Password,
-                    Width = profile.Width ?? 1920,
-                    Height = profile.Height ?? 1080,
+                    Width = profile.Width ?? DefaultWidth,
+                    Height = profile.Height ?? DefaultHeight,
                 },
             }, stop).ConfigureAwait(false);
 
@@ -1203,12 +1283,24 @@ public sealed class DeskSupervisor : IHostedService
     }
 
     /// <summary>A Moonlight client asked for a mode: resize the session through the seat (<c>set_mode</c>).</summary>
-    private async Task ForwardModeAsync(DeskRuntime rt, int? width, int? height, int? fps)
+    private async Task ApplyResolutionAsync(DeskRuntime rt, int width, int height)
+    {
+        var applied = await ForwardModeAsync(rt, width, height, null).ConfigureAwait(false);
+        lock (rt.Gate)
+        {
+            rt.ResolutionPendingRestart = !applied;
+        }
+
+        Publish(rt);
+    }
+
+    /// <summary>Asks the seat to resize the desk session; false if there is no seat or it could not.</summary>
+    private async Task<bool> ForwardModeAsync(DeskRuntime rt, int? width, int? height, int? fps)
     {
         if (width is not (> 0) || height is not (> 0))
         {
             _logger.LogWarning("Desk {Desk}: mode_requested without a valid width and height", rt.Id);
-            return;
+            return false;
         }
 
         IpcConnection? seat;
@@ -1219,9 +1311,9 @@ public sealed class DeskSupervisor : IHostedService
 
         if (seat is null)
         {
-            _logger.LogInformation("Desk {Desk}: Moonlight asked for {Width}x{Height}@{Fps} but there is no seat to resize the session",
+            _logger.LogInformation("Desk {Desk}: {Width}x{Height}@{Fps} requested but there is no seat to resize the session",
                 rt.Id, width, height, fps);
-            return;
+            return false;
         }
 
         try
@@ -1230,17 +1322,18 @@ public sealed class DeskSupervisor : IHostedService
                 TimeSpan.FromMilliseconds(_options.Value.RequestTimeoutMs)).ConfigureAwait(false);
             if (result.Ok)
             {
-                _logger.LogInformation("Desk {Desk}: session resized to {Width}x{Height} for Moonlight ({Fps} fps)", rt.Id, width, height, fps);
+                _logger.LogInformation("Desk {Desk}: session resized to {Width}x{Height} ({Fps} fps)", rt.Id, width, height, fps);
+                return true;
             }
-            else
-            {
-                _logger.LogInformation("Desk {Desk}: the seat could not resize to {Width}x{Height}: {Code} {Message}",
-                    rt.Id, width, height, result.Error?.Code, result.Error?.Message);
-            }
+
+            _logger.LogInformation("Desk {Desk}: the seat could not resize to {Width}x{Height}: {Code} {Message}",
+                rt.Id, width, height, result.Error?.Code, result.Error?.Message);
+            return false;
         }
         catch (Exception ex) when (ex is TimeoutException or IOException or ObjectDisposedException or EndOfStreamException or InvalidOperationException)
         {
             _logger.LogWarning("Desk {Desk}: set_mode failed: {Message}", rt.Id, ex.Message);
+            return false;
         }
     }
 

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
 
 namespace SplitPlay.Service.Platform;
@@ -6,8 +7,17 @@ namespace SplitPlay.Service.Platform;
 /// <summary>The RDP credentials of a desk. <see cref="ToString"/> never shows the password.</summary>
 public sealed record DeskCredentials(string User, string Domain, string Password)
 {
+    /// <summary>A non-fatal problem worth showing (e.g. the password of an account SplitPlay did not create can expire).</summary>
+    public string? Warning { get; init; }
+
     public override string ToString() => $"{Domain}\\{User} (password *****)";
 }
+
+/// <summary>An existing local account (<see cref="IDeskPlatform.FindAccount"/>).</summary>
+public sealed record DeskAccount(string Name, bool CreatedBySplitPlay);
+
+/// <summary><c>deleteUser=true</c> for an account SplitPlay did not create (API: 409).</summary>
+public sealed class DeskUserNotManagedException(string message) : Exception(message);
 
 /// <summary>Provisioning failed in a way retrying will not fix (the desk goes to Faulted with this message).</summary>
 public sealed class DeskProvisioningException(string message, Exception? inner = null) : Exception(message, inner);
@@ -20,8 +30,11 @@ public sealed class DeskProvisioningException(string message, Exception? inner =
 public interface IDeskPlatform
 {
     /// <summary>
-    /// Ensures the desk's local account exists (random password, never expires, in Users and Remote Desktop Users),
-    /// that its DPAPI-protected password is stored, and that the RDP host is prepared.
+    /// Ensures the desk's account and stored password are usable and the RDP host is prepared.
+    /// Managed accounts (<see cref="DeskConfig.UserManaged"/>) are created when missing (stored or random password,
+    /// never expires, in Users and Remote Desktop Users) and get a new password when the stored one is missing or stale.
+    /// An account SplitPlay did not create is never changed except for being added to Remote Desktop Users: its stored
+    /// password must work ("password required for X" otherwise).
     /// </summary>
     /// <exception cref="DeskProvisioningException">Account, secret or host problem; the message goes to <c>lastError</c>.</exception>
     DeskCredentials Provision(DeskConfig desk);
@@ -52,4 +65,25 @@ public interface IDeskPlatform
 
     /// <summary>The active console session id, or null if there is none.</summary>
     int? ConsoleSessionId();
+
+    /// <summary>The local account signed in at the console, or null (nobody, or a domain account).</summary>
+    string? ConsoleUserName();
+
+    /// <summary>The local account named <paramref name="user"/>, or null if it does not exist.</summary>
+    DeskAccount? FindAccount(string user);
+
+    /// <summary>Checks a password with a network logon; false only for a wrong user name or password.</summary>
+    bool VerifyPassword(string user, string password);
+
+    /// <summary>Stores the desk's password (DPAPI, LocalMachine).</summary>
+    void StorePassword(string deskId, string password);
+
+    /// <summary>Removes the desk's stored password.</summary>
+    void ForgetPassword(string deskId);
+
+    /// <summary>True if a password is stored for the desk.</summary>
+    bool HasPassword(string deskId);
+
+    /// <summary>Enabled local accounts a desk can use (built-in accounts left out).</summary>
+    IReadOnlyList<HostUserDto> ListUsers();
 }

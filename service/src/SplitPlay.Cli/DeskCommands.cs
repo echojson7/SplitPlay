@@ -59,9 +59,33 @@ internal static class DeskCommands
                         Codec = args.Option("codec"),
                     },
                 };
+                var password = ReadPassword(args, desk.User, required: false);
                 args.EnsureNoUnknownOptions();
                 using var client = api();
-                Print(await client.CreateDeskAsync(desk).ConfigureAwait(false), json);
+                Print(await client.CreateDeskAsync(desk, password).ConfigureAwait(false), json);
+                return 0;
+            }
+
+            case "set-password":
+            {
+                var id = args.Positional(0, "id");
+                using var client = api();
+                var current = await client.GetDeskAsync(id).ConfigureAwait(false);
+                var password = ReadPassword(args, current.User, required: true);
+                args.EnsureNoUnknownOptions();
+                var desk = new DeskConfig
+                {
+                    Id = current.Id,
+                    Name = current.Name,
+                    User = current.User,
+                    BasePort = current.BasePort,
+                    Autostart = current.Autostart,
+                    Gpu = current.Gpu,
+                    Profile = current.Profile,
+                    DisableBluetoothUserService = current.DisableBluetoothUserService,
+                    WorkerSettings = current.WorkerSettings,
+                };
+                Print(await client.ReplaceDeskAsync(desk, password).ConfigureAwait(false), json);
                 return 0;
             }
 
@@ -141,6 +165,50 @@ internal static class DeskCommands
             default:
                 throw new UsageException($"unknown config command '{verb}'");
         }
+    }
+
+    /// <summary>
+    /// The desk user's Windows password: one line from stdin with <c>--password-stdin</c>, a hidden prompt with
+    /// <c>--ask-password</c> (or when <paramref name="required"/> and stdin is a console), else null. Never an
+    /// argument, so it does not show up in process listings or shell history.
+    /// </summary>
+    private static string? ReadPassword(Args args, string? user, bool required)
+    {
+        if (args.Flag("password-stdin"))
+        {
+            return Console.In.ReadLine()?.TrimEnd('\r', '\n') is { Length: > 0 } line ? line : null;
+        }
+
+        if (!args.Flag("ask-password") && !(required && !Console.IsInputRedirected))
+        {
+            return required ? throw new UsageException("give the password with --password-stdin or --ask-password") : null;
+        }
+
+        Console.Error.Write($"Windows password for {user ?? "the desk user"}: ");
+        var buffer = new System.Text.StringBuilder();
+        while (true)
+        {
+            var key = Console.ReadKey(intercept: true);
+            if (key.Key == ConsoleKey.Enter)
+            {
+                break;
+            }
+
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (buffer.Length > 0)
+                {
+                    buffer.Length--;
+                }
+            }
+            else if (!char.IsControl(key.KeyChar))
+            {
+                buffer.Append(key.KeyChar);
+            }
+        }
+
+        Console.Error.WriteLine();
+        return buffer.Length > 0 ? buffer.ToString() : null;
     }
 
     private static bool IsStarted(DeskState s) => s is DeskState.Ready or DeskState.Streaming or DeskState.Faulted;

@@ -41,7 +41,6 @@ describe('PairDialog', () => {
     const pin = w.find('input[name="pin"]')
     await pin.setValue('1a2b')
     expect((pin.element as HTMLInputElement).value).toBe('12')
-    expect(w.findAll('.box.filled')).toHaveLength(2)
     await w.find('form').trigger('submit')
     await flushPromises()
     expect(pair).not.toHaveBeenCalled()

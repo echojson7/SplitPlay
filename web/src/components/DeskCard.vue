@@ -1,279 +1,194 @@
 <!-- SPDX-License-Identifier: MIT -->
-<!-- Library card of one desk: cover, status, picture settings and the Play / Stop button. -->
+<!-- One desk in the list: name and picture settings, status, Start / Stop and a "more" menu (PIN, settings). -->
 <script setup lang="ts">
-import { computed } from 'vue'
-import { RouterLink } from 'vue-router'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { RouterLink, useRouter } from 'vue-router'
 import type { Desk } from '../api/types'
 import { canStart } from '../composables'
-import { coverStyle, deskProgress, stateTone } from '../desk'
+import { deskProgress, stateTone } from '../desk'
 import { t } from '../i18n'
 import AppIcon from './AppIcon.vue'
-import CoverArt from './CoverArt.vue'
 import StateBadge from './StateBadge.vue'
 
 const props = withDefaults(defineProps<{ desk: Desk; busy?: boolean }>(), { busy: false })
 const emit = defineEmits<{ start: []; stop: []; pair: [] }>()
+const router = useRouter()
 
 const tone = computed(() => stateTone(props.desk.state))
 const progress = computed(() => deskProgress(props.desk.state))
 const pairable = computed(() => props.desk.state === 'Ready' || props.desk.state === 'Streaming')
 const link = computed(() => `/desks/${encodeURIComponent(props.desk.id)}`)
+
+// ---- "more" menu
+const menuOpen = ref(false)
+const menuWrap = ref<HTMLElement | null>(null)
+
+function onOutside(e: Event): void {
+  if (!menuWrap.value?.contains(e.target as Node)) menuOpen.value = false
+}
+function onKey(e: KeyboardEvent): void {
+  if (e.key === 'Escape') menuOpen.value = false
+}
+watch(menuOpen, (open) => {
+  if (open) {
+    document.addEventListener('pointerdown', onOutside)
+    document.addEventListener('keydown', onKey)
+  } else {
+    document.removeEventListener('pointerdown', onOutside)
+    document.removeEventListener('keydown', onKey)
+  }
+})
+onUnmounted(() => (menuOpen.value = false))
+
+function pair(): void {
+  menuOpen.value = false
+  emit('pair')
+}
+
+/** The whole row opens the desk; its own controls do not. */
+function openRow(e: MouseEvent): void {
+  if ((e.target as Element).closest('button, a, [role="menu"]')) return
+  void router.push(link.value)
+}
 </script>
 
 <template>
-  <article :class="['card', tone]" :style="coverStyle(desk.id)" :data-desk="desk.id">
-    <RouterLink :to="link" class="cover" :aria-label="desk.name">
-      <CoverArt />
-      <span class="cover-name">{{ desk.name }}</span>
-    </RouterLink>
+  <article :class="['srow', 'clickable', 'desk', tone]" :data-desk="desk.id" @click="openRow">
+    <AppIcon class="row-icon" name="monitor" :size="16" />
+    <div class="text">
+      <RouterLink :to="link" class="title name">{{ desk.name }}</RouterLink>
+      <span class="desc">{{ desk.user }} · {{ desk.profile.width }}×{{ desk.profile.height }} · {{ desk.profile.fps }} FPS</span>
+      <span v-if="desk.state === 'Faulted' && desk.lastError" class="desc" :title="desk.lastError">{{ desk.lastError }}</span>
+    </div>
 
-    <div class="info">
-      <div class="line">
-        <StateBadge :state="desk.state" />
-        <span class="spec">{{ desk.profile.width }}×{{ desk.profile.height }} · {{ desk.profile.fps }} FPS</span>
+    <div class="ctl">
+      <div
+        v-if="progress"
+        class="progress"
+        role="progressbar"
+        :aria-valuenow="Math.round(progress.value * 100)"
+        aria-valuemin="0"
+        aria-valuemax="100"
+      >
+        <span class="ptext">{{ t(`state.${progress.state}`) }}</span>
+        <div class="pbar"><span :style="{ width: `${progress.value * 100}%` }" /></div>
       </div>
-      <div class="line sub">
-        <span class="who" :title="t('desk.user')"><AppIcon name="user" :size="14" />{{ desk.user }}</span>
-        <span v-if="desk.metrics.clients > 0" class="who" :title="t('desk.devices')">
-          <AppIcon name="laptop" :size="14" />{{ desk.metrics.clients }}
-        </span>
-      </div>
-      <p v-if="desk.state === 'Faulted' && desk.lastError" class="fault" :title="desk.lastError">{{ desk.lastError }}</p>
+      <StateBadge v-else :state="desk.state" class="state" />
 
-      <div class="actions">
-        <div v-if="progress" class="progress" role="progressbar" :aria-valuenow="Math.round(progress.value * 100)" aria-valuemin="0" aria-valuemax="100">
-          <div class="progress-top">
-            <span>{{ t(`state.${progress.state}`) }}</span>
-            <span class="pct">{{ Math.round(progress.value * 100) }}%</span>
-          </div>
-          <div class="bar"><span :style="{ width: `${progress.value * 100}%` }" /></div>
+      <button v-if="!progress && canStart(desk)" type="button" class="btn-accent main" data-action="start" :disabled="busy" @click="emit('start')">
+        {{ t('desk.start') }}
+      </button>
+      <button
+        v-else-if="!progress || desk.state !== 'Stopping'"
+        type="button"
+        class="main"
+        data-action="stop"
+        :disabled="busy"
+        @click="emit('stop')"
+      >
+        {{ t('desk.stop') }}
+      </button>
+
+      <div ref="menuWrap" class="menu-wrap">
+        <button
+          type="button"
+          class="btn-icon"
+          data-action="more"
+          aria-haspopup="menu"
+          :aria-expanded="menuOpen"
+          :title="t('common.more')"
+          :aria-label="t('common.more')"
+          @click="menuOpen = !menuOpen"
+        >
+          <AppIcon name="more" :size="16" />
+        </button>
+        <div v-show="menuOpen" class="menu" role="menu">
+          <button type="button" role="menuitem" data-action="pair" :disabled="!pairable" @click="pair">
+            <AppIcon name="link" :size="16" />{{ t('desk.pinTitle') }}
+          </button>
+          <RouterLink :to="link" role="menuitem" class="btn" data-action="settings" @click="menuOpen = false">
+            <AppIcon name="gear" :size="16" />{{ t('nav.settings') }}
+          </RouterLink>
         </div>
-        <button
-          v-else-if="canStart(desk)"
-          type="button"
-          class="btn-play main"
-          data-action="start"
-          :disabled="busy"
-          @click="emit('start')"
-        >
-          <AppIcon name="play" :size="16" />{{ t('desk.start') }}
-        </button>
-        <button v-else type="button" class="btn-stop main" data-action="stop" :disabled="busy" @click="emit('stop')">
-          <AppIcon name="stop" :size="14" />{{ t('desk.stop') }}
-        </button>
-
-        <button
-          v-if="progress && desk.state !== 'Stopping'"
-          type="button"
-          class="btn-icon"
-          data-action="stop"
-          :title="t('desk.stop')"
-          :aria-label="t('desk.stop')"
-          :disabled="busy"
-          @click="emit('stop')"
-        >
-          <AppIcon name="close" :size="16" />
-        </button>
-        <button
-          v-else
-          type="button"
-          class="btn-icon"
-          data-action="pair"
-          :title="pairable ? t('desk.pinTitle') : t('desk.pairNeedsRunning')"
-          :aria-label="t('desk.pinTitle')"
-          :disabled="!pairable"
-          @click="emit('pair')"
-        >
-          {{ t('desk.pin') }}
-        </button>
-        <RouterLink :to="link" class="btn btn-icon" data-action="settings" :title="t('desk.settings')" :aria-label="t('desk.settings')">
-          <AppIcon name="gear" :size="18" />
-        </RouterLink>
       </div>
     </div>
   </article>
 </template>
 
 <style scoped>
-.card {
-  display: flex;
-  flex-direction: column;
-  border-radius: 4px;
-  overflow: hidden;
-  background: linear-gradient(180deg, #24384d 0%, #1d2d3e 100%);
-  box-shadow: 0 4px 14px rgb(0 0 0 / 30%);
-  transition:
-    transform 0.18s ease,
-    box-shadow 0.18s ease;
-  min-width: 0;
-}
-
-.card:hover {
-  transform: translateY(-3px);
-  box-shadow:
-    0 0 0 1px rgb(102 192 244 / 35%),
-    0 12px 30px rgb(0 0 0 / 45%);
-}
-
-.cover {
-  position: relative;
-  display: block;
-  height: 148px;
-  overflow: hidden;
-  color: #fff;
-  transition: filter 0.25s ease;
-}
-
-.idle .cover {
-  filter: saturate(0.45) brightness(0.82);
-}
-
-.card:hover .cover {
-  filter: none;
-}
-
-.ok .cover::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 3px;
-  background: var(--ok);
-  box-shadow: 0 0 12px var(--ok);
-}
-
-.bad .cover::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 3px;
-  background: var(--bad);
-}
-
-.cover-name {
-  position: absolute;
-  left: 16px;
-  right: 16px;
-  bottom: 12px;
-  font-size: 22px;
-  font-weight: 700;
-  line-height: 1.15;
-  text-shadow: 0 2px 8px rgb(0 0 0 / 55%);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.info {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 14px 16px 16px;
-  flex: 1;
-}
-
-.line {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-width: 0;
-}
-
-.spec {
-  font-size: 13px;
+.name {
   color: var(--text);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.sub {
-  justify-content: flex-start;
-  gap: 16px;
-  color: var(--muted);
-  font-size: 13px;
-}
-
-.who {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.fault {
-  margin: 0;
-  font-size: 12px;
-  color: #ff8a7a;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: auto;
-  padding-top: 6px;
 }
 
 .main {
-  flex: 1;
-  min-width: 0;
+  min-width: 120px;
 }
 
 .progress {
-  flex: 1;
-  min-width: 0;
-  height: 40px;
+  width: 140px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
   gap: 6px;
 }
 
-.progress-top {
-  display: flex;
-  justify-content: space-between;
+.ptext {
   font-size: 12px;
-  font-weight: 700;
-  color: var(--accent);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
+  line-height: 16px;
+  color: var(--text-2);
 }
 
-.pct {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
+.menu-wrap {
+  position: relative;
 }
 
-.bar {
-  height: 6px;
-  border-radius: 3px;
-  background: rgb(0 0 0 / 35%);
-  overflow: hidden;
+.menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  z-index: 30;
+  min-width: 220px;
+  padding: 4px;
+  background: var(--flyout);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-flyout);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.bar span {
-  display: block;
-  height: 100%;
-  border-radius: 3px;
-  background: repeating-linear-gradient(-45deg, #1a9fff 0 8px, #47bfff 8px 16px);
-  background-size: 22.6px 22.6px;
-  animation: stripes 0.8s linear infinite;
-  transition: width 0.5s ease;
+.menu > button,
+.menu > a {
+  justify-content: flex-start;
+  gap: 12px;
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--text);
 }
 
-@keyframes stripes {
-  to {
-    background-position: 22.6px 0;
+.menu > button:hover:not(:disabled),
+.menu > a:hover {
+  background: var(--subtle-hover);
+}
+
+.menu > button:disabled {
+  color: var(--disabled);
+}
+
+@media (width <= 600px) {
+  .row-icon {
+    display: none;
+  }
+
+  .main {
+    min-width: 0;
+  }
+
+  .progress {
+    width: 96px;
   }
 }
 </style>

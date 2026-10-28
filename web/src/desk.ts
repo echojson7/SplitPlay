@@ -92,32 +92,6 @@ export function stateTone(state: DeskState): StateTone {
   }
 }
 
-/** Cover art colours: a stable pick per desk id. */
-const COVERS: ReadonlyArray<readonly [string, string, string]> = [
-  ['#1f4e79', '#2a8bc9', '#7fd3ff'],
-  ['#3b2a6b', '#6a4bc4', '#c3a6ff'],
-  ['#0f4d4a', '#1c8f7f', '#7ef0d5'],
-  ['#5a2a3c', '#b04a62', '#ffb3c4'],
-  ['#4a3a14', '#b5832a', '#ffd88a'],
-  ['#1b3a5c', '#3f6fb5', '#a9c8ff'],
-  ['#2b2f67', '#4a5fc1', '#9fb4ff'],
-]
-
-export function coverColors(id: string): readonly [string, string, string] {
-  // FNV-1a
-  let h = 2166136261
-  for (const c of id) {
-    h ^= c.charCodeAt(0)
-    h = Math.imul(h, 16777619) >>> 0
-  }
-  return COVERS[h % COVERS.length]!
-}
-
-export function coverStyle(id: string): Record<string, string> {
-  const [dark, mid, light] = coverColors(id)
-  return { '--cover-dark': dark, '--cover-mid': mid, '--cover-light': light }
-}
-
 /** Builds the config for a new desk from the wizard's three answers. */
 export function newDeskConfig(opts: {
   user: string

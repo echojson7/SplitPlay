@@ -62,8 +62,8 @@ function skip(): void {
 <template>
   <section class="login">
     <div class="brand">
-      <BrandMark :size="44" />
-      <span class="wordmark">SPLITPLAY</span>
+      <BrandMark :size="20" />
+      <span class="wordmark">SplitPlay</span>
     </div>
     <form class="box" novalidate @submit.prevent="submit">
       <h1 class="title">{{ setup ? t('setup.title') : t('login.title') }}</h1>
@@ -96,40 +96,36 @@ function skip(): void {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 28px;
+  gap: 20px;
   padding: 24px 16px;
 }
 
 .brand {
   display: flex;
   align-items: center;
-  gap: 14px;
-  color: #fff;
+  gap: 10px;
+  color: var(--text);
 }
 
 .wordmark {
-  font-size: 30px;
-  font-weight: 700;
-  letter-spacing: 0.12em;
+  font-size: 14px;
 }
 
 .box {
-  width: min(400px, 100%);
+  width: min(360px, 100%);
   display: flex;
   flex-direction: column;
   gap: 16px;
-  padding: 32px;
-  border-radius: 4px;
-  background: linear-gradient(180deg, rgb(42 71 94 / 70%) 0%, rgb(23 26 33 / 85%) 100%);
-  box-shadow: 0 20px 50px rgb(0 0 0 / 45%);
+  padding: 24px;
+  border-radius: 8px;
+  background: var(--row);
+  border: 1px solid var(--border);
 }
 
 .title {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--accent);
+  font-size: 20px;
+  line-height: 28px;
+  font-weight: 600;
 }
 
 .err {
@@ -137,8 +133,6 @@ function skip(): void {
 }
 
 .submit {
-  height: 44px;
-  font-size: 15px;
-  margin-top: 6px;
+  margin-top: 4px;
 }
 </style>

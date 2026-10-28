@@ -35,36 +35,40 @@ async function logout(): Promise<void> {
 
 <template>
   <div :class="['shell', { bare }]">
-    <header v-if="!bare" class="topbar">
-      <RouterLink to="/" class="brand" :aria-label="t('app.title')">
-        <BrandMark :size="26" />
-        <span class="wordmark">SPLITPLAY</span>
+    <aside v-if="!bare" class="navpane">
+      <RouterLink to="/" class="appname" :aria-label="t('app.title')">
+        <BrandMark :size="16" />
+        <span class="appname-text">SplitPlay</span>
       </RouterLink>
-      <nav class="tabs" aria-label="main">
-        <RouterLink to="/" :class="{ active: section === 'library' }">{{ t('nav.library') }}</RouterLink>
-        <RouterLink to="/settings" :class="{ active: section === 'settings' }">{{ t('nav.settings') }}</RouterLink>
+      <nav class="nav" aria-label="main">
+        <RouterLink to="/" :class="{ active: section === 'library' }">
+          <AppIcon name="monitor" :size="16" /><span>{{ t('nav.library') }}</span>
+        </RouterLink>
+        <RouterLink to="/settings" :class="{ active: section === 'settings' }">
+          <AppIcon name="gear" :size="16" /><span>{{ t('nav.settings') }}</span>
+        </RouterLink>
+        <RouterLink to="/diagnostics" :class="{ active: section === 'diagnostics' }">
+          <AppIcon name="activity" :size="16" /><span>{{ t('nav.diagnostics') }}</span>
+        </RouterLink>
       </nav>
       <span class="spacer" />
-      <RouterLink to="/diagnostics" :class="['diag-link', { active: section === 'diagnostics' }]">{{ t('nav.diagnostics') }}</RouterLink>
       <button
         v-if="s.session?.authenticated && !s.session.setupRequired"
         type="button"
-        class="btn-ghost logout"
+        class="navitem logout"
         :title="t('nav.logout')"
-        :aria-label="t('nav.logout')"
         @click="logout"
       >
-        <AppIcon name="logout" :size="18" />
+        <AppIcon name="logout" :size="16" /><span>{{ t('nav.logout') }}</span>
       </button>
-    </header>
-
-    <div v-if="!s.online" class="strip bad" role="alert">{{ t('app.offline') }}</div>
-    <div v-else-if="!bare && s.session?.setupRequired" class="strip warn">
-      <span>{{ t('app.noPassword') }}</span>
-      <RouterLink to="/settings">{{ t('app.setPassword') }}</RouterLink>
-    </div>
+    </aside>
 
     <main :class="{ page: !bare }">
+      <div v-if="!s.online" class="inline-msg strip" role="alert">{{ t('app.offline') }}</div>
+      <div v-else-if="!bare && s.session?.setupRequired" class="inline-msg warn strip">
+        <span class="spacer">{{ t('app.noPassword') }}</span>
+        <RouterLink to="/settings" class="btn">{{ t('app.setPassword') }}</RouterLink>
+      </div>
       <RouterView />
     </main>
     <ToastHost />
@@ -72,134 +76,144 @@ async function logout(): Promise<void> {
 </template>
 
 <style scoped>
-.topbar {
+.shell {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.shell.bare {
+  display: block;
+}
+
+.navpane {
   position: sticky;
   top: 0;
-  z-index: 20;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0 8px;
+}
+
+.appname {
   display: flex;
   align-items: center;
-  gap: 28px;
-  height: 56px;
-  padding: 0 24px;
-  background: var(--topbar);
-  box-shadow: 0 2px 12px rgb(0 0 0 / 45%);
+  gap: 12px;
+  height: 48px;
+  padding: 0 16px;
+  margin-bottom: 4px;
+  color: var(--text);
+  font-size: 12px;
 }
 
-.brand {
+.nav {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  color: #dcdedf;
-}
-
-.wordmark {
-  font-size: 17px;
-  font-weight: 700;
-  letter-spacing: 0.14em;
-}
-
-.brand:hover {
-  color: #fff;
-}
-
-.tabs {
-  display: flex;
-  align-self: stretch;
+  flex-direction: column;
   gap: 4px;
 }
 
-.tabs a {
+.nav > a,
+.navitem {
+  position: relative;
   display: flex;
   align-items: center;
-  padding: 0 14px;
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: #dcdedf;
-  border-bottom: 3px solid transparent;
-  border-top: 3px solid transparent;
-  transition:
-    color 0.15s ease,
-    border-color 0.15s ease;
-}
-
-.tabs a:hover {
-  color: #fff;
-}
-
-.tabs a.active {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-
-.diag-link {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.diag-link:hover,
-.diag-link.active {
-  color: var(--accent);
-}
-
-.logout {
-  width: 36px;
+  justify-content: flex-start;
+  gap: 16px;
   height: 36px;
-  padding: 0;
-  margin-right: -8px;
+  margin: 0 4px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  font-size: 14px;
+  text-align: left;
 }
 
-.strip {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 14px;
-  padding: 7px 16px;
-  font-size: 13px;
+.nav > a:hover,
+.navitem:hover:not(:disabled) {
+  background: var(--subtle-hover);
 }
 
-.strip.bad {
-  background: rgb(226 83 63 / 85%);
-  color: #fff;
+.nav > a.active {
+  background: var(--nav-selected);
 }
 
-.strip.warn {
-  background: rgb(229 177 67 / 12%);
-  color: #f0c869;
-}
-
-.strip.warn a {
-  font-weight: 700;
-  color: #fff;
+.nav > a.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 3px;
+  height: 16px;
+  margin-top: -8px;
+  border-radius: 2px;
+  background: var(--accent);
 }
 
 .page {
-  max-width: 1320px;
-  margin: 0 auto;
-  padding: 28px 32px 48px;
+  width: 100%;
+  max-width: 1040px;
+  padding: 28px 40px 40px;
 }
 
-@media (width <= 720px) {
-  .topbar {
-    gap: 14px;
-    padding: 0 16px;
+.strip {
+  margin-bottom: 16px;
+}
+
+@media (width <= 640px) {
+  .shell {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
 
-  .wordmark {
+  .navpane {
+    z-index: 20;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 2px;
+    padding: 4px 8px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--divider);
+  }
+
+  .appname {
+    height: 40px;
+    padding: 0 8px;
+    margin: 0;
+  }
+
+  .appname-text,
+  .nav > a .icon,
+  .logout span {
     display: none;
   }
 
-  .tabs a {
-    padding: 0 8px;
-    font-size: 13px;
+  .nav {
+    flex-direction: row;
+    gap: 2px;
+  }
+
+  .nav > a,
+  .navitem {
+    height: 40px;
+    margin: 0;
+    padding: 0 10px;
+  }
+
+  .nav > a.active::before {
+    left: 50%;
+    top: auto;
+    bottom: 0;
+    width: 16px;
+    height: 3px;
+    margin: 0 0 0 -8px;
   }
 
   .page {
-    padding: 20px 16px 40px;
+    padding: 16px 16px 32px;
   }
 }
 </style>

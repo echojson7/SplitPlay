@@ -52,7 +52,7 @@ describe('validateDeskConfig', () => {
 describe('i18n', () => {
   it('defaults to Russian', () => {
     expect(locale.value).toBe('ru')
-    expect(t('nav.library')).toBe('Библиотека')
+    expect(t('nav.library')).toBe('Столы')
   })
 
   it('interpolates parameters', () => {

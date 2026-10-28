@@ -51,14 +51,14 @@ async function submit(): Promise<void> {
 </script>
 
 <template>
-  <ModalDialog :open="open" :title="deskName ? `${t('desk.pin')} · ${deskName}` : t('desk.pinTitle')" @close="emit('close')">
+  <ModalDialog :open="open" :title="deskName ? `${t('desk.pinTitle')} · ${deskName}` : t('desk.pinTitle')" @close="emit('close')">
     <form class="pair" novalidate @submit.prevent="submit">
-      <div v-if="address" class="addr">
-        <span class="label">{{ t('desk.address') }}</span>
-        <span class="mono">{{ address }}</span>
+      <div v-if="address" class="field">
+        <span class="field-label">{{ t('desk.address') }}</span>
+        <span class="value">{{ address }}</span>
       </div>
-      <div class="field center">
-        <span class="field-label">{{ t('desk.pairPin') }}</span>
+      <div class="field">
+        <label for="pair-pin">{{ t('desk.pairPin') }}</label>
         <PinField id="pair-pin" v-model="pin" :invalid="touched && !pinValid" :label="t('desk.pairPin')" />
         <span v-if="touched && !pinValid" class="err">{{ t('desk.pinInvalid') }}</span>
       </div>
@@ -67,9 +67,9 @@ async function submit(): Promise<void> {
         <input id="pair-name" v-model="name" name="name" maxlength="64" :placeholder="t('desk.pairNamePlaceholder')" />
       </div>
       <p v-if="error" class="inline-msg" role="alert">{{ error }}</p>
-      <div class="actions">
-        <button type="button" class="btn-ghost" @click="emit('close')">{{ t('common.cancel') }}</button>
-        <button type="submit" class="btn-primary" :disabled="busy">{{ t('desk.pairSubmit') }}</button>
+      <div class="dlg-foot">
+        <button type="submit" class="btn-accent" :disabled="busy">{{ t('desk.pairSubmit') }}</button>
+        <button type="button" @click="emit('close')">{{ t('common.cancel') }}</button>
       </div>
     </form>
   </ModalDialog>
@@ -79,41 +79,15 @@ async function submit(): Promise<void> {
 .pair {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
 }
 
-.addr {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 14px;
-  background: rgb(0 0 0 / 22%);
-  border-radius: 3px;
+.value {
+  font-variant-numeric: tabular-nums;
+  user-select: all;
 }
 
-.addr .mono {
-  color: var(--accent);
-  font-size: 15px;
-  font-weight: 700;
-}
-
-.center {
-  align-items: center;
-}
-
-.inline-msg {
-  margin: 0;
-}
-
-.actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
-.actions .btn-primary {
-  min-width: 140px;
-  height: 38px;
+.dlg-foot > button {
+  flex: 1;
 }
 </style>

@@ -8,9 +8,9 @@ import AppIcon from './AppIcon.vue'
   <div class="toasts" aria-live="polite">
     <TransitionGroup name="toast">
       <div v-for="item in toasts" :key="item.id" :class="['toast', item.kind]" :role="item.kind === 'error' ? 'alert' : 'status'">
-        <AppIcon :name="item.kind === 'error' ? 'close' : 'check'" :size="16" />
+        <span :class="['status', item.kind === 'error' ? 'bad' : 'ok']" />
         <span class="text">{{ item.text }}</span>
-        <button type="button" class="btn-ghost x" aria-label="×" @click="dismissToast(item.id)">
+        <button type="button" class="btn-icon x" aria-label="×" @click="dismissToast(item.id)">
           <AppIcon name="close" :size="12" />
         </button>
       </div>
@@ -23,63 +23,50 @@ import AppIcon from './AppIcon.vue'
   position: fixed;
   right: 16px;
   bottom: 16px;
-  z-index: 80;
+  z-index: 60;
   display: flex;
   flex-direction: column;
-  align-items: flex-end;
   gap: 8px;
-  max-width: calc(100vw - 32px);
-  pointer-events: none;
+  width: min(360px, calc(100vw - 32px));
 }
 
 .toast {
-  pointer-events: auto;
   display: flex;
   align-items: center;
-  gap: 10px;
-  max-width: 420px;
-  padding: 10px 8px 10px 14px;
-  border-radius: 3px;
-  background: linear-gradient(90deg, #2a3f55, #22344a);
-  color: #fff;
-  font-size: 13px;
-  box-shadow: 0 10px 28px rgb(0 0 0 / 50%);
-  border-left: 3px solid var(--ok);
+  gap: 12px;
+  min-height: 48px;
+  padding: 6px 6px 6px 16px;
+  background: var(--flyout);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow-flyout);
+  color: var(--text);
 }
 
-.toast.ok .icon {
-  color: var(--ok);
-}
-
-.toast.error {
-  border-left-color: var(--bad);
-}
-
-.toast.error .icon {
-  color: #ff7a66;
+.status {
+  gap: 0;
 }
 
 .text {
   flex: 1;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 
 .x {
-  width: 24px;
-  height: 24px;
-  padding: 0;
+  color: var(--text-2);
 }
 
 .toast-enter-active,
 .toast-leave-active {
   transition:
-    opacity 0.2s ease,
-    transform 0.2s ease;
+    opacity 0.15s ease,
+    transform 0.15s ease;
 }
 
 .toast-enter-from,
 .toast-leave-to {
   opacity: 0;
-  transform: translateX(16px);
+  transform: translateY(8px);
 }
 </style>

@@ -166,7 +166,7 @@ Write-Host '==> --help'
 $r = Invoke-Worker @('--help')
 Write-Host $r.Output
 Assert ($r.ExitCode -eq 0) "--help exited with $($r.ExitCode)"
-foreach ($needle in @('--desk-dir', '--pipe', '--desk', 'Usage:')) {
+foreach ($needle in @('--desk-dir', '--pipe', '--desk', '--self-test', 'Usage:')) {
   Assert ($r.Output.Contains($needle)) "--help output lacks $needle"
 }
 
@@ -174,6 +174,11 @@ Write-Host '==> invalid arguments'
 $r = Invoke-Worker @('--pipe', '\\.\pipe\splitplay\worker-x')
 Write-Host $r.Output
 Assert ($r.ExitCode -eq 2) "--pipe without --desk exited with $($r.ExitCode), expected 2"
+foreach ($bad in @(@('--self-test', '0'), @('--self-test=abc'), @('--pipe', '\\.\pipe\splitplay\worker-x', '--desk', 'x', '--self-test', '5'))) {
+  $r = Invoke-Worker $bad
+  Write-Host $r.Output
+  Assert ($r.ExitCode -eq 2) "$($bad -join ' ') exited with $($r.ExitCode), expected 2"
+}
 Assert (-not (Test-Path (Join-Path (Split-Path $Exe) 'config'))) 'the command-line checks created a config directory next to the exe'
 
 # 2. Lifecycle

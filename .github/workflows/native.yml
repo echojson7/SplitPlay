@@ -214,6 +214,7 @@ jobs:
           Set-ItemProperty "$ts\WinStations\RDP-Tcp" -Name UserAuthentication -Value 1 -Type DWord
           # The server default (ColorDepth=3, fInheritColorDepth=0) forces 16 bpp; take the client's 32 bpp instead.
           Set-ItemProperty "$ts\WinStations\RDP-Tcp" -Name fInheritColorDepth -Value 1 -Type DWord
+          Set-ItemProperty "$ts\WinStations\RDP-Tcp" -Name ColorDepth -Value 5 -Type DWord   # 5 = 32 bpp cap
           Set-Service TermService -StartupType Automatic
           # Restart so the WinStation settings above apply (on the real PC, host prepare's reboot does this).
           if ((Get-Service TermService).Status -eq 'Running') { Restart-Service TermService -Force } else { Start-Service TermService }

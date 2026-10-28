@@ -146,14 +146,15 @@ function Find-FreeRdp {
   Fail "no FreeRDP client (wfreerdp/sdl-freerdp) in $FreeRdp"
 }
 
-# Log the user on over loopback RDP. FreeRDP plays the seat: NLA, the audio playback channel on (so the session
-# gets "Remote Audio"), certificate check off (loopback, test only).
+# Log the user on over loopback RDP. FreeRDP plays the seat: NLA, the audio playback channel on with the "fake"
+# backend that discards the samples (so the session gets "Remote Audio" although the runner has no sound device),
+# certificate check off (loopback, test only).
 function Connect-Session([int]$Port, [string]$Password) {
   $client = Find-FreeRdp
   $logDir = Join-Path $WorkDir 'freerdp'
   New-Item -ItemType Directory -Force $logDir | Out-Null
   $psi = [System.Diagnostics.ProcessStartInfo]::new($client)
-  foreach ($a in @("/v:127.0.0.2:$Port", "/u:$User", "/p:$Password", '/cert:ignore', '/size:1280x720', '/sound:sys:winmm',
+  foreach ($a in @("/v:127.0.0.2:$Port", "/u:$User", "/p:$Password", '/cert:ignore', '/size:1280x720', '/sound:sys:fake',
       '/log-level:INFO', '-clipboard')) { $psi.ArgumentList.Add($a) }
   $psi.UseShellExecute = $false
   $psi.WorkingDirectory = Split-Path $client

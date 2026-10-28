@@ -1,0 +1,142 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:07:00 +0000
+Subject: [PATCH] splitplay: capture the session's Remote Audio, never a
+ virtual sink
+
+A desk's sound goes to its RDP session's "Remote Audio" endpoint, which
+the seat creates by announcing the rdpsnd channel. MMDevice/AudioSrv give
+a process the endpoints of its own session, so the worker (SYSTEM with
+TokenSessionId = N) sees and loopback-captures exactly that endpoint
+through WASAPI. Upstream instead prefers the Steam Streaming Speakers as a
+virtual sink, installs their driver and switches the default endpoint.
+
+- install_steam_audio_drivers defaults to off.
+- sink_info() offers a virtual sink only when virtual_sink is configured
+  explicitly, so a stream never switches the session's default endpoint
+  and Sunshine captures the default render endpoint as it is.
+- At start-up the worker no longer moves the default endpoint away from
+  the Steam speakers; it logs the active render endpoints of its session
+  and marks the default one instead, so a log shows whether the worker
+  sees the desk's Remote Audio.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/src/config.cpp b/src/config.cpp
+index 5392bca2ee0bef7c4b595eb9b0d2d512a30c2f12..69859ed264bb6211703caea43a33383c2fe66c67 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -798,7 +798,7 @@ namespace config {
+     {},  // audio_sink
+     {},  // virtual_sink
+     true,  // stream audio
+-    true,  // install_steam_drivers
++    false,  // install_steam_drivers (SplitPlay: a desk captures its session's "Remote Audio", no virtual sink)
+   };
+ 
+   /**
+diff --git a/src/platform/windows/audio.cpp b/src/platform/windows/audio.cpp
+index 38bce01ca866a8e5fdd67a67ba74692d62b8fbce..74c6535fbe4b95d07d6de53b6539d3c357aac872 100644
+--- a/src/platform/windows/audio.cpp
++++ b/src/platform/windows/audio.cpp
+@@ -18,6 +18,7 @@
+ // local includes
+ #include "src/config.h"
+ #include "src/logging.h"
++#include "misc.h"
+ #include "src/platform/common.h"
+ #include "utf_utils.h"
+ 
+@@ -863,16 +864,16 @@ namespace platf::audio {
+         sink.host = utf_utils::to_utf8(id.get());
+       }
+ 
+-      // Prepare to search for the device_id of the virtual audio sink device,
+-      // this device can be either user-configured or
+-      // the Steam Streaming Speakers we use by default.
+-      match_fields_list_t match_list;
++      // SplitPlay: a desk captures its session's default render endpoint ("Remote Audio") through WASAPI
++      // loopback. A virtual sink is used only when one is configured explicitly; the Steam Streaming Speakers
++      // are never picked on their own, so the worker never changes the session's default endpoint.
+       if (config::audio.virtual_sink.empty()) {
+-        match_list = match_steam_speakers();
+-      } else {
+-        match_list = match_all_fields(utf_utils::from_utf8(config::audio.virtual_sink));
++        return sink;
+       }
+ 
++      // Prepare to search for the device_id of the user-configured virtual audio sink device.
++      match_fields_list_t match_list = match_all_fields(utf_utils::from_utf8(config::audio.virtual_sink));
++
+       // Search for the virtual audio sink device currently present in the system.
+       auto matched = find_device_id(match_list);
+       if (matched) {
+@@ -1181,6 +1182,44 @@ namespace platf::audio {
+       return std::nullopt;
+     }
+ 
++    /**
++     * @brief SplitPlay: log the render endpoints this process sees and which one is the default.
++     * @details Audio endpoints are per session: a SYSTEM process with TokenSessionId = N gets session N's view,
++     * which in a desk is the RDP "Remote Audio" endpoint that the seat's rdpsnd channel creates.
++     */
++    void log_session_endpoints() {
++      std::wstring default_id;
++      if (device_t def; SUCCEEDED(device_enum->GetDefaultAudioEndpoint(eRender, eConsole, &def))) {
++        audio::wstring_t id;
++        def->GetId(&id);
++        default_id = id.get();
++      }
++
++      collection_t collection;
++      if (FAILED(device_enum->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, &collection))) {
++        BOOST_LOG(warning) << "SplitPlay: cannot enumerate audio endpoints"sv;
++        return;
++      }
++      UINT count = 0;
++      collection->GetCount(&count);
++      BOOST_LOG(info) << "SplitPlay: "sv << count << " active render endpoint(s) in session "sv << target_session_id()
++                      << (default_id.empty() ? ", no default endpoint (audio starts once the session has one)"sv : ""sv);
++      for (UINT x = 0; x < count; ++x) {
++        audio::device_t device;
++        collection->Item(x, &device);
++        audio::wstring_t id;
++        device->GetId(&id);
++        audio::prop_t prop;
++        prop_var_t name;
++        if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &prop))) {
++          prop->GetValue(PKEY_Device_FriendlyName, &name.prop);
++        }
++        BOOST_LOG(info) << "SplitPlay:   "sv << (default_id == id.get() ? "[default] "sv : ""sv)
++                        << (name.prop.vt == VT_LPWSTR ? utf_utils::to_utf8(name.prop.pwszVal) : "?"s)
++                        << ' ' << utf_utils::to_utf8(id.get());
++      }
++    }
++
+     /**
+      * @brief Resets the default audio device from Steam Streaming Speakers.
+      */
+@@ -1381,6 +1420,7 @@ namespace platf {
+ 
+     // Install Steam Streaming Speakers if needed. We do this during audio_control() to ensure
+     // the sink information returned includes the new Steam Streaming Speakers device.
++    // SplitPlay: install_steam_audio_drivers defaults to off, and the speakers are only used as a configured virtual_sink.
+     if (config::audio.install_steam_drivers && !control->find_device_id(control->match_steam_speakers())) {
+       // This is best effort. Don't fail if it doesn't work.
+       control->install_steam_audio_drivers();
+@@ -1397,11 +1437,11 @@ namespace platf {
+     // Initialize COM
+     auto co_init = std::make_unique<platf::audio::co_init_t>();
+ 
+-    // If Steam Streaming Speakers are currently the default audio device,
+-    // change the default to something else (if another device is available).
++    // SplitPlay: upstream moves the default away from the Steam Streaming Speakers here. A desk never changes
++    // its session's default endpoint; it only logs what it will capture.
+     audio::audio_control_t audio_ctrl;
+     if (audio_ctrl.init() == 0) {
+-      audio_ctrl.reset_default_device();
++      audio_ctrl.log_session_endpoints();
+     }
+ 
+     return co_init;

@@ -1,9 +1,15 @@
 // SPDX-License-Identifier: MIT
 // splitplay-seat.exe --pipe \\.\pipe\splitplay\seat-<desk> --desk <desk> [--namespace global|local]
-//                    [--connect-timeout-ms N] [--log-level trace|debug|info|warn|error]
+//                    [--connect-timeout-ms N] [--log-level trace|debug|info|warn|error] [--connector freerdp|null]
+//
+// The RDP credentials arrive in `welcome.rdp` over the pipe (never on the command line). --connector null (the
+// default when built without FreeRDP) runs without an RDP stack, for IPC tests.
 #include <cstdio>
 #include <memory>
 
+#ifdef SPLITPLAY_HAVE_FREERDP
+#include "freerdp_connector.hpp"
+#endif
 #include "null_rdp_connector.hpp"
 #include "seat_app.hpp"
 #include "splitplay/common/args.hpp"
@@ -17,8 +23,15 @@ static void usage() {
   std::fprintf(stderr,
                "usage: splitplay-seat --pipe <\\\\.\\pipe\\splitplay\\seat-DESK> --desk <DESK>\n"
                "                      [--namespace global|local] [--connect-timeout-ms N]\n"
-               "                      [--log-level trace|debug|info|warn|error] [--version]\n");
+               "                      [--log-level trace|debug|info|warn|error] [--connector freerdp|null]\n"
+               "                      [--version]\n");
 }
+
+#ifdef SPLITPLAY_HAVE_FREERDP
+static constexpr const char* kDefaultConnector = "freerdp";
+#else
+static constexpr const char* kDefaultConnector = "null";
+#endif
 
 int main(int argc, char** argv) {
   log_set_component("seat");
@@ -37,7 +50,7 @@ int main(int argc, char** argv) {
     usage();
     return kExitOk;
   }
-  for (const auto& u : args->unknown({"pipe", "desk", "namespace", "connect-timeout-ms", "log-level"})) {
+  for (const auto& u : args->unknown({"pipe", "desk", "namespace", "connect-timeout-ms", "log-level", "connector"})) {
     std::fprintf(stderr, "splitplay-seat: unknown option --%s\n", u.c_str());
     usage();
     return kExitUsage;
@@ -70,10 +83,31 @@ int main(int argc, char** argv) {
     log_set_min_level(l);
   }
 
+  const std::string connector_name = args->get_or("connector", kDefaultConnector);
+  std::unique_ptr<seat::IRdpConnector> connector;
+  if (connector_name == "null") {
+    connector = std::make_unique<seat::NullRdpConnector>();
+#ifdef SPLITPLAY_HAVE_FREERDP
+  } else if (connector_name == "freerdp") {
+    seat::FreeRdpConnector::Options o;
+    o.verbose = log_min_level() <= LogLevel::debug;
+    connector = std::make_unique<seat::FreeRdpConnector>(o);
+#endif
+  } else {
+    std::fprintf(stderr, "splitplay-seat: --connector must be one of: %s\n",
+#ifdef SPLITPLAY_HAVE_FREERDP
+                 "freerdp, null"
+#else
+                 "null (built without FreeRDP)"
+#endif
+    );
+    return kExitUsage;
+  }
+
   trace::register_provider();
   int rc;
   {
-    seat::SeatApp app(options, std::make_unique<seat::NullRdpConnector>());
+    seat::SeatApp app(options, std::move(connector));
     rc = app.run();
   }
   trace::unregister_provider();

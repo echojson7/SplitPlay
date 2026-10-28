@@ -26,6 +26,21 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 
 option(SPLITPLAY_BUILD_TESTS "Build the native tests" ON)
 option(SPLITPLAY_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
+# splitplay-seat's FreeRDP 3 connector. The libraries come from vcpkg in manifest mode (vcpkg.json, triplet
+# x64-windows-static-rel from triplets/); the windows-x64 presets set the vcpkg toolchain from $env{VCPKG_ROOT}.
+# Without it the seat only has the null connector.
+if(WIN32 AND MSVC)
+  set(_splitplay_freerdp_default ON)
+else()
+  set(_splitplay_freerdp_default OFF)
+endif()
+option(SPLITPLAY_WITH_FREERDP "Build splitplay-seat with the FreeRDP connector" ${_splitplay_freerdp_default})
+
+if(WIN32 AND SPLITPLAY_WITH_FREERDP AND MSVC)
+  # The vcpkg triplet is release-only with the static CRT; use the same CRT in every configuration so that Debug
+  # builds link too.
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(SplitPlayOptions)
@@ -40,6 +55,14 @@ FetchContent_Declare(nlohmann_json
 set(JSON_BuildTests OFF CACHE INTERNAL "")
 set(JSON_Install OFF CACHE INTERNAL "")
 FetchContent_MakeAvailable(nlohmann_json)
+
+if(WIN32 AND SPLITPLAY_WITH_FREERDP)
+  # FreeRDP 3 client (Apache-2.0), static. Package names as installed by the vcpkg port.
+  find_package(WinPR 3 CONFIG REQUIRED)
+  find_package(FreeRDP 3 CONFIG REQUIRED)
+  find_package(FreeRDP-Client 3 CONFIG REQUIRED)
+  message(STATUS "splitplay-seat: FreeRDP connector enabled (FreeRDP ${FreeRDP_VERSION})")
+endif()
 
 # ---- components ----------------------------------------------------------------------------------
 add_subdirectory(common)

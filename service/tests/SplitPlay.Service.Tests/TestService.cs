@@ -25,7 +25,10 @@ internal sealed class TestService : IAsyncDisposable
         DataRoot = dataRoot;
         _ownsDataRoot = ownsDataRoot;
         Launcher = app.Services.GetRequiredService<FakeChildLauncher>();
+        Platform = app.Services.GetRequiredService<Platform.FakeDeskPlatform>();
     }
+
+    public Platform.FakeDeskPlatform Platform { get; }
 
     public WebApplication App { get; }
 
@@ -52,8 +55,12 @@ internal sealed class TestService : IAsyncDisposable
             "--data-root", dataRoot,
             $"--Supervisor:PipeNamespace={ns}",
             "--Supervisor:Launcher=fake",
+            "--Supervisor:Platform=fake",
+            "--Supervisor:RelogonAfterLayoutCopy=false",
+            "--Supervisor:BluetoothPollMs=100",
             "--Supervisor:HeartbeatIntervalMs=100",
-            "--Supervisor:MissedHeartbeats=3",
+            // 1 s of silence: generous enough for a loaded CI runner; the hang test sets 3 itself.
+            "--Supervisor:MissedHeartbeats=10",
             "--Supervisor:HelloTimeoutMs=5000",
             "--Supervisor:ReadyTimeoutMs=5000",
             "--Supervisor:ShutdownTimeoutMs=2000",

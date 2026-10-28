@@ -6,7 +6,7 @@ name: service
 
 on:
   push:
-    branches: ['stage2/**', 'main']
+    branches: ['stage2/**', 'stage3/**', 'main']
     paths:
       - 'service/**'
       - '.github/workflows/service.yml'
@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # to fetch the optional native-win-x64 artifact from a stage3/native run
 
 concurrency:
   group: ${{ github.workflow }}-service-${{ github.ref }}
@@ -82,8 +83,39 @@ jobs:
           }
           Get-ChildItem "$env:PUBLISH_DIR" -Recurse -Include 'SplitPlay*.exe', 'splitplay.exe', 'index.html' | ForEach-Object FullName
 
-      - name: Smoke test (console mode, CLI, Windows service, tray)
-        run: ./build/smoke-test.ps1 -Publish "$env:PUBLISH_DIR" -Work "${{ runner.temp }}\smoke"
+      # Optional: the real seat from the latest green native build on stage3/native (or this branch). The service
+      # build never depends on it: a missing run or artifact only skips the real-seat part of the smoke test.
+      - name: Fetch native-win-x64 (optional)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $dest = "${{ runner.temp }}\native-win-x64"
+          foreach ($branch in 'stage3/native', '${{ github.ref_name }}') {
+            $id = $null
+            foreach ($delay in 0, 2, 4, 8, 16) {
+              if ($delay) { Start-Sleep -Seconds $delay }
+              $id = gh run list -R '${{ github.repository }}' -w native.yml -b $branch -s success -L 1 --json databaseId -q '.[0].databaseId'
+              if ($LASTEXITCODE -eq 0) { break }
+            }
+            if (-not $id) { Write-Host "no successful native run on $branch"; continue }
+            foreach ($delay in 0, 2, 4, 8, 16) {
+              if ($delay) { Start-Sleep -Seconds $delay }
+              Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+              gh run download $id -R '${{ github.repository }}' -n native-win-x64 -D $dest
+              if ($LASTEXITCODE -eq 0) { break }
+            }
+            if (Test-Path "$dest\splitplay-seat.exe") {
+              Write-Host "native-win-x64 from run $id ($branch):"
+              Get-ChildItem $dest -Recurse -File | ForEach-Object { '  {0} ({1:N0} bytes)' -f $_.FullName.Substring($dest.Length + 1), $_.Length }
+              "NATIVE_DIR=$dest" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+              break
+            }
+          }
+          $global:LASTEXITCODE = 0
+
+      - name: Smoke test (provisioning, seat/worker launch, CLI, Windows service, host prepare, tray)
+        run: ./build/smoke-test.ps1 -Publish "$env:PUBLISH_DIR" -Work "${{ runner.temp }}\smoke" -Native "$env:NATIVE_DIR"
 
       - name: Upload service-win-x64
         uses: actions/upload-artifact@v4
@@ -93,14 +125,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      # upload-artifact needs one common root: the ProgramData logs are copied next to the other diagnostics first.
+      - name: Collect diagnostics
+        if: failure()
+        run: |
+          New-Item -ItemType Directory -Force "${{ runner.temp }}\diagnostics" | Out-Null
+          foreach ($d in "${{ runner.temp }}\test-results", "${{ runner.temp }}\smoke", 'C:\ProgramData\SplitPlay\logs') {
+            if (Test-Path $d) { Copy-Item -Recurse -Force $d "${{ runner.temp }}\diagnostics\$(Split-Path $d -Leaf)" }
+          }
+
       - name: Upload diagnostics
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: service-diagnostics
-          path: |
-            ${{ runner.temp }}\test-results
-            ${{ runner.temp }}\smoke
-            C:\ProgramData\SplitPlay\logs
+          path: ${{ runner.temp }}\diagnostics
           if-no-files-found: ignore
           retention-days: 7

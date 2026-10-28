@@ -53,6 +53,16 @@ public sealed class DeskConfig
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? User { get; set; }
 
+    /// <summary>
+    /// True when SplitPlay created the Windows account (it then owns its password: never expires, rotated when the
+    /// stored secret is lost, deletable with <c>deleteUser=true</c>). False for an existing account the owner picked:
+    /// SplitPlay only stores the password the owner typed and never changes that account. Set by the service when the
+    /// desk is created or its user changes; null (older configs) means "decide by the account's comment".
+    /// The password itself never appears in config.json (DPAPI-protected in <c>secrets\desks\&lt;id&gt;.bin</c>).
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? UserManaged { get; set; }
+
     /// <summary>Base port; when omitted the service allocates one (see <see cref="Ports.BasePortAllocator"/>).</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? BasePort { get; set; }
@@ -63,6 +73,19 @@ public sealed class DeskConfig
     public string Gpu { get; set; } = "auto";
 
     public ProfileConfig Profile { get; set; } = new();
+
+    /// <summary>
+    /// Stop the per-user <c>BluetoothUserService_*</c> instance in the desk session (GitHub issue #3): several running
+    /// instances compete for the radio and can reset the console user's Bluetooth devices. Default true.
+    /// </summary>
+    public bool DisableBluetoothUserService { get; set; } = true;
+
+    /// <summary>
+    /// Extra Sunshine settings passed verbatim to the worker as trailing <c>name=value</c> arguments (after
+    /// <c>port=&lt;basePort&gt;</c>); they override the worker's <c>sunshine.conf</c>. See worker/README.md.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? WorkerSettings { get; set; }
 }
 
 /// <summary>Streaming profile. All fields optional; absent means "keep current / use default".</summary>

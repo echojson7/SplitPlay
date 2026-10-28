@@ -9,6 +9,7 @@ import type {
   DeskProfile,
   Health,
   HostSettings,
+  HostUser,
   LiveEvent,
   LoginResult,
   LogLine,
@@ -264,6 +265,11 @@ export class ApiClient {
     return unwrapList<LogLine>(raw, 'lines')
   }
 
+  /** Enabled local Windows accounts that can be picked as a desk user. */
+  async listHostUsers(): Promise<HostUser[]> {
+    return unwrapList<HostUser>(await this.request('GET', '/host/users'), 'users')
+  }
+
   /** Proposed endpoint (not yet in web-api.md): host settings from config.json `host`. */
   getHostSettings(): Promise<HostSettings> {
     return this.request('GET', '/host')
@@ -312,7 +318,7 @@ export function parseLiveEvent(data: string): LiveEvent | null {
 /** Builds a desk config from an existing desk (for the edit form). */
 export function deskToConfig(desk: Desk): DeskConfig {
   const profile: DeskProfile = { ...desk.profile }
-  return {
+  const config: DeskConfig = {
     id: desk.id,
     name: desk.name,
     user: desk.user,
@@ -321,6 +327,10 @@ export function deskToConfig(desk: Desk): DeskConfig {
     gpu: desk.gpu,
     profile,
   }
+  // Settings the form does not show are sent back unchanged (PUT replaces the whole desk).
+  if (desk.disableBluetoothUserService !== undefined) config.disableBluetoothUserService = desk.disableBluetoothUserService
+  if (desk.workerSettings) config.workerSettings = { ...desk.workerSettings }
+  return config
 }
 
 /** The app-wide client instance. */

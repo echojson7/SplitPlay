@@ -24,7 +24,15 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 - `--desk-dir` holds the worker's per-desk state (`sunshine.conf`, `sunshine_state.json` with pairings and unique id,
   `credentials\`, `apps.json`, `sunshine.log`); trailing `name=value` pairs are Sunshine settings and override `sunshine.conf`.
   The worker resolves `assets\` next to its executable. See `worker/README.md`.
-- Exit codes: 0 after `shutdown`, 2 invalid command line, 3 handshake failed or pipe lost; anything else is a crash.
+- The service passes the worker's recommended settings by default (`sunshine_name=<HOST>-<id>`, `min_log_level=info`,
+  `nvenc_preset=1`, `nvenc_twopass=disabled`, `hevc_mode=0`, `av1_mode=0`); a desk's `workerSettings` (config.md)
+  override or extend them. `port` is always set by the service.
+- The worker runs as SYSTEM with `TokenSessionId` = the desk session, `lpDesktop` `winsta0\default`,
+  `CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT`, in the desk's job object. Diagnostics only:
+  `splitplay-worker.exe --desk-dir <dir> --self-test <seconds>` (not with `--pipe`) checks capture, input and audio in
+  the session and writes `<desk-dir>\self-test.json`. The full settings list is in worker/README.md. The seat runs as SYSTEM in session 0.
+- Exit codes: 0 after `shutdown`, 2 invalid command line, 3 handshake failed or pipe lost, 4 (seat) gave up reconnecting
+  the RDP session; anything else is a crash.
 
 ## Lifecycle
 
@@ -45,7 +53,17 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 {"type":"heartbeat","seq":17,"state":"idle","metrics":{"fps":0,"bitrate_kbps":0,"encode_ms_p50":0,"encode_ms_p99":0,"loss_pct":0,"clients":0}}
 {"type":"log","level":"info","message":"..."}
 {"type":"event","name":"client_connected","data":{"client":"Living room PC"}}
+{"type":"event","name":"mode_requested","data":{"width":2560,"height":1440,"fps":120}}
+{"type":"event","name":"session_lost","data":{"reason":"..."}}
+{"type":"event","name":"session_restored","data":{"session":3}}
 ```
+
+Events by role:
+
+- worker `mode_requested`: a Moonlight client launched with this mode. The service forwards it to the seat as
+  `set_mode`. The worker waits up to 3 s for the desktop size to change and carries on either way.
+- seat `session_lost`: the RDP connection dropped; the seat is reconnecting. The service keeps the worker running.
+- seat `session_restored`: reconnected. If the session id changed, the service restarts the worker in the new session.
 
 `role` is `worker`, `seat` or `stubworker`. The worker pipe accepts `worker` and `stubworker`; the seat pipe accepts `seat`.
 
@@ -55,7 +73,7 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 |---|---|
 | `worker` | `ports.base`: the HTTP port Moonlight connects to (the other ports follow from it, see config.md) |
 | `stubworker` | none (it opens no network ports) |
-| `seat` | `input_ring` (section name, input_ring.h), `connector` (`null` or `freerdp`), `session` (Windows session id, once known) |
+| `seat` | `input_ring` (section name, input_ring.h), `connector` (`null` or `freerdp`), `session` (Windows session id). Sent only once the desk user is logged on and the session is active |
 
 `state` is a free-form short string for the UI (`idle`, `streaming`, `connecting`, `logged_on`).
 `metrics` keys are optional; the service passes unknown keys through to the Web API unchanged.
@@ -64,6 +82,8 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 
 ```json
 {"type":"welcome","protocol":1,"profile":{ ... }}
+{"type":"welcome","protocol":1,"profile":{ ... },"rdp":{"host":"127.0.0.2","port":3389,"user":"splitplay-desk1","domain":".","password":"…","width":1920,"height":1080}}
+{"type":"set_mode","id":4,"width":2560,"height":1440}
 {"type":"set_profile","id":5,"profile":{ ... }}
 {"type":"pair","id":6,"pin":"1234","name":"Laptop"}
 {"type":"list_clients","id":7}
@@ -79,7 +99,16 @@ Answers with data:
 - `pair` fails with `pair_failed` when no Moonlight client is waiting for a PIN or the PIN does not match; `unpair` fails with
   `not_found` for an unknown uuid.
 
-`pair`, `list_clients` and `unpair` are worker-only; `send_sas` is seat-only. A child that does not support a request answers `unsupported`.
+`pair`, `list_clients` and `unpair` are worker-only; `send_sas` and `set_mode` are seat-only. A child that does not support a request answers `unsupported`.
+
+Seat specifics:
+
+- `welcome.rdp` is the loopback RDP target. `port` comes from `RDP-Tcp\PortNumber` in the registry. The password
+  never appears in logs, on command lines or in the environment. The seat connects with FreeRDP 3, NLA on, and the
+  audio playback channel enabled (samples discarded) so that the session gets a Remote Audio endpoint.
+- `set_mode` resizes the session through the RDP display-control channel; `unsupported` when the channel is not
+  available (the desk then reports `resolutionPendingRestart`).
+- `shutdown` logs the session off (`WTSLogoffSession`) and disconnects.
 
 ### Profile object
 

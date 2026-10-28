@@ -1,0 +1,451 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Wed, 28 Oct 2026 12:09:00 +0000
+Subject: [PATCH] splitplay: --self-test exercises capture, input and audio in
+ the session
+
+Without a Moonlight client there was no way to show that a worker started
+in a desk session actually captures that session. The new option
+--self-test <seconds> (1-600, standalone only: not with --pipe) runs
+after the usual start-up (platform, input and encoder probing, which
+already opens the session's display) and then, for <seconds>:
+
+- captures the session's display through the capture path of the chosen
+  encoder (DXGI Desktop Duplication into GPU memory for hardware
+  encoders, system memory for the software encoder), with the cursor
+  blended in from the DDA pointer shape and the same reinit handling as a
+  stream (desktop switches, mode changes);
+- moves the mouse back and forth with SendInput (relative moves) and
+  checks with GetCursorPos that the session's cursor follows;
+- opens the session's default render endpoint through WASAPI loopback
+  and reads 100 packets of 5 ms.
+
+The result is logged, printed and written to <desk-dir>/self-test.json:
+
+  {"version":"0.1.0","session":2,"encoder":"software","capture_memory":"system",
+   "capture":{"frames":42,"timeouts":17,"reinits":0,"width":1280,"height":720},
+   "input":{"moves":30,"cursor_moved":true},
+   "audio":{"ok":true,"endpoint":"{0.0.0.00000000}.{...}","packets":100},"ok":true}
+
+The exit code is 0 when at least one frame was captured, 1 otherwise. CI
+uses it to check a worker started as SYSTEM in an RDP session; on a host
+it is a quick diagnosis of a desk.
+
+video::chosen_encoder_info() exposes the probed encoder's name and capture
+memory type for this.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index 5811c107e83abe7c448cb2efff455a5af6732b9d..085a64eb2961da545193d98bdec710ee6d56ef15 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -177,6 +177,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/splitplay/control_client.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.h"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/self_test.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/self_test.h"
+         ${PLATFORM_TARGET_FILES})
+ 
+ if(NOT SUNSHINE_ASSETS_DIR_DEF)
+diff --git a/src/main.cpp b/src/main.cpp
+index f235c75fc8603c13416476fefe5a2ddae0b4a3b9..08a52f8f13062f62469f974c92d4441bc6f8f6a9 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -28,6 +28,7 @@
+ #include "process.h"
+ #include "splitplay/control_client.h"
+ #include "splitplay/options.h"
++#include "splitplay/self_test.h"
+ #include "system_tray.h"
+ #include "upnp.h"
+ #include "video.h"
+@@ -439,6 +440,11 @@ int main(int argc, char *argv[]) {
+     BOOST_LOG(error) << "Video failed to find working encoder"sv;
+   }
+ 
++  // SplitPlay: --self-test exercises capture, input and audio in this session, then exits without serving.
++  if (const int seconds = splitplay::options().self_test_seconds; seconds > 0) {
++    return splitplay::self_test::run(seconds);
++  }
++
+   if (http::init()) {
+     BOOST_LOG(fatal) << "HTTP interface failed to initialize"sv;
+ 
+diff --git a/src/splitplay/options.cpp b/src/splitplay/options.cpp
+index ed59d8c17c56740cea3ecbcffbf5b8fdbf4fd69a..38e5847f634207d230c59b027d8c57d16af25e06 100644
+--- a/src/splitplay/options.cpp
++++ b/src/splitplay/options.cpp
+@@ -35,6 +35,7 @@ namespace splitplay {
+       "--desk-dir"sv,
+       "--pipe"sv,
+       "--desk"sv,
++      "--self-test"sv,
+     };
+ 
+     std::vector<std::string> captured_args;  ///< Arguments recorded by capture_command_line().
+@@ -78,6 +79,18 @@ namespace splitplay {
+         opts.pipe = value;
+       } else if (name == "--desk"sv) {
+         opts.desk = value;
++      } else if (name == "--self-test"sv) {
++        int seconds = 0;
++        const bool digits = value.size() <= 3 && std::all_of(value.begin(), value.end(), [](char c) {
++                              return c >= '0' && c <= '9';
++                            });
++        if (digits) {
++          seconds = std::stoi(value);
++        }
++        if (seconds < 1 || seconds > 600) {
++          opts.error = "--self-test takes a number of seconds from 1 to 600";
++        }
++        opts.self_test_seconds = seconds;
+       }
+     }
+ 
+@@ -127,6 +140,9 @@ namespace splitplay {
+       if (opts.error.empty() && !opts.pipe.empty() && opts.desk.empty()) {
+         opts.error = "--pipe requires --desk";
+       }
++      if (opts.error.empty() && !opts.pipe.empty() && opts.self_test_seconds > 0) {
++        opts.error = "--self-test runs standalone, without --pipe";
++      }
+       return opts;
+     }
+ 
+@@ -207,6 +223,9 @@ namespace splitplay {
+         << "    --pipe <name>             | control pipe created by SplitPlay.Service, e.g. \\\\.\\pipe\\splitplay\\worker-desk-1\n"
+         << "                              | (docs/contracts/ipc.md); without it the worker runs standalone\n"
+         << "    --desk <id>               | desk id, [a-z0-9-]{1,32}; required with --pipe\n"
++        << "    --self-test <seconds>     | capture the session's display, move the mouse and open the default\n"
++        << "                              | audio endpoint for <seconds> (1-600), write self-test.json to the\n"
++        << "                              | desk directory and exit (0: frames were captured); no --pipe\n"
+         << "    --version                 | print the version and exit\n"
+         << '\n';
+   }
+diff --git a/src/splitplay/options.h b/src/splitplay/options.h
+index a08c31d476eca601b7e0e5a81665dff4f5b5d5a8..89729aab76fc4d940b34c1759f6db9b490ca0a9a 100644
+--- a/src/splitplay/options.h
++++ b/src/splitplay/options.h
+@@ -18,6 +18,7 @@ namespace splitplay {
+     std::filesystem::path desk_dir;  ///< Per-desk directory for config, state, credentials and logs. Empty: upstream default.
+     std::string pipe;  ///< Control pipe created by SplitPlay.Service (docs/contracts/ipc.md). Empty: standalone.
+     std::string desk;  ///< Desk id, `[a-z0-9-]{1,32}`.
++    int self_test_seconds = 0;  ///< `--self-test <seconds>`: run the in-session self-test and exit. 0: off.
+     bool version = false;  ///< `--version` was given.
+     bool help = false;  ///< `--help` was given.
+     std::string error;  ///< Non-empty when the command line is invalid.
+diff --git a/src/splitplay/self_test.cpp b/src/splitplay/self_test.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..9f18fb5ab7f71ae5d172913e0b6a2d75ca1b37fd
+--- /dev/null
++++ b/src/splitplay/self_test.cpp
+@@ -0,0 +1,232 @@
++/**
++ * @file src/splitplay/self_test.cpp
++ * @brief In-session self-test of the SplitPlay worker (`--self-test <seconds>`).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++// standard includes
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <fstream>
++#include <iostream>
++#include <list>
++#include <memory>
++#include <string>
++#include <thread>
++#include <vector>
++
++// lib includes
++#include <nlohmann/json.hpp>
++
++// local includes
++#include "options.h"
++#include "self_test.h"
++#include "src/config.h"
++#include "src/display_device.h"
++#include "src/logging.h"
++#include "src/platform/common.h"
++#include "src/video.h"
++
++#ifdef _WIN32
++  // platform includes
++  #include "src/platform/windows/misc.h"
++#endif
++
++using namespace std::literals;
++using json = nlohmann::json;
++
++namespace splitplay::self_test {
++#ifdef _WIN32
++  namespace {
++    using steady = std::chrono::steady_clock;
++
++    /**
++     * @brief Capture the session's display until `deadline` the way a stream does, counting frames.
++     */
++    json capture_until(platf::mem_type_e mem_type, steady::time_point deadline) {
++      ::video::config_t config {};
++      config.width = 1280;
++      config.height = 720;
++      config.framerate = 30;
++      config.bitrate = 10000;
++      config.slicesPerFrame = 1;
++      config.numRefFrames = 1;
++      const auto output_name = display_device::map_output_name(config::video.output_name);
++
++      int frames = 0;
++      int timeouts = 0;
++      int reinits = 0;
++      int width = 0;
++      int height = 0;
++      std::string error;
++      bool cursor = true;
++
++      std::shared_ptr<platf::display_t> disp;
++      std::list<std::shared_ptr<platf::img_t>> imgs;
++      while (steady::now() < deadline) {
++        if (!disp) {
++          disp = platf::display(mem_type, output_name, config);
++          if (!disp) {
++            error = "no display of this session can be captured";
++            std::this_thread::sleep_for(200ms);
++            continue;
++          }
++          error.clear();
++          width = disp->width;
++          height = disp->height;
++        }
++
++        auto push = [&](std::shared_ptr<platf::img_t> &&img, bool frame_captured) {
++          ++(frame_captured ? frames : timeouts);
++          return steady::now() < deadline;
++        };
++        auto pull = [&](std::shared_ptr<platf::img_t> &img_out) {
++          img_out.reset();
++          for (const auto &img : imgs) {
++            if (img.use_count() == 1) {
++              img_out = img;
++              break;
++            }
++          }
++          if (!img_out && imgs.size() < 4) {
++            img_out = disp->alloc_img();
++            if (img_out) {
++              imgs.push_back(img_out);
++            }
++          }
++          if (img_out) {
++            img_out->frame_timestamp.reset();
++          }
++          return static_cast<bool>(img_out);
++        };
++
++        const auto status = disp->capture(push, pull, &cursor);
++        if (status == platf::capture_e::reinit) {
++          // Desktop switch or mode change: open the display again, as the stream does.
++          ++reinits;
++          imgs.clear();
++          disp.reset();
++        } else if (status != platf::capture_e::ok) {
++          error = "capture failed with status " + std::to_string(static_cast<int>(status));
++          break;
++        }
++      }
++      imgs.clear();
++      disp.reset();
++
++      json result {{"frames", frames}, {"timeouts", timeouts}, {"reinits", reinits}, {"width", width}, {"height", height}};
++      if (!error.empty()) {
++        result["error"] = error;
++      }
++      return result;
++    }
++
++    /**
++     * @brief Move the mouse back and forth with SendInput until `stop`, and check that the cursor follows.
++     */
++    json move_mouse_until(const std::atomic_bool &stop) {
++      platf::syncThreadDesktop();
++      auto input = platf::input();
++      POINT start {};
++      const bool have_start = GetCursorPos(&start);
++      int moves = 0;
++      bool moved = false;
++      for (int dx = 40; !stop; dx = -dx) {
++        platf::move_mouse(input, dx, dx / 2);
++        ++moves;
++        POINT now {};
++        if (have_start && GetCursorPos(&now) && (now.x != start.x || now.y != start.y)) {
++          moved = true;
++        }
++        std::this_thread::sleep_for(100ms);
++      }
++      return {{"moves", moves}, {"cursor_moved", moved}};
++    }
++
++    /**
++     * @brief Open the session's default render endpoint through WASAPI loopback, as a stream does.
++     */
++    json read_audio() {
++      json result {{"ok", false}};
++      auto control = platf::audio_control();
++      if (!control) {
++        result["error"] = "audio control unavailable";
++        return result;
++      }
++      auto sink = control->sink_info();
++      if (!sink) {
++        result["error"] = "this session has no default render endpoint";
++        return result;
++      }
++      result["endpoint"] = sink->host;
++
++      constexpr std::uint32_t sample_rate = 48000;
++      constexpr std::uint32_t frame_size = sample_rate * 5 / 1000;  // 5 ms packets, as Moonlight uses
++      const std::uint8_t mapping[] {0, 1};
++      auto mic = control->microphone(mapping, 2, sample_rate, frame_size, true, false);
++      if (!mic) {
++        result["error"] = "WASAPI loopback capture failed";
++        return result;
++      }
++      std::vector<float> buffer(frame_size * 2);
++      int packets = 0;
++      for (int i = 0; i < 100; ++i) {
++        if (mic->sample(buffer) != platf::capture_e::ok) {
++          break;
++        }
++        ++packets;
++      }
++      result["packets"] = packets;
++      result["ok"] = packets > 0;
++      return result;
++    }
++  }  // namespace
++
++  int run(int seconds) {
++    BOOST_LOG(info) << "SplitPlay: self-test for "sv << seconds << " s in session "sv << platf::target_session_id();
++    json result {
++      {"version", splitplay::version()},
++      {"session", platf::target_session_id()},
++    };
++
++    auto mem_type = platf::mem_type_e::system;
++    if (const auto encoder = ::video::chosen_encoder_info()) {
++      result["encoder"] = std::string {encoder->first};
++      mem_type = encoder->second;
++    } else {
++      result["encoder"] = nullptr;
++    }
++    result["capture_memory"] = mem_type == platf::mem_type_e::dxgi ? "gpu" : "system";
++
++    std::atomic_bool stop {false};
++    json input_result;
++    std::thread mouse {[&]() {
++      input_result = move_mouse_until(stop);
++    }};
++    result["capture"] = capture_until(mem_type, std::chrono::steady_clock::now() + std::chrono::seconds {seconds});
++    stop = true;
++    mouse.join();
++    result["input"] = input_result;
++    result["audio"] = read_audio();
++
++    const bool ok = result["capture"]["frames"].get<int>() > 0;
++    result["ok"] = ok;
++    const auto text = result.dump();
++
++    const auto path = platf::appdata() / "self-test.json";
++    std::ofstream {path} << text << '\n';
++    if (ok) {
++      BOOST_LOG(info) << "SplitPlay: self-test passed: "sv << text;
++    } else {
++      BOOST_LOG(error) << "SplitPlay: self-test failed, no frame was captured: "sv << text;
++    }
++    std::cout << text << std::endl;
++    return ok ? 0 : 1;
++  }
++#else
++  int run(int) {
++    BOOST_LOG(error) << "SplitPlay: the self-test is only implemented on Windows"sv;
++    return 1;
++  }
++#endif
++}  // namespace splitplay::self_test
+diff --git a/src/splitplay/self_test.h b/src/splitplay/self_test.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..9b69cb9eb3ebe3ef9153814d792be510064376f5
+--- /dev/null
++++ b/src/splitplay/self_test.h
+@@ -0,0 +1,22 @@
++/**
++ * @file src/splitplay/self_test.h
++ * @brief In-session self-test of the SplitPlay worker (`--self-test <seconds>`).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++#pragma once
++
++namespace splitplay::self_test {
++  /**
++   * @brief Exercise the desk session the way a stream does, without a Moonlight client.
++   *
++   * Must run after platf::init(), input::init() and video::probe_encoders(). For `seconds` it captures the
++   * session's display with the encoder's capture path (DXGI Desktop Duplication), moves the mouse with
++   * SendInput (so that the cursor, drawn from the DDA pointer shape, changes the picture) and reads the
++   * session's default render endpoint through WASAPI loopback. The result is logged and written to
++   * `<desk-dir>/self-test.json`.
++   *
++   * @param seconds Duration of the capture.
++   * @return Process exit code: 0 when frames were captured, 1 otherwise.
++   */
++  int run(int seconds);
++}  // namespace splitplay::self_test
+diff --git a/src/video.cpp b/src/video.cpp
+index 5306f37d7068ac6406488e5b8ee2724c607036d8..114d8ac89db294b2ff9ad1ceb035df7a067c028c 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -3212,6 +3212,13 @@ namespace video {
+     return true;
+   }
+ 
++  std::optional<std::pair<std::string_view, platf::mem_type_e>> chosen_encoder_info() {
++    if (!chosen_encoder) {
++      return std::nullopt;
++    }
++    return std::make_pair(chosen_encoder->name, chosen_encoder->platform_formats->dev_type);
++  }
++
+   int probe_encoders() {
+     if (!allow_encoder_probing()) {
+       // Error already logged
+diff --git a/src/video.h b/src/video.h
+index b70ed53b3a02b8f93dc0cff6032f25e8b6fa16dd..4e05c302fdb24046c56c18a9e23a87b778bb7e2c 100644
+--- a/src/video.h
++++ b/src/video.h
+@@ -6,7 +6,9 @@
+ 
+ // standard includes
+ #include <chrono>
++#include <optional>
+ #include <string_view>
++#include <utility>
+ 
+ // local includes
+ #include "input.h"
+@@ -641,6 +643,13 @@ namespace video {
+    */
+   int probe_encoders();
+ 
++  /**
++   * @brief SplitPlay: the encoder chosen by the last probe, for the worker's self-test.
++   *
++   * @return Encoder name and the capture memory type it needs, or nothing when no encoder works.
++   */
++  std::optional<std::pair<std::string_view, platf::mem_type_e>> chosen_encoder_info();
++
+   // Several NTSC standard refresh rates are hardcoded here, because their
+   // true rate requires a denominator of 1001. ffmpeg's av_d2q() would assume it could
+   // reduce 29.97 to 2997/100 but this would be slightly wrong. We also include

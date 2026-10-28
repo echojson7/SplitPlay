@@ -48,6 +48,26 @@ public static class IpcProtocol
     {
         public const string ClientConnected = "client_connected";
         public const string ClientDisconnected = "client_disconnected";
+
+        /// <summary>Worker: a Moonlight client asked for a mode, <c>data: {width, height, fps}</c>; forwarded to the seat as <c>set_mode</c>.</summary>
+        public const string ModeRequested = "mode_requested";
+
+        /// <summary>Seat: the RDP connection dropped and the seat is reconnecting, <c>data: {reason}</c>.</summary>
+        public const string SessionLost = "session_lost";
+
+        /// <summary>Seat: the RDP connection is back, <c>data: {session}</c>.</summary>
+        public const string SessionRestored = "session_restored";
+    }
+
+    /// <summary>Exit codes shared by the children (ipc.md "Child command lines").</summary>
+    public static class ExitCodes
+    {
+        public const int Shutdown = 0;
+        public const int InvalidCommandLine = 2;
+        public const int HandshakeFailed = 3;
+
+        /// <summary>Seat: gave up reconnecting the RDP session.</summary>
+        public const int SeatGaveUp = 4;
     }
 }
 
@@ -76,7 +96,17 @@ public sealed record ReadyPorts
 
 public sealed record ReadyMessage : IpcMessage
 {
+    /// <summary>Worker: <c>ports.base</c>.</summary>
     public ReadyPorts? Ports { get; init; }
+
+    /// <summary>Seat: name of the input ring section (input_ring.h).</summary>
+    public string? InputRing { get; init; }
+
+    /// <summary>Seat: <c>freerdp</c>, or <c>null</c> for the null connector.</summary>
+    public string? Connector { get; init; }
+
+    /// <summary>Seat: the Windows session id of the logged-on desk session.</summary>
+    public int? Session { get; init; }
 }
 
 public sealed record HeartbeatMessage : IpcMessage
@@ -111,6 +141,42 @@ public sealed record WelcomeMessage : IpcMessage
     public int Protocol { get; init; } = IpcProtocol.Version;
 
     public IpcProfile Profile { get; init; } = new();
+
+    /// <summary>Seat only: where and as whom to open the loopback RDP session.</summary>
+    public IpcRdpTarget? Rdp { get; init; }
+}
+
+/// <summary>
+/// The seat's RDP target and credentials (<c>welcome.rdp</c>). The password must never reach a log, a command line or
+/// an environment block, so <see cref="ToString"/> masks it.
+/// </summary>
+public sealed record IpcRdpTarget
+{
+    public string Host { get; init; } = "127.0.0.2";
+
+    public int Port { get; init; } = 3389;
+
+    public string User { get; init; } = "";
+
+    public string Domain { get; init; } = ".";
+
+    public string Password { get; init; } = "";
+
+    public int Width { get; init; } = 1920;
+
+    public int Height { get; init; } = 1080;
+
+    public override string ToString() => $"rdp {{ {Domain}\\{User}@{Host}:{Port} {Width}x{Height}, password ***** }}";
+}
+
+/// <summary>Service → seat: resize the session through the RDP display-control channel.</summary>
+public sealed record SetModeMessage : IpcMessage, IIpcRequest
+{
+    public long Id { get; init; }
+
+    public int Width { get; init; }
+
+    public int Height { get; init; }
 }
 
 public sealed record SetProfileMessage : IpcMessage, IIpcRequest

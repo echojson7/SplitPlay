@@ -6,6 +6,8 @@
 //   <any name>.exe service uninstall   stops and deletes it
 //   --stub-service (set by install)    runs as an idle Windows service until the SCM stops it
 //   anything else                      prints its name and arguments and exits 0
+// Every call is appended to %ProgramData%\SplitPlay-ci-stub-calls.log so that the smoke test can check which
+// commands the installer ran (e.g. "splitplay.exe host prepare --skip-termwrap").
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -40,7 +42,7 @@ static class Program
     {
         string exe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "SplitPlay.Service.exe");
         // binPath= "\"C:\...\SplitPlay.Service.exe\" --stub-service"
-        return Run("sc.exe", "create " + Name + " binPath= \"\\\"" + exe + "\\\" --stub-service\" start= delayed-auto DisplayName= \"SplitPlay Host Service\"");
+        return Run("sc.exe", "create " + Name + " binPath= \"\\\"" + exe + "\\\" --stub-service\" start= auto DisplayName= \"SplitPlay Host Service\"");
     }
 
     static int Uninstall()
@@ -63,8 +65,22 @@ static class Program
         return Run("sc.exe", "delete " + Name);
     }
 
+    static void Record(string[] args)
+    {
+        try
+        {
+            string log = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "SplitPlay-ci-stub-calls.log");
+            File.AppendAllText(log, Path.GetFileName(Process.GetCurrentProcess().MainModule.FileName) + " " + string.Join(" ", args) + Environment.NewLine);
+        }
+        catch (Exception e)
+        {
+            Console.Error.WriteLine("could not record the call: " + e.Message);
+        }
+    }
+
     static int Main(string[] args)
     {
+        Record(args);
         if (args.Length >= 2 && args[0] == "service")
         {
             if (args[1] == "install") return Install();

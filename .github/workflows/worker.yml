@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - 'stage2/**'
+      - 'stage3/**'
       - main
     paths:
       - 'worker/**'
@@ -126,3 +127,46 @@ jobs:
           name: worker-win-x64
           path: worker/out/
           if-no-files-found: error
+
+  # The worker as SplitPlay.Service runs it: SYSTEM with TokenSessionId set to a loopback RDP session of a local
+  # user (FreeRDP from MSYS2 stands in for splitplay-seat). No GPU here, so the session renders on Microsoft Basic
+  # Render Driver and the software encoder is used; NVENC is checked on a real host.
+  session-test:
+    name: worker-in-rdp-session
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Download worker-win-x64
+        uses: actions/download-artifact@v5
+        with:
+          name: worker-win-x64
+          path: worker/out
+
+      # Test client only: the product connects with splitplay-seat.
+      - name: Setup MSYS2 UCRT64 with FreeRDP
+        id: msys2
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
+        with:
+          msystem: UCRT64
+          update: false
+          cache: true
+          install: mingw-w64-ucrt-x86_64-freerdp
+
+      - name: Session test
+        shell: pwsh
+        run: >-
+          ./worker/scripts/session-test.ps1 -Exe worker/out/splitplay-worker.exe
+          -FreeRdp "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
+          -WorkDir "$env:RUNNER_TEMP\splitplay-session" -RequireAudio
+
+      - name: Upload session test logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: worker-session-test-logs
+          path: ${{ runner.temp }}/splitplay-session
+          if-no-files-found: ignore

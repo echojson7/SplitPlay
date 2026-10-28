@@ -22,7 +22,10 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
       "user": "splitplay-desk1",
       "basePort": 48089,
       "autostart": true,
+      "userManaged": true,
       "gpu": "auto",
+      "disableBluetoothUserService": true,
+      "workerSettings": { "min_log_level": "warning" },
       "profile": {
         "fps": 120,
         "width": 1920,
@@ -42,7 +45,16 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
 
 Rules:
 
-- `id` unique, `[a-z0-9-]{1,32}`; `user` unique, a local Windows account name (created by the service if missing).
+- `id` unique, `[a-z0-9-]{1,32}`; `user` unique, a local Windows account name. It may not be the user signed in at the
+  console.
+- `userManaged` is set by the service. `true`: SplitPlay created the account and owns its password (random, never
+  expires, rotated when the stored secret is lost, removable with `deleteUser=true`). `false`: an existing account the
+  owner picked; SplitPlay stores the password the owner typed (verified with `LogonUser`) and never changes the account.
+  Desk passwords live DPAPI-protected in `secrets\desks\<id>.bin`, never in this file.
+- `disableBluetoothUserService` (default `true`) stops the per-user `BluetoothUserService_*` instance in the desk
+  session so it does not compete with the console user's Bluetooth devices (issue #3).
+- `workerSettings`: extra Sunshine `name=value` settings passed to the worker after the service defaults (ipc.md);
+  names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters; `port` is reserved.
 - `basePort` unique; if omitted the service picks `basePortStart + stride * k` with the lowest free `k ≥ 0`. A desk occupies `basePort-5 … basePort+21`.
 - `gpu`: `"auto"` or an adapter LUID string `"0x…"`.
 - `profile` may also carry `gpuLuid` and `cpuSet` (array of logical CPU indices), passed to the worker as in ipc.md.

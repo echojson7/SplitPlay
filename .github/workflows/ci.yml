@@ -11,6 +11,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # service.yml may fetch a native-win-x64 artifact; a called workflow cannot get more than the caller grants
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -62,6 +63,8 @@ jobs:
           Copy-Item -Recurse "$a/web-dist" "$s/service/wwwroot"
           Copy-Item -Recurse "$a/service-win-x64/tray/*" "$s/tray"
           Copy-Item -Recurse "$a/native-win-x64/*" "$s/native"
+          # TermWrap is built with the native part but installed to its own folder.
+          if (Test-Path "$s/native/termwrap") { Move-Item "$s/native/termwrap" "$s/termwrap" }
           Copy-Item -Recurse "$a/worker-win-x64/*" "$s/worker"
           Copy-Item -Recurse "$a/drivers-win-x64/*" "$s/drivers"
           foreach ($d in Get-ChildItem $s -Directory) {
@@ -95,7 +98,7 @@ jobs:
           Get-ChildItem build/installer | ForEach-Object { '{0} {1:N1} MB' -f $_.Name, ($_.Length / 1MB) }
 
       - name: Smoke test (silent install, upgrade, uninstall)
-        run: ./installer/ci/Test-Installer.ps1 -Setup (Get-Item build/installer/SplitPlay-Setup-*.exe).FullName -LogDir build/logs
+        run: ./installer/ci/Test-Installer.ps1 -Setup (Get-Item build/installer/SplitPlay-Setup-*.exe).FullName -LogDir build/logs -RealStage
 
       - name: End-to-end test (installed service runs a desk with the stub worker)
         run: ./installer/ci/Test-EndToEnd.ps1 -Setup (Get-Item build/installer/SplitPlay-Setup-*.exe).FullName -LogDir build/logs

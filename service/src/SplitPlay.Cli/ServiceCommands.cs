@@ -67,7 +67,7 @@ internal static class ServiceCommands
             BuildInfo.ServiceDisplayName,
             "Runs SplitPlay desks: isolated Windows sessions streamed to Moonlight clients.",
             commandLine,
-            DelayedAutoStart: true,
+            DelayedAutoStart: false, // the tray opens at sign-in and must find the service up
             RestartDelays: [TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30)],
             FailureResetPeriod: TimeSpan.FromDays(1)));
 

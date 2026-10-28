@@ -33,6 +33,12 @@ public static class ApiErrorCodes
     public const string CsrfFailed = "csrf_failed";
     public const string NotImplemented = "not_implemented";
     public const string ChildUnavailable = "child_unavailable";
+
+    /// <summary>The desk's Windows user is the one signed in at the console (409).</summary>
+    public const string ConsoleUser = "console_user";
+
+    /// <summary><c>deleteUser=true</c> on an account SplitPlay did not create (409).</summary>
+    public const string UserNotManaged = "user_not_managed";
     public const string ChildError = "child_error";
     public const string Internal = "internal";
 }
@@ -61,6 +67,19 @@ public sealed class DeskDto
 
     public string? User { get; set; }
 
+    /// <summary>See <see cref="DeskConfig.UserManaged"/>.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? UserManaged { get; set; }
+
+    /// <summary>True when a password for <see cref="User"/> is stored. The password itself is never returned.</summary>
+    public bool HasPassword { get; set; }
+
+    /// <summary>
+    /// True when <c>profile.width/height</c> changed while the desk was running and the seat could not resize the
+    /// RDP session (no <c>set_mode</c> support): the new resolution applies after a restart.
+    /// </summary>
+    public bool ResolutionPendingRestart { get; set; }
+
     public DeskState State { get; set; }
 
     public int? SessionId { get; set; }
@@ -73,10 +92,21 @@ public sealed class DeskDto
 
     public ProfileConfig Profile { get; set; } = new();
 
+    public bool DisableBluetoothUserService { get; set; } = true;
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Dictionary<string, string>? WorkerSettings { get; set; }
+
     public DeskMetricsDto Metrics { get; set; } = new();
 
     public string? LastError { get; set; }
 }
+
+/// <summary>
+/// One entry of <c>GET /host/users</c>: an enabled local account that can be picked as a desk user (built-in accounts
+/// such as Administrator, Guest, DefaultAccount and WDAGUtilityAccount are left out).
+/// </summary>
+public sealed record HostUserDto(string Name, string? FullName, bool IsAdmin, bool IsConsoleUser, bool CreatedBySplitPlay);
 
 /// <summary><c>GET /auth/session</c>: <c>{setupRequired, authenticated, csrfToken?}</c>.</summary>
 public sealed record AuthSessionDto(

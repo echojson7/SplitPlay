@@ -72,8 +72,9 @@ std::vector<std::string> LineFramer::push(std::string_view bytes) {
 }
 
 bool is_known_service_message(std::string_view type) noexcept {
-  static constexpr std::array<std::string_view, 8> kTypes = {"welcome", "set_profile", "pair",     "list_clients",
-                                                             "unpair",  "send_sas",    "shutdown", "result"};
+  static constexpr std::array<std::string_view, 9> kTypes = {"welcome",  "set_profile", "pair",
+                                                             "list_clients", "unpair", "send_sas",
+                                                             "set_mode", "shutdown",    "result"};
   for (auto t : kTypes)
     if (t == type) return true;
   return false;

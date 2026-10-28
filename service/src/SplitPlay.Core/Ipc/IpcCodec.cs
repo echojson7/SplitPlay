@@ -31,6 +31,7 @@ public static class IpcCodec
         ["list_clients"] = Ctx.ListClientsMessage,
         ["unpair"] = Ctx.UnpairMessage,
         ["send_sas"] = Ctx.SendSasMessage,
+        ["set_mode"] = Ctx.SetModeMessage,
         ["shutdown"] = Ctx.ShutdownMessage,
         ["result"] = Ctx.ResultMessage,
     };
@@ -52,6 +53,7 @@ public static class IpcCodec
         ListClientsMessage => "list_clients",
         UnpairMessage => "unpair",
         SendSasMessage => "send_sas",
+        SetModeMessage => "set_mode",
         ShutdownMessage => "shutdown",
         ResultMessage => "result",
         UnknownIpcMessage u => u.TypeName,

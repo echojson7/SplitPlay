@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: MIT -->
+<!-- SplitPlayIdd: remote-session IddCx driver (UMDF 2). WDK/SDK from NuGet, see ..\Directory.Build.props. -->
+<Project DefaultTargets="Build" ToolsVersion="Current" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{BA7203B3-8BC3-4A5E-B826-DDB8A29100EA}</ProjectGuid>
+    <TemplateGuid>{32909489-7be5-497b-aafa-db6669d9b44b}</TemplateGuid>
+    <RootNamespace>SplitPlayIdd</RootNamespace>
+    <MinimumVisualStudioVersion>17.0</MinimumVisualStudioVersion>
+    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0.26100.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Configuration">
+    <PlatformToolset>WindowsUserModeDriver10.0</PlatformToolset>
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <DriverType>UMDF</DriverType>
+    <!-- Universal: only OneCoreUAP APIs; ApiValidator enforces it at build time. -->
+    <DriverTargetPlatform>Universal</DriverTargetPlatform>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Label="Configuration">
+    <TargetVersion>Windows10</TargetVersion>
+    <UseDebugLibraries Condition="'$(Configuration)' == 'Debug'">true</UseDebugLibraries>
+    <UseDebugLibraries Condition="'$(Configuration)' == 'Release'">false</UseDebugLibraries>
+    <!-- UMDF 2.33 ships with Windows 11 22H2+; the minimum OS for SplitPlay is 24H2 (26100). -->
+    <UMDF_VERSION_MAJOR>2</UMDF_VERSION_MAJOR>
+    <UMDF_VERSION_MINOR>33</UMDF_VERSION_MINOR>
+    <IndirectDisplayDriver>true</IndirectDisplayDriver>
+    <!-- Headers and stub library of IddCx 1.10 (selects um\iddcx\1.10). The driver still loads on IddCx 1.4+,
+         see IDDCX_MINIMUM_VERSION_REQUIRED below; newer DDIs are used only behind IDD_IS_FUNCTION_AVAILABLE. -->
+    <IDDCX_VERSION_MAJOR>1</IDDCX_VERSION_MAJOR>
+    <IDDCX_VERSION_MINOR>10</IDDCX_VERSION_MINOR>
+    <Driver_SpectreMitigation>Spectre</Driver_SpectreMitigation>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <ImportGroup Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+
+  <PropertyGroup>
+    <TargetName>SplitPlayIdd</TargetName>
+    <OutDir>$(SplitPlayOutRoot)$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(SplitPlayOutRoot)obj\$(MSBuildProjectName)\$(Platform)\$(Configuration)\</IntDir>
+    <!-- Signing is done after packaging by drivers\scripts\Build-Drivers.ps1 (throwaway test certificate in CI). -->
+    <EnableTestSign>false</EnableTestSign>
+    <SignMode>Off</SignMode>
+    <DebuggerFlavor>DbgengRemoteDebugger</DebuggerFlavor>
+    <!-- Catalog for Windows 11 24H2+ (Germanium), matching the NT$ARCH$.10.0...26100 models section. -->
+    <Inf2CatWindowsVersionList>10_GE_X64</Inf2CatWindowsVersionList>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(MSBuildThisFileDirectory)include;$(SplitPlayNativeInclude);%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <PreprocessorDefinitions>UMDF_DRIVER;IDDCX_VERSION_MAJOR=1;IDDCX_VERSION_MINOR=10;IDDCX_MINIMUM_VERSION_REQUIRED=4;_UNICODE;UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <WarningLevel>Level4</WarningLevel>
+      <!-- Stage 2: warnings are reported but not fatal until the first clean CI build; then switch to true. -->
+      <TreatWarningAsError>false</TreatWarningAsError>
+      <ExceptionHandling>false</ExceptionHandling>
+      <AdditionalOptions>/permissive- /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>%(AdditionalDependencies);OneCoreUAP.lib;avrt.lib</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\Driver.cpp" />
+    <ClCompile Include="src\SwapChainProcessor.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="include\splitplay\idd_ioctl.h" />
+    <ClInclude Include="src\Driver.h" />
+    <ClInclude Include="src\ModeList.h" />
+    <ClInclude Include="src\SessionId.h" />
+    <ClInclude Include="src\Trace.h" />
+    <ClInclude Include="..\..\native\include\splitplay\capture_ring.h" />
+    <ClInclude Include="..\..\native\include\splitplay\trace.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- StampInf fills DriverVer from SplitPlayDriverVersion; InfVerif and Inf2Cat run on the stamped copy. -->
+    <Inf Include="SplitPlayIdd.inf">
+      <TimeStamp>$(SplitPlayDriverVersion)</TimeStamp>
+    </Inf>
+  </ItemGroup>
+  <ItemGroup>
+    <FilesToPackage Include="$(TargetPath)" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

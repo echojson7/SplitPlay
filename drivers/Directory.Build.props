@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: MIT -->
+<!--
+  Shared MSBuild settings for every project under drivers/.
+
+  The WDK and the Windows SDK come from NuGet (packages.config, restored into drivers\packages).
+  The package .props files point WDKContentRoot / WindowsSdkDir at the package contents; the
+  WindowsUserModeDriver10.0 platform toolset itself still comes from the "Windows Driver Kit"
+  Visual Studio component (present on the GitHub windows-2022 image).
+
+  If the packages are not restored the build falls back to whatever WDK is installed on the machine.
+  CI passes /p:SplitPlayRequireNuGetWdk=true so that a silent fallback fails the build instead
+  (see Directory.Build.targets).
+-->
+<Project>
+  <PropertyGroup>
+    <SplitPlayWdkVersion>10.0.26100.6584</SplitPlayWdkVersion>
+    <SplitPlayPackagesDir>$(MSBuildThisFileDirectory)packages\</SplitPlayPackagesDir>
+    <SplitPlayWdkPackage>$(SplitPlayPackagesDir)Microsoft.Windows.WDK.x64.$(SplitPlayWdkVersion)\</SplitPlayWdkPackage>
+    <SplitPlaySdkPackage>$(SplitPlayPackagesDir)Microsoft.Windows.SDK.CPP.$(SplitPlayWdkVersion)\</SplitPlaySdkPackage>
+    <SplitPlaySdkX64Package>$(SplitPlayPackagesDir)Microsoft.Windows.SDK.CPP.x64.$(SplitPlayWdkVersion)\</SplitPlaySdkX64Package>
+
+    <!-- Contract headers (capture_ring.h, trace.h) are consumed read-only from native/include. -->
+    <SplitPlayNativeInclude>$(MSBuildThisFileDirectory)..\native\include</SplitPlayNativeInclude>
+
+    <!-- Four-part driver version, stamped into DriverVer by StampInf. CI passes 0.1.0.<run number>. -->
+    <SplitPlayDriverVersion Condition="'$(SplitPlayDriverVersion)' == ''">0.1.0.0</SplitPlayDriverVersion>
+
+    <!-- Projects set OutDir/IntDir from these after Microsoft.Cpp.props:
+         drivers\build\<Platform>\<Configuration>\ and drivers\build\obj\<project>\... -->
+    <SplitPlayOutRoot>$(MSBuildThisFileDirectory)build\</SplitPlayOutRoot>
+  </PropertyGroup>
+
+  <Import Project="$(SplitPlayWdkPackage)build\native\Microsoft.Windows.WDK.x64.props"
+          Condition="Exists('$(SplitPlayWdkPackage)build\native\Microsoft.Windows.WDK.x64.props') and '$(Platform)' == 'x64'" />
+  <Import Project="$(SplitPlaySdkX64Package)build\native\Microsoft.Windows.SDK.cpp.x64.props"
+          Condition="Exists('$(SplitPlaySdkX64Package)build\native\Microsoft.Windows.SDK.cpp.x64.props') and '$(Platform)' == 'x64'" />
+  <Import Project="$(SplitPlaySdkPackage)build\native\Microsoft.Windows.SDK.cpp.props"
+          Condition="Exists('$(SplitPlaySdkPackage)build\native\Microsoft.Windows.SDK.cpp.props')" />
+</Project>

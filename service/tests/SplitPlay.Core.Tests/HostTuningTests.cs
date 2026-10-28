@@ -57,6 +57,8 @@ public sealed class HostTuningTests : IDisposable
         Assert.Equal("0", _registry.Get(HostTuner.TerminalServerKey, "fDenyTSConnections")!.Data);
         Assert.Equal("0", _registry.Get(HostTuner.TerminalServerKey, "fSingleSessionPerUser")!.Data);
         Assert.Equal("1", _registry.Get(HostTuner.RdpTcpKey, "UserAuthentication")!.Data);
+        Assert.Equal("1", _registry.Get(HostTuner.RdpTcpKey, "fInheritColorDepth")!.Data);
+        Assert.Equal("5", _registry.Get(HostTuner.RdpTcpKey, "ColorDepth")!.Data);
         Assert.Equal("1", _registry.Get(HostTuner.PolicyKey, "bEnumerateHWBeforeSW")!.Data);
         Assert.Equal("4", _registry.Get(HostTuner.WinStationsKey, "DWMFRAMEINTERVAL")!.Data);
         Assert.Equal("0", _registry.Get(HostTuner.PolicyKey, "MaxIdleTime")!.Data);

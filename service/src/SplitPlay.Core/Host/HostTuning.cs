@@ -130,6 +130,10 @@ public sealed class HostTuner
             new("fDenyTSConnections", TerminalServerKey, "fDenyTSConnections", RegValue.DWord(0)),
             new("fSingleSessionPerUser", TerminalServerKey, "fSingleSessionPerUser", RegValue.DWord(0)),
             new("UserAuthentication", RdpTcpKey, "UserAuthentication", RegValue.DWord(1)),
+            // 32 bpp desk sessions: Windows' default RDP-Tcp caps them at 16 bpp, and fInheritColorDepth alone is not
+            // enough (measured in native CI). Applies to sessions started after TermService restarts.
+            new("fInheritColorDepth", RdpTcpKey, "fInheritColorDepth", RegValue.DWord(1)),
+            new("ColorDepth", RdpTcpKey, "ColorDepth", RegValue.DWord(5)),
             new("bEnumerateHWBeforeSW", PolicyKey, "bEnumerateHWBeforeSW", RegValue.DWord(1)),
             new("DWMFRAMEINTERVAL", WinStationsKey, "DWMFRAMEINTERVAL", RegValue.DWord((uint)Math.Clamp(options.ComposeIntervalMs, 1, 100))),
             new("MaxIdleTime", PolicyKey, "MaxIdleTime", RegValue.DWord(0)),

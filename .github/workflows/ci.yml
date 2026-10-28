@@ -62,6 +62,8 @@ jobs:
           Copy-Item -Recurse "$a/web-dist" "$s/service/wwwroot"
           Copy-Item -Recurse "$a/service-win-x64/tray/*" "$s/tray"
           Copy-Item -Recurse "$a/native-win-x64/*" "$s/native"
+          # TermWrap is built with the native part but installed to its own folder.
+          if (Test-Path "$s/native/termwrap") { Move-Item "$s/native/termwrap" "$s/termwrap" }
           Copy-Item -Recurse "$a/worker-win-x64/*" "$s/worker"
           Copy-Item -Recurse "$a/drivers-win-x64/*" "$s/drivers"
           foreach ($d in Get-ChildItem $s -Directory) {

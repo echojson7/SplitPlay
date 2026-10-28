@@ -864,6 +864,29 @@ public sealed class DeskSupervisor : IHostedService
         return int.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
     }
 
+    /// <summary>
+    /// Sunshine settings for the worker: defaults recommended in worker/README.md, overridden by the desk's
+    /// <c>workerSettings</c>. Encoder, adapter, output and audio sink stay unset so that the worker picks the session's own.
+    /// </summary>
+    internal static IEnumerable<KeyValuePair<string, string>> WorkerSettings(string deskId, DeskConfig config)
+    {
+        var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["sunshine_name"] = $"{Environment.MachineName}-{deskId}",
+            ["min_log_level"] = "info",
+            ["nvenc_preset"] = "1",
+            ["nvenc_twopass"] = "disabled",
+            ["hevc_mode"] = "0",
+            ["av1_mode"] = "0",
+        };
+        foreach (var (name, value) in config.WorkerSettings ?? [])
+        {
+            settings[name] = value;
+        }
+
+        return settings;
+    }
+
     /// <summary>The worker command line (ipc.md "Child command lines") plus the desk's extra Sunshine settings.</summary>
     private ChildLaunchRequest WorkerLaunchRequest(string deskId, DeskConfig config, int? session, int attempt)
     {
@@ -879,7 +902,7 @@ public sealed class DeskSupervisor : IHostedService
         {
             args.AddRange(["--desk-dir", deskDirectory, "--pipe", pipe, "--desk", deskId]);
             args.Add(FormattableString.Invariant($"port={config.BasePort}"));
-            foreach (var (name, value) in config.WorkerSettings ?? [])
+            foreach (var (name, value) in WorkerSettings(deskId, config))
             {
                 args.Add($"{name}={value}");
             }

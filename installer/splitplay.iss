@@ -450,7 +450,10 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
-  { Upgrade: stop the running service so that its files can be replaced. net stop waits until it has stopped. }
+  { Upgrade: close the tray in every session (desk users get one from the HKLM Run entry too, and the Restart
+    Manager cannot close apps in other sessions), then stop the running service so that its files can be replaced.
+    net stop waits until it has stopped. }
+  RunHidden(SysTool('taskkill.exe'), '/F /IM SplitPlay.Tray.exe');
   if ServiceExists then
     RunHidden(SysTool('net.exe'), 'stop ' + ServiceName);
 end;

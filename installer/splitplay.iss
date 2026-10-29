@@ -329,8 +329,8 @@ begin
   Result := RunHidden(SysTool('WindowsPowerShell\v1.0\powershell.exe'),
     '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + AddQuotes(Script));
   if Result = ExitTimedOut then
-    Log(Format('  timed out after %d s; killed %s.exe and the process tree, waited up to %d s for Windows Installer',
-      [TimeoutSec, HelperImage, MsiIdleWaitSec]));
+    Log(Format('  timed out after %d s; killed %s.exe and the process tree, waited up to %d s for Windows Installer', [
+      TimeoutSec, HelperImage, MsiIdleWaitSec]));
   DeleteFile(Script);
 end;
 

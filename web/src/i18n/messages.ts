@@ -70,6 +70,17 @@ export const en = {
   'desk.revokeTitle': 'Remove {name}?',
   'desk.pairedAt': 'Added {date}',
   'desk.display': 'Display',
+
+  'live.title': 'Now',
+  'live.device': 'Device',
+  'live.stream': 'Stream',
+  'live.fps': 'FPS',
+  'live.ping': 'Ping',
+  'live.encode': 'Encoding',
+  'live.loss': 'Loss',
+  'live.none': 'No one is connected',
+  'live.unknownDevice': 'Unknown device',
+  'live.encodeValue': '{p50} / {p99} ms',
   'desk.custom': 'Custom',
   'desk.width': 'Width',
   'desk.height': 'Height',
@@ -205,6 +216,7 @@ export const en = {
   'unit.ms': '{value} ms',
   'unit.gb': '{value} GB',
   'unit.percent': '{value} %',
+  'unit.fps': '{value} FPS',
 } as const
 
 export type MessageKey = keyof typeof en
@@ -278,6 +290,17 @@ export const ru: Partial<Messages> = {
   'desk.revokeTitle': 'Отключить «{name}»?',
   'desk.pairedAt': 'Добавлено {date}',
   'desk.display': 'Экран',
+
+  'live.title': 'Сейчас',
+  'live.device': 'Устройство',
+  'live.stream': 'Поток',
+  'live.fps': 'FPS',
+  'live.ping': 'Пинг',
+  'live.encode': 'Кодирование',
+  'live.loss': 'Потери',
+  'live.none': 'Никто не подключён',
+  'live.unknownDevice': 'Неизвестное устройство',
+  'live.encodeValue': '{p50} / {p99} мс',
   'desk.custom': 'Своё',
   'desk.width': 'Ширина',
   'desk.height': 'Высота',
@@ -413,6 +436,7 @@ export const ru: Partial<Messages> = {
   'unit.ms': '{value} мс',
   'unit.gb': '{value} ГБ',
   'unit.percent': '{value} %',
+  'unit.fps': '{value} FPS',
 }
 
 export const LOCALES = { ru, en } as const

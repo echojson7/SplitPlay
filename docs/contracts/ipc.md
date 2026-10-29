@@ -50,9 +50,10 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 ```json
 {"type":"hello","protocol":1,"role":"worker","desk":"desk-1","pid":1234,"version":"0.1.0","session":3}
 {"type":"ready","ports":{"base":48089}}
-{"type":"heartbeat","seq":17,"state":"idle","metrics":{"fps":0,"bitrate_kbps":0,"encode_ms_p50":0,"encode_ms_p99":0,"loss_pct":0,"clients":0}}
+{"type":"heartbeat","seq":17,"state":"idle","metrics":{"fps":0,"bitrate_kbps":0,"encode_ms_p50":0,"encode_ms_p99":0,"loss_pct":0,"rtt_ms":null,"clients":0},"sessions":[]}
 {"type":"log","level":"info","message":"..."}
-{"type":"event","name":"client_connected","data":{"client":"Living room PC"}}
+{"type":"event","name":"client_connected","data":{"id":2,"client":"Living room PC","client_uuid":"…","address":"192.168.1.37","width":1920,"height":1080,"fps_requested":120,"codec":"hevc","bitrate_kbps_requested":50000,"hdr":false,"started_at":"2026-10-29T18:00:00Z"}}
+{"type":"event","name":"client_disconnected","data":{ …same fields as client_connected… }}
 {"type":"event","name":"mode_requested","data":{"width":2560,"height":1440,"fps":120}}
 {"type":"event","name":"session_lost","data":{"reason":"..."}}
 {"type":"event","name":"session_restored","data":{"session":3}}
@@ -60,6 +61,13 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 
 Events by role:
 
+- worker `client_connected`: a Moonlight stream is up: RTSP set it up, its threads run and the client has connected the
+  ENet control stream (the first traffic after RTSP). A launch whose client never gets that far (encoder failure, UDP
+  blocked) is never reported. `data` is a stream object (below). The service lists the stream on the desk and moves it
+  `Ready` → `Streaming`.
+- worker `client_disconnected`: a reported stream ended (client quit, timeout, unpair or `shutdown`). Same `data` as the
+  matching `client_connected`. The desk goes back to `Ready` when no stream is left. An older worker may send no
+  `data`; the service then drops its only stream, if it has exactly one.
 - worker `mode_requested`: a Moonlight client launched with this mode. The service forwards it to the seat as
   `set_mode`. The worker waits up to 3 s for the desktop size to change and carries on either way.
 - seat `session_lost`: the RDP connection dropped; the seat is reconnecting. The service keeps the worker running.
@@ -77,6 +85,55 @@ Events by role:
 
 `state` is a free-form short string for the UI (`idle`, `streaming`, `connecting`, `logged_on`).
 `metrics` keys are optional; the service passes unknown keys through to the Web API unchanged.
+
+#### Heartbeat with a stream (worker)
+
+```json
+{"type":"heartbeat","seq":42,"state":"streaming",
+ "metrics":{"fps":119.8,"bitrate_kbps":38450,"encode_ms_p50":3.1,"encode_ms_p99":5.4,"loss_pct":0,"rtt_ms":4,"clients":1},
+ "sessions":[{"id":2,"client":"Living room PC","client_uuid":"…","address":"192.168.1.37","width":1920,"height":1080,
+              "fps_requested":120,"codec":"hevc","bitrate_kbps_requested":50000,"hdr":false,"started_at":"2026-10-29T18:00:00Z",
+              "fps":119.8,"bitrate_kbps":38450,"loss_pct":0,"rtt_ms":4,"encode_ms_p50":3.1,"encode_ms_p99":5.4}]}
+```
+
+Stream object (`sessions[]` and the `data` of the client events):
+
+| Field | Meaning |
+|---|---|
+| `id` | RTSP launch-session id, unique while the worker runs |
+| `client`, `client_uuid` | name and uuid of the paired client (as `list_clients` reports them); `null` when unknown |
+| `address` | client IP address (IPv4-mapped IPv6 addresses are reported as plain IPv4) |
+| `width`, `height`, `fps_requested` | the mode the client launched with |
+| `codec` | `h264`, `hevc` or `av1` |
+| `bitrate_kbps_requested` | the client's bitrate setting |
+| `hdr` | the client asked for a 10-bit HDR stream |
+| `started_at` | UTC, ISO 8601, whole seconds |
+
+In `sessions[]` each stream also carries its own live numbers (`fps`, `bitrate_kbps`, `loss_pct`, `rtt_ms` (`null` until
+measured), `encode_ms_p50`, `encode_ms_p99`). `metrics` aggregates them: `fps` and `rtt_ms` are the maximum over the
+streams, `bitrate_kbps` the sum, `loss_pct` and the percentiles are pooled over all frames; `rtt_ms` is `null` while no
+stream has a measured round trip. With no stream every other value is 0 and `sessions` is `[]`.
+
+Worker metric definitions (all over the interval since the previous heartbeat, about 1 s):
+
+| Key | Source |
+|---|---|
+| `fps` | video frames put on the wire (repeated frames included, as Moonlight receives them) |
+| `bitrate_kbps` | bytes put on the wire for video: data and FEC shards with their headers and encryption prefix |
+| `encode_ms_p50`, `encode_ms_p99` | host processing latency per frame: from the capture timestamp (the desktop present time) to the moment the encoded frame is handed to the network, i.e. capture + convert + encode. The value Sunshine sends Moonlight as "host processing latency"; frames without a capture timestamp are skipped. Rounded to 0.1 ms |
+| `loss_pct` | frames the client reported lost (reference-frame invalidation ranges, and the legacy loss-stats count when a client sends it) per frame sent. Losses FEC recovered are not counted |
+| `rtt_ms` | ENet round-trip time of the control connection, as ENet measures it from its own pings |
+| `clients` | streams listed in `sessions` |
+
+Ordering: the streaming and RTSP threads only queue `client_connected`/`client_disconnected`; the worker's heartbeat
+thread takes the queue and the stream list in one step and writes the queued events, then the heartbeat. So a
+heartbeat that follows `client_connected` already lists the stream, one that follows `client_disconnected` no longer
+does, and a stream is reported within one heartbeat interval (an ended one within another 500 ms, when Sunshine reaps
+it). The service only applies heartbeats and client events from the worker connection that is current: a channel that
+was torn down cannot bring streams back or mark ids as ended (launch ids restart at 1 in every worker process). It
+treats the newest `sessions` as authoritative (it catches up a missed event), ignores a stream id that was reported
+disconnected, and forgets all streams when the worker stops or restarts. A worker that sends no `sessions` gets its
+streams from the events only (and loses them on a heartbeat with `clients: 0`).
 
 ### service → child
 

@@ -44,6 +44,12 @@ public sealed class SupervisorOptions
     /// <summary>Loopback address the seat connects to (127.0.0.2 so that it does not collide with the console's own loopback use).</summary>
     public string RdpHost { get; set; } = "127.0.0.2";
 
+    /// <summary>
+    /// <see cref="Launcher"/> <c>fake</c> only: every fake worker reports a Moonlight client streaming to it with live
+    /// metrics (UI development without hardware).
+    /// </summary>
+    public bool FakeStreams { get; set; }
+
     /// <summary>Namespace inside <c>\\.\pipe\</c>; tests use a unique one to run in parallel.</summary>
     public string PipeNamespace { get; set; } = PipeNames.DefaultNamespace;
 

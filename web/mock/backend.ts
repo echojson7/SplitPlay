@@ -5,6 +5,7 @@
 import type {
   Desk,
   DeskConfig,
+  DeskMetrics,
   DeskState,
   HostSettings,
   LogLine,
@@ -45,6 +46,8 @@ const VERSION = '0.1.0-mock'
 interface DeskEntry {
   desk: Desk
   clients: PairedClient[]
+  /** IP address the simulated Moonlight client streams from. */
+  clientAddress: string
   /** Remaining lifecycle states and when the next one is due. */
   pending: DeskState[]
   nextAt: number
@@ -57,6 +60,8 @@ function err(status: number, code: string, message: string): MockResponse {
 function ok(body: unknown, status = 200): MockResponse {
   return { status, body }
 }
+
+const IDLE_METRICS: DeskMetrics = { fps: 0, bitrateKbps: 0, encodeMsP50: 0, encodeMsP99: 0, lossPct: 0, rttMs: null, clients: 0 }
 
 function clone<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T
@@ -173,11 +178,13 @@ export class MockBackend {
       gpu: 'auto',
       profile: { fps: 120, width: 1920, height: 1080, bitrateKbps: 50000, codec: 'hevc' },
     })
-    a.desk.state = 'Ready'
+    a.desk.state = 'Streaming'
     a.desk.sessionId = 3
     a.desk.hasPassword = true
     a.desk.userManaged = false
     a.clients.push({ id: 'c0ffee00-0000-4000-8000-000000000001', name: 'Ноутбук Ани', pairedAt: '2026-10-20T18:00:00Z' })
+    a.clientAddress = '192.168.1.37'
+    this.connectClient(a)
     const b = this.addDesk({
       id: 'guest',
       name: 'Гостевой',
@@ -200,10 +207,12 @@ export class MockBackend {
         basePort,
         state: 'Defined',
         sessionId: null,
-        metrics: { fps: 0, bitrateKbps: 0, encodeMsP99: 0, clients: 0 },
+        metrics: { ...IDLE_METRICS },
+        stream: null,
         lastError: null,
       },
       clients: [],
+      clientAddress: `192.168.1.${40 + this.desks.size}`,
       pending: [],
       nextAt: 0,
     }
@@ -219,6 +228,28 @@ export class MockBackend {
     }
   }
 
+  private clientStreams(e: DeskEntry): DeskState[] {
+    return e.clients.length > 0 ? ['Streaming'] : []
+  }
+
+  /** A paired Moonlight client starts streaming to the desk (what the worker's client_connected reports). */
+  private connectClient(e: DeskEntry): void {
+    const client = e.clients[0]
+    const p = e.desk.profile
+    e.desk.stream = {
+      client: client?.name ?? null,
+      clientId: client?.id ?? null,
+      address: e.clientAddress,
+      width: p.width,
+      height: p.height,
+      fps: p.fps,
+      codec: p.codec,
+      bitrateKbps: p.bitrateKbps,
+      hdr: false,
+      startedAt: new Date(this.now()).toISOString(),
+    }
+  }
+
   /** Advances pending lifecycle transitions and refreshes simulated metrics. */
   private tick(): void {
     const t = this.now()
@@ -228,22 +259,26 @@ export class MockBackend {
         e.nextAt += this.stepMs
         if (e.desk.state === 'SessionReady') e.desk.sessionId = 2 + [...this.desks.keys()].indexOf(e.desk.id)
         if (e.desk.state === 'Stopped') e.desk.sessionId = null
+        if (e.desk.state === 'Streaming') this.connectClient(e)
+        else e.desk.stream = null
       }
-      const m = e.desk.metrics
       const p = e.desk.profile
-      const phase = Math.sin(t / 900 + p.fps)
       if (e.desk.state === 'Streaming') {
-        m.fps = Math.max(0, Math.round(p.fps * (0.97 + 0.03 * phase)))
-        m.bitrateKbps = Math.round(p.bitrateKbps * (0.75 + 0.1 * phase))
-        m.encodeMsP99 = Math.round((1.2 + 0.4 * phase + 120 / p.fps) * 100) / 100
-        m.clients = 1
-      } else if (e.desk.state === 'Ready') {
-        m.fps = 0
-        m.bitrateKbps = 0
-        m.encodeMsP99 = 0
-        m.clients = 0
+        // A good wired LAN: a steady frame rate, a little bitrate swing, rare small losses.
+        const phase = Math.sin(t / 900 + p.fps)
+        const jitter = Math.sin(t / 370 + p.width)
+        const p50 = Math.round((2.6 + 0.4 * phase + 60 / p.fps) * 10) / 10
+        e.desk.metrics = {
+          fps: Math.round(p.fps * (0.992 + 0.006 * phase)),
+          bitrateKbps: Math.round(p.bitrateKbps * (0.72 + 0.08 * phase)),
+          encodeMsP50: p50,
+          encodeMsP99: Math.round((p50 + 1.8 + 1.2 * Math.abs(jitter)) * 10) / 10,
+          lossPct: jitter > 0.93 ? Math.round((jitter - 0.9) * 40) / 10 : 0,
+          rttMs: Math.round(3 + 1.5 * jitter),
+          clients: 1,
+        }
       } else {
-        e.desk.metrics = { fps: 0, bitrateKbps: 0, encodeMsP99: 0, clients: 0 }
+        e.desk.metrics = { ...IDLE_METRICS }
       }
     }
   }
@@ -385,19 +420,22 @@ export class MockBackend {
         e.desk.lastError = null
         e.desk.resolutionPendingRestart = false
         e.desk.state = 'Provisioning'
-        this.schedule(e, ['Connecting', 'SessionReady', 'DisplayReady', 'Ready'])
+        // A desk with a paired device: the device connects once the desk is ready.
+        this.schedule(e, ['Connecting', 'SessionReady', 'DisplayReady', 'Ready', ...this.clientStreams(e)])
         return ok(clone(e.desk), 202)
       }
       if (method === 'POST' && action === 'stop') {
         if (!running && e.desk.state !== 'Faulted') return err(409, 'not_running', 'Desk is not running')
         e.desk.state = 'Stopping'
+        e.desk.stream = null
         this.schedule(e, ['Stopped'])
         return ok(clone(e.desk), 202)
       }
       if (method === 'POST' && action === 'restart') {
         e.desk.lastError = null
         e.desk.state = 'Stopping'
-        this.schedule(e, ['Stopped', 'Provisioning', 'Connecting', 'SessionReady', 'DisplayReady', 'Ready'])
+        e.desk.stream = null
+        this.schedule(e, ['Stopped', 'Provisioning', 'Connecting', 'SessionReady', 'DisplayReady', 'Ready', ...this.clientStreams(e)])
         return ok(clone(e.desk), 202)
       }
       if (action === 'clients' && method === 'GET' && !sub) return ok(clone(e.clients))

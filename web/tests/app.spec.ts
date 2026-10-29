@@ -54,6 +54,13 @@ describe('app smoke', () => {
     await router.push('/desks/anna')
     await settle()
     expect(w.text()).toContain('Ноутбук Ани')
+    // The "Now" group: the streaming device and its live numbers.
+    expect(w.find('[data-live-device]').text()).toBe('Ноутбук Ани192.168.1.37')
+    expect(w.find('[data-live-stream]').text()).toBe('1920×1080 · 120 FPS · HEVC · 50 Мбит/с')
+    expect(w.find('[data-live-fps]').text()).toMatch(/^\d+$/)
+    expect(w.find('[data-live-ping]').text()).toMatch(/^\d+ мс$/)
+    expect(w.find('[data-live-encode]').text()).toMatch(/^\d+,\d \/ \d+,\d мс$/)
+    expect(w.find('[data-live-loss]').text()).toMatch(/ %$/)
     expect(w.find('[data-address]').text()).toBe('192.168.1.20:48089')
     expect(w.find('details.more').attributes('open')).toBeUndefined()
 
@@ -70,6 +77,8 @@ describe('app smoke', () => {
     expect(router.currentRoute.value.fullPath).toBe('/desks/misha')
     expect(store.state.desks.find((d) => d.id === 'misha')?.profile).toMatchObject({ width: 1280, height: 720, fps: 60 })
     expect(w.find('h1').text()).toBe('Михаил')
+    expect(w.find('[data-live-none]').text()).toBe('Никто не подключён')
+    expect(w.find('[data-live-device]').exists()).toBe(false)
 
     for (const path of ['/settings', '/diagnostics/metrics', '/diagnostics/logs']) {
       await router.push(path)

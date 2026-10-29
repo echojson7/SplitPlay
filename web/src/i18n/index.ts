@@ -41,8 +41,8 @@ export function t(key: MessageKey, params?: MessageParams): string {
 }
 
 /** Number formatting for the current locale. */
-export function fmtNumber(value: number, maximumFractionDigits = 0): string {
-  return new Intl.NumberFormat(locale.value === 'ru' ? 'ru-RU' : 'en-US', { maximumFractionDigits }).format(value)
+export function fmtNumber(value: number, maximumFractionDigits = 0, minimumFractionDigits = 0): string {
+  return new Intl.NumberFormat(locale.value === 'ru' ? 'ru-RU' : 'en-US', { maximumFractionDigits, minimumFractionDigits }).format(value)
 }
 
 export function fmtBitrate(kbps: number): string {

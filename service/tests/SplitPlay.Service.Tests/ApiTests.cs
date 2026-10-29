@@ -231,9 +231,10 @@ public sealed class ApiTests
         var ready = await svc.WaitForStateAsync("desk-1", DeskState.Ready);
         Assert.Null(ready.LastError);
 
-        // Heartbeat metrics show up, unknown keys pass through unchanged.
-        var withMetrics = await svc.WaitForAsync("desk-1", d => d.Metrics.Extra?.ContainsKey("encode_ms_p50") == true, what: "metrics");
-        Assert.Equal(0, withMetrics.Metrics.Fps);
+        // An idle worker: no stream, zero metrics (key mapping and pass-through: LiveStatsTests).
+        Assert.Null(ready.Stream);
+        Assert.Equal(0, ready.Metrics.Fps);
+        Assert.Equal(0, ready.Metrics.Clients);
 
         // Starting twice is a conflict.
         var again = await svc.Client.PostAsync("/api/v1/desks/desk-1/start", null);

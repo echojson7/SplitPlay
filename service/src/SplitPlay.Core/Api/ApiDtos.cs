@@ -50,12 +50,54 @@ public sealed class DeskMetricsDto
 
     public double BitrateKbps { get; set; }
 
+    /// <summary>Median host capture-to-encoded time over the last heartbeat interval, ms.</summary>
+    public double EncodeMsP50 { get; set; }
+
     public double EncodeMsP99 { get; set; }
+
+    /// <summary>Frames the client reported lost, percent of the frames sent in the last interval.</summary>
+    public double LossPct { get; set; }
+
+    /// <summary>Round-trip time to the Moonlight client (ENet control peer), ms; null while nothing measured it.</summary>
+    public double? RttMs { get; set; }
 
     public double Clients { get; set; }
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
+}
+
+/// <summary>
+/// The Moonlight stream a desk is serving (<c>desk.stream</c>): who is connected and what the client asked for. Live
+/// numbers are in <see cref="DeskMetricsDto"/>.
+/// </summary>
+public sealed record DeskStreamDto
+{
+    /// <summary>The paired client's name, null when the worker does not know it.</summary>
+    public string? Client { get; init; }
+
+    /// <summary>The paired client's id (as in <c>GET /desks/{id}/clients</c>), null when unknown.</summary>
+    public string? ClientId { get; init; }
+
+    /// <summary>Client IP address.</summary>
+    public string? Address { get; init; }
+
+    public int Width { get; init; }
+
+    public int Height { get; init; }
+
+    /// <summary>Requested frame rate.</summary>
+    public int Fps { get; init; }
+
+    /// <summary><c>h264</c>, <c>hevc</c> or <c>av1</c>.</summary>
+    public string? Codec { get; init; }
+
+    /// <summary>Requested bitrate (Moonlight's bitrate setting).</summary>
+    public int BitrateKbps { get; init; }
+
+    public bool Hdr { get; init; }
+
+    public DateTimeOffset? StartedAt { get; init; }
 }
 
 /// <summary>Desk object returned by the desk endpoints.</summary>
@@ -101,6 +143,9 @@ public sealed class DeskDto
     public Dictionary<string, string>? WorkerSettings { get; set; }
 
     public DeskMetricsDto Metrics { get; set; } = new();
+
+    /// <summary>The stream the desk is serving, null when no Moonlight client is connected (the earliest one if several are).</summary>
+    public DeskStreamDto? Stream { get; set; }
 
     public string? LastError { get; set; }
 }
@@ -156,7 +201,22 @@ public sealed record HostMetricsDto(
     IReadOnlyList<GpuDto> Gpus);
 
 /// <summary>Metrics of one desk inside <see cref="MetricsDto"/>.</summary>
-public sealed record DeskMetricsEntryDto(string Id, double Fps, double BitrateKbps, double EncodeMsP99, double Clients);
+public sealed record DeskMetricsEntryDto(
+    string Id,
+    double Fps,
+    double BitrateKbps,
+    double EncodeMsP50,
+    double EncodeMsP99,
+    double LossPct,
+    double? RttMs,
+    double Clients)
+{
+    public static DeskMetricsEntryDto From(string id, DeskMetricsDto m)
+    {
+        ArgumentNullException.ThrowIfNull(m);
+        return new(id, m.Fps, m.BitrateKbps, m.EncodeMsP50, m.EncodeMsP99, m.LossPct, m.RttMs, m.Clients);
+    }
+}
 
 /// <summary><c>GET /metrics</c>.</summary>
 public sealed record MetricsDto(HostMetricsDto Host, IReadOnlyList<DeskMetricsEntryDto> Desks);

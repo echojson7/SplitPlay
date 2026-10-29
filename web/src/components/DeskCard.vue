@@ -5,7 +5,7 @@ import { computed, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import type { Desk } from '../api/types'
 import { canStart } from '../composables'
-import { deskProgress, stateTone } from '../desk'
+import { deskProgress, liveStream, stateTone, streamLine } from '../desk'
 import { t } from '../i18n'
 import AppIcon from './AppIcon.vue'
 import StateBadge from './StateBadge.vue'
@@ -18,6 +18,10 @@ const tone = computed(() => stateTone(props.desk.state))
 const progress = computed(() => deskProgress(props.desk.state))
 const pairable = computed(() => props.desk.state === 'Ready' || props.desk.state === 'Streaming')
 const link = computed(() => `/desks/${encodeURIComponent(props.desk.id)}`)
+const live = computed(() => {
+  const stream = liveStream(props.desk)
+  return stream ? streamLine(stream, props.desk.metrics) : null
+})
 
 // ---- "more" menu
 const menuOpen = ref(false)
@@ -57,7 +61,8 @@ function openRow(e: MouseEvent): void {
     <AppIcon class="row-icon" name="monitor" :size="16" />
     <div class="text">
       <RouterLink :to="link" class="title name">{{ desk.name }}</RouterLink>
-      <span class="desc">{{ desk.user }} · {{ desk.profile.width }}×{{ desk.profile.height }} · {{ desk.profile.fps }} FPS</span>
+      <span v-if="live" class="desc" data-live>{{ live }}</span>
+      <span v-else class="desc">{{ desk.user }} · {{ desk.profile.width }}×{{ desk.profile.height }} · {{ desk.profile.fps }} FPS</span>
       <span v-if="desk.state === 'Faulted' && desk.lastError" class="desc" :title="desk.lastError">{{ desk.lastError }}</span>
     </div>
 

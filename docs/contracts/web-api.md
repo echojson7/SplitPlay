@@ -45,7 +45,7 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 | GET | `/logs?component=service&desk=desk-1&tail=200` | array of `{"time","level","component","desk"?,"message"}` |
 | GET | `/config/export` | zip download (secrets excluded unless `?includeSecrets=true&password=...`) |
 | POST | `/config/import` | zip upload |
-| GET | `/ws` | WebSocket: a `desk` event per desk on connect and on every change, `metrics` every 2 s |
+| GET | `/ws` | WebSocket: a `desk` event per desk on connect and on every change (including `stream`), `metrics` every 2 s |
 
 ## Desk object (response)
 
@@ -64,10 +64,37 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
   "autostart": true,
   "gpu": "auto",
   "profile": { "fps": 120, "width": 1920, "height": 1080, "bitrateKbps": 60000, "codec": "hevc" },
-  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP99": 0, "clients": 0 },
+  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": null, "clients": 0 },
+  "stream": null,
   "lastError": null
 }
 ```
+
+A streaming desk:
+
+```json
+{
+  "state": "Streaming",
+  "metrics": { "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4, "lossPct": 0, "rttMs": 4, "clients": 1 },
+  "stream": {
+    "client": "Living room PC", "clientId": "…", "address": "192.168.1.37",
+    "width": 1920, "height": 1080, "fps": 120, "codec": "hevc", "bitrateKbps": 50000, "hdr": false,
+    "startedAt": "2026-10-29T18:00:00+00:00"
+  }
+}
+```
+
+`stream` is the Moonlight stream the desk serves, `null` when nobody is connected (with several, the earliest).
+`client` and `clientId` name the paired client (`clientId` as in `GET /desks/{id}/clients`), `null` when the worker does
+not know it; `width`, `height`, `fps`, `codec`, `bitrateKbps` and `hdr` are what the client asked for. It appears once the
+client has connected the stream's control channel and changes on the worker's `client_connected`/`client_disconnected`
+events and heartbeats (ipc.md), and is cleared when the worker stops or
+restarts. `state` follows it: `Ready` → `Streaming` while a stream runs, back to `Ready` when the last one ends.
+
+`metrics` are the worker's live numbers over the last second (definitions in ipc.md): `fps` and `bitrateKbps` actually
+sent, `encodeMsP50`/`encodeMsP99` host processing latency (capture to encoded frame), `lossPct` frames the client
+reported lost, `rttMs` round-trip time to the client (`null` until one is measured). All 0 (`rttMs` `null`) when
+nothing streams.
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.
@@ -86,7 +113,8 @@ value. Changing it on a running desk is `409 invalid_state`.
     "gpus": [{ "luid": "0x0000000000012345", "name": "NVIDIA GeForce RTX 4080", "utilizationPercent": null,
                "encoderPercent": null, "vramUsedMb": null, "vramTotalMb": 16376 }]
   },
-  "desks": [{ "id": "desk-1", "fps": 120, "bitrateKbps": 58000, "encodeMsP99": 2.1, "clients": 1 }]
+  "desks": [{ "id": "desk-1", "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4,
+              "lossPct": 0, "rttMs": 4, "clients": 1 }]
 }
 ```
 

@@ -28,7 +28,7 @@ public sealed class FakeChildLauncher(IOptions<SupervisorOptions> options, ILogg
     /// <summary>Final say over each child's options (e.g. <see cref="FakeChildOptions.RequestMode"/>).</summary>
     public Func<ChildLaunchRequest, FakeChildOptions, FakeChildOptions> Customize { get; set; } = (_, o) => o;
 
-    /// <summary>Workers send <c>client_connected</c> after ready.</summary>
+    /// <summary>Workers send <c>client_connected</c> after ready and then stream (also <see cref="SupervisorOptions.FakeStreams"/>).</summary>
     public bool SimulateClient { get; set; }
 
     /// <summary>Number of launches so far (all roles).</summary>
@@ -61,7 +61,7 @@ public sealed class FakeChildLauncher(IOptions<SupervisorOptions> options, ILogg
             Session = seat ? SeatSession(request) : request.SessionId,
             HeartbeatInterval = options.Value.HeartbeatInterval,
             Behavior = Behavior(request),
-            SimulateClient = !seat && SimulateClient,
+            SimulateClient = !seat && (SimulateClient || options.Value.FakeStreams),
             ConnectTimeout = TimeSpan.FromMilliseconds(options.Value.HelloTimeoutMs),
             OnMessage = m => _received.Enqueue((request.Role, m)),
             Log = message => logger.LogDebug("fake {Role} {Desk}/{Pid}: {Message}", request.Role, request.DeskId, pid, message),

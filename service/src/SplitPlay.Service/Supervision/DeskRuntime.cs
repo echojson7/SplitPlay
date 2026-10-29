@@ -35,6 +35,18 @@ internal sealed class DeskRuntime
 
     public DeskMetricsDto Metrics { get; set; } = new();
 
+    /// <summary>
+    /// The worker's running Moonlight streams, oldest first: added by <c>client_connected</c>, removed by
+    /// <c>client_disconnected</c>, replaced by every heartbeat that carries <c>sessions</c>. Cleared when the worker
+    /// stops or restarts.
+    /// </summary>
+    public List<IpcStreamSession> Streams { get; } = [];
+
+    /// <summary>Ids of streams that ended recently: a heartbeat written before the event must not bring them back.</summary>
+    private readonly Queue<long> _endedStreams = new();
+
+    private const int EndedStreamsKept = 32;
+
     public DateTimeOffset LastHeartbeat { get; set; }
 
     /// <summary>The worker's control connection while it is connected (used for pair, list_clients, …).</summary>
@@ -99,9 +111,193 @@ internal sealed class DeskRuntime
                 SteamIsolation = Config.SteamIsolationEnabled,
                 WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,
+                Stream = Streams.Count > 0 ? ToStreamDto(Streams[0]) : null,
                 LastError = Machine.LastError ?? Warning,
             };
         }
+    }
+
+    /// <summary>
+    /// A worker heartbeat: liveness, child state, metrics and (when present) the authoritative stream list. Ignored
+    /// unless <paramref name="from"/> is the desk's current worker connection: a torn-down channel can still deliver
+    /// buffered messages after <see cref="ClearStreams"/>.
+    /// </summary>
+    public WorkerUpdate ApplyHeartbeat(IpcConnection from, HeartbeatMessage heartbeat, DateTimeOffset now)
+    {
+        ArgumentNullException.ThrowIfNull(heartbeat);
+        lock (Gate)
+        {
+            if (!IsCurrent(from))
+            {
+                return WorkerUpdate.Ignored;
+            }
+
+            LastHeartbeat = now;
+            ChildState = heartbeat.State;
+            Metrics = MapMetrics(heartbeat.Metrics);
+            var changed = false;
+            if (heartbeat.Sessions is { } sessions)
+            {
+                changed = ReplaceStreams(IpcStreamSession.ListFromJson(sessions));
+            }
+            else if (heartbeat.Metrics?.ContainsKey("clients") == true && Metrics.Clients == 0)
+            {
+                // A worker without "sessions" that reports no clients has no stream either.
+                changed = ClearStreams();
+            }
+
+            return Settle(changed);
+        }
+    }
+
+    /// <summary><c>client_connected</c> from <paramref name="from"/>; ignored unless it is the current worker connection.</summary>
+    public WorkerUpdate ApplyClientConnected(IpcConnection from, IpcStreamSession stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        lock (Gate)
+        {
+            return IsCurrent(from) ? Settle(AddStream(stream)) : WorkerUpdate.Ignored;
+        }
+    }
+
+    /// <summary><c>client_disconnected</c> from <paramref name="from"/>; ignored unless it is the current worker connection.</summary>
+    public WorkerUpdate ApplyClientDisconnected(IpcConnection from, IpcStreamSession stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        lock (Gate)
+        {
+            if (!IsCurrent(from))
+            {
+                return WorkerUpdate.Ignored;
+            }
+
+            var changed = RemoveStream(stream);
+            if (!changed && stream.Id is null && stream.Address is null && Streams.Count == 1)
+            {
+                // An event without identifying fields (an older worker): the only stream is the one that ended.
+                changed = ClearStreams();
+            }
+
+            return Settle(changed);
+        }
+    }
+
+    /// <summary>True while <paramref name="from"/> is the desk's connected worker. Caller holds <see cref="Gate"/>.</summary>
+    public bool IsCurrent(IpcConnection from) => Connection is not null && ReferenceEquals(Connection, from);
+
+    /// <summary>
+    /// Ready and Streaming follow the stream list: Streaming while at least one Moonlight stream runs. A transition
+    /// publishes the desk itself, so <see cref="WorkerUpdate.Publish"/> is returned only for a list change without one.
+    /// </summary>
+    private WorkerUpdate Settle(bool listChanged)
+    {
+        var transitioned = Machine.State switch
+        {
+            DeskState.Ready when Streams.Count > 0 => Machine.TryFire(DeskTrigger.ClientConnected, out _),
+            DeskState.Streaming when Streams.Count == 0 => Machine.TryFire(DeskTrigger.ClientDisconnected, out _),
+            _ => false,
+        };
+        return listChanged && !transitioned ? WorkerUpdate.Publish : WorkerUpdate.Applied;
+    }
+
+    /// <summary><c>client_connected</c>: adds the stream, or updates it when it is already listed. True when the list changed.</summary>
+    public bool AddStream(IpcStreamSession stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        lock (Gate)
+        {
+            var index = Streams.FindIndex(s => s.SameStream(stream));
+            if (index >= 0)
+            {
+                if (Streams[index] == stream)
+                {
+                    return false;
+                }
+
+                Streams[index] = stream;
+                return true;
+            }
+
+            Streams.Add(stream);
+            SortStreams();
+            return true;
+        }
+    }
+
+    /// <summary><c>client_disconnected</c>: removes the stream. True when the list changed.</summary>
+    public bool RemoveStream(IpcStreamSession stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        lock (Gate)
+        {
+            if (stream.Id is long id)
+            {
+                _endedStreams.Enqueue(id);
+                while (_endedStreams.Count > EndedStreamsKept)
+                {
+                    _endedStreams.Dequeue();
+                }
+            }
+
+            return Streams.RemoveAll(s => s.SameStream(stream)) > 0;
+        }
+    }
+
+    /// <summary>A heartbeat with <c>sessions</c>: the worker's list is authoritative. True when the list changed.</summary>
+    public bool ReplaceStreams(IReadOnlyList<IpcStreamSession> streams)
+    {
+        ArgumentNullException.ThrowIfNull(streams);
+        lock (Gate)
+        {
+            var next = streams.Where(s => s.Id is not long id || !_endedStreams.Contains(id)).ToList();
+            var before = Streams.ToList();
+            Streams.Clear();
+            Streams.AddRange(next);
+            SortStreams();
+            return !before.SequenceEqual(Streams);
+        }
+    }
+
+    /// <summary>The worker stopped or restarts: no stream survives it. True when the list changed.</summary>
+    public bool ClearStreams()
+    {
+        lock (Gate)
+        {
+            _endedStreams.Clear();
+            if (Streams.Count == 0)
+            {
+                return false;
+            }
+
+            Streams.Clear();
+            return true;
+        }
+    }
+
+    private void SortStreams()
+    {
+        // OrderBy is stable: streams without a start time keep their order, after the timed ones.
+        var sorted = Streams.OrderBy(s => s.StartedAt ?? DateTimeOffset.MaxValue).ToList();
+        Streams.Clear();
+        Streams.AddRange(sorted);
+    }
+
+    public static DeskStreamDto ToStreamDto(IpcStreamSession s)
+    {
+        ArgumentNullException.ThrowIfNull(s);
+        return new DeskStreamDto
+        {
+            Client = s.Client,
+            ClientId = s.ClientUuid,
+            Address = s.Address,
+            Width = s.Width,
+            Height = s.Height,
+            Fps = s.FpsRequested,
+            Codec = s.Codec,
+            BitrateKbps = s.BitrateKbpsRequested,
+            Hdr = s.Hdr,
+            StartedAt = s.StartedAt,
+        };
     }
 
     /// <summary>Maps heartbeat metrics: known keys to camelCase fields, unknown keys passed through unchanged.</summary>
@@ -124,8 +320,18 @@ internal sealed class DeskRuntime
                 case "bitrate_kbps" when number is not null:
                     dto.BitrateKbps = number.Value;
                     break;
+                case "encode_ms_p50" when number is not null:
+                    dto.EncodeMsP50 = number.Value;
+                    break;
                 case "encode_ms_p99" when number is not null:
                     dto.EncodeMsP99 = number.Value;
+                    break;
+                case "loss_pct" when number is not null:
+                    dto.LossPct = number.Value;
+                    break;
+                case "rtt_ms":
+                    // null (or anything but a number): no stream has a measured round trip yet.
+                    dto.RttMs = number;
                     break;
                 case "clients" when number is not null:
                     dto.Clients = number.Value;
@@ -156,4 +362,17 @@ internal sealed class DeskRuntime
         GpuLuid = p.GpuLuid,
         CpuSet = p.CpuSet,
     };
+}
+
+/// <summary>What applying a worker message did.</summary>
+internal enum WorkerUpdate
+{
+    /// <summary>The message came from a worker connection that is no longer the desk's; nothing changed.</summary>
+    Ignored,
+
+    /// <summary>Applied; nothing to publish (or a state transition already published the desk).</summary>
+    Applied,
+
+    /// <summary>Applied and the stream list changed: publish the desk.</summary>
+    Publish,
 }

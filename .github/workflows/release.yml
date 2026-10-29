@@ -1,0 +1,55 @@
+# SPDX-License-Identifier: MIT
+# Publish the installer built by a ci run as a GitHub release (release assets download much faster than
+# Actions artifacts and need no sign-in).
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'ci run id whose SplitPlay-Setup artifact to publish'
+        required: true
+      tag:
+        description: 'Release tag, e.g. v0.1.0-preview.4'
+        required: true
+      title:
+        description: 'Release title (defaults to the tag)'
+        required: false
+      notes:
+        description: 'Release notes'
+        required: false
+      prerelease:
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          name: SplitPlay-Setup
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: dist
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+          TAG: ${{ inputs.tag }}
+          TITLE: ${{ inputs.title }}
+          NOTES: ${{ inputs.notes }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(dist/*.exe)
+          if [ ${#files[@]} -eq 0 ]; then echo "no .exe in the SplitPlay-Setup artifact" >&2; ls -laR dist; exit 1; fi
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" --jq .head_sha)
+          args=(--repo "$GITHUB_REPOSITORY" --target "$sha" --title "${TITLE:-$TAG}" --notes "${NOTES:-Installer from ci run $RUN_ID.}")
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          gh release create "$TAG" "${files[@]}" "${args[@]}"

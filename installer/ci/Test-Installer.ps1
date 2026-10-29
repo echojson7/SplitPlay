@@ -90,6 +90,25 @@ function Test-TermServiceUntouched {
     Check "TermService ServiceDll unchanged ($now)" ($now -eq $termServiceDll)
 }
 
+# Rights granted by one ACE of the service DACL ("CCLCSWRPLOCRRC" -> CC, LC, SW, RP, LO, CR, RC), or none.
+function Get-AceRights([string] $sddl, [string] $sid) {
+    if ($sddl -match "\(A;;([A-Z]+);;;$sid\)") { return @($Matches[1] -split '(..)' | Where-Object { $_ }) }
+    return @()
+}
+
+# Setup lets signed-in users start the service (the tray starts it without elevation), never stop or change it.
+function Test-ServiceDacl {
+    $sddl = (& sc.exe sdshow SplitPlay | Where-Object { $_ -match '^D:' }) -join ''
+    Write-Host "  service SDDL: $sddl"
+    foreach ($sid in 'IU', 'AU') {
+        $rights = @(Get-AceRights $sddl $sid)
+        Check "service DACL: $sid may query and start ($($rights -join ' '))" (($rights -contains 'RP') -and ($rights -contains 'LC'))
+        Check "service DACL: $sid may not stop, reconfigure or delete" (-not (@($rights | Where-Object { $_ -in 'WP', 'DC', 'SD', 'WD', 'WO', 'DT' }).Count))
+    }
+    $admins = @(Get-AceRights $sddl 'BA')
+    Check "service DACL: Administrators keep full control ($($admins -join ' '))" (@('RP', 'WP', 'DC', 'SD', 'WD', 'WO' | Where-Object { $admins -notcontains $_ }).Count -eq 0)
+}
+
 function Test-Installed([string] $label, [bool] $termWrap = $true) {
     Write-Host "== $label"
     foreach ($f in 'service\SplitPlay.Service.exe', 'service\splitplay.exe', 'tray\SplitPlay.Tray.exe',
@@ -133,6 +152,7 @@ function Test-Installed([string] $label, [bool] $termWrap = $true) {
     if ($svc) {
         Check "service is running (status $($svc.Status))" ($svc.Status -eq 'Running')
         Check "service display name ($($svc.DisplayName))" ($svc.DisplayName -eq 'SplitPlay Host Service')
+        Test-ServiceDacl
     }
 
     $rule = Get-Rule

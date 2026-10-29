@@ -182,6 +182,13 @@ public static partial class ApiEndpoints
 
         api.MapGet("/host/network", () => Results.Json(new HostNetworkDto(HostNetwork.Addresses()), Ctx.HostNetworkDto));
 
+        // ---- Windows services SplitPlay depends on (allow-list in RelatedServices)
+        api.MapGet("/host/services", (RelatedServices services) => Results.Json(services.List().ToList(), Ctx.ListHostServiceDto));
+        api.MapPost("/host/services/{name}/start", (string name, RelatedServices services) =>
+            Results.Json(services.Start(name), Ctx.HostServiceDto, statusCode: StatusCodes.Status202Accepted));
+        api.MapPost("/host/services/{name}/stop", (string name, RelatedServices services) =>
+            Results.Json(services.Stop(name), Ctx.HostServiceDto, statusCode: StatusCodes.Status202Accepted));
+
         api.MapPost("/desks", async (HttpRequest request, DeskSupervisor s) =>
         {
             var (desk, password) = await ReadDeskBodyAsync(request).ConfigureAwait(false);

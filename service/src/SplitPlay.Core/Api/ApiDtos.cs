@@ -159,6 +159,24 @@ public sealed record HostUserDto(string Name, string? FullName, bool IsAdmin, bo
 /// <summary><c>GET /host/network</c>: LAN IPv4 addresses of the host, those with a default gateway first.</summary>
 public sealed record HostNetworkDto(IReadOnlyList<string> Addresses);
 
+/// <summary>
+/// One entry of <c>GET /host/services</c>: a Windows service SplitPlay depends on. <see cref="Status"/> is one of
+/// <c>running</c>, <c>stopped</c>, <c>starting</c>, <c>stopping</c>, <c>missing</c> (see <see cref="HostServiceStatus"/>);
+/// <see cref="StartType"/> is <c>automatic</c>, <c>automaticDelayed</c>, <c>manual</c>, <c>disabled</c>, <c>boot</c> or
+/// <c>system</c>, null when the service is missing.
+/// </summary>
+public sealed record HostServiceDto(string Name, string DisplayName, string Status, string? StartType, bool CanStart, bool CanStop);
+
+/// <summary>Values of <see cref="HostServiceDto.Status"/>.</summary>
+public static class HostServiceStatus
+{
+    public const string Running = "running";
+    public const string Stopped = "stopped";
+    public const string Starting = "starting";
+    public const string Stopping = "stopping";
+    public const string Missing = "missing";
+}
+
 /// <summary><c>GET /auth/session</c>: <c>{setupRequired, authenticated, csrfToken?}</c>.</summary>
 public sealed record AuthSessionDto(
     bool SetupRequired,

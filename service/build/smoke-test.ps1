@@ -268,6 +268,20 @@ try {
         Write-Host "health: $($health | ConvertTo-Json -Compress)"
         if ($health.version -ne '0.1.0') { throw "unexpected version $($health.version)" }
 
+        Step 'console mode: related Windows services (SCM queries, allow-list)'
+        $services = @(Invoke-RestMethod -Uri "$base/host/services" -TimeoutSec 10)
+        Write-Host ($services | ForEach-Object { "$($_.name)=$($_.status)/$($_.startType) start=$($_.canStart) stop=$($_.canStop)" })
+        $names = @($services | ForEach-Object { $_.name })
+        foreach ($n in 'SplitPlay', 'TermService', 'UmRdpService', 'ViGEmBus', 'Audiosrv') {
+            if ($names -notcontains $n) { throw "GET /host/services lacks $n" }
+        }
+        $term = $services | Where-Object { $_.name -eq 'TermService' }
+        if ($term.status -eq 'missing' -or -not $term.displayName) { throw "TermService not found by the SCM: $($term | ConvertTo-Json -Compress)" }
+        $refused = $false
+        try { Invoke-RestMethod -Method Post -Uri "$base/host/services/Spooler/stop" -TimeoutSec 10 | Out-Null }
+        catch { $refused = $_.Exception.Response.StatusCode.value__ -eq 404 }
+        if (-not $refused) { throw 'POST /host/services/Spooler/stop was not refused with 404' }
+
         Step 'console mode: desk lifecycle via CLI, user name with spaces'
         Invoke-Cli desk create smoke-1 --name "Smoke test" --user "smoke desk 1" --fps 60 --codec hevc
         Invoke-Cli desk list

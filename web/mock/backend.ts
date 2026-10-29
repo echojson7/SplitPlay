@@ -7,6 +7,7 @@ import type {
   DeskConfig,
   DeskMetrics,
   DeskState,
+  HostService,
   HostSettings,
   LogLine,
   MetricsSnapshot,
@@ -133,6 +134,30 @@ function consoleUserProblem(user: unknown): string | null {
   return account ? `'${account.name}' is signed in at this PC's console; pick another user` : null
 }
 
+/** Windows services of the mock host (GET /host/services). */
+const MOCK_SERVICES: HostService[] = [
+  { name: 'SplitPlay', displayName: 'SplitPlay Host Service', status: 'running', startType: 'automatic', canStart: false, canStop: true },
+  { name: 'TermService', displayName: 'Службы удалённых рабочих столов', status: 'running', startType: 'automatic', canStart: false, canStop: true },
+  {
+    name: 'UmRdpService',
+    displayName: 'Перенаправитель портов пользовательского режима служб удалённых рабочих столов',
+    status: 'running',
+    startType: 'manual',
+    canStart: false,
+    canStop: true,
+  },
+  { name: 'ViGEmBus', displayName: 'Virtual Gamepad Emulation Bus', status: 'missing', startType: null, canStart: false, canStop: false },
+  { name: 'Audiosrv', displayName: 'Windows Audio', status: 'running', startType: 'automatic', canStart: false, canStop: true },
+  { name: 'Steam Client Service', displayName: 'Steam Client Service', status: 'stopped', startType: 'manual', canStart: true, canStop: false },
+]
+
+interface ServiceEntry {
+  service: HostService
+  /** Status the service reaches at `doneAt`, after `starting`/`stopping`. */
+  target?: 'running' | 'stopped'
+  doneAt: number
+}
+
 const RUNNING: DeskState[] = [
   'Provisioning',
   'Connecting',
@@ -159,12 +184,14 @@ export class MockBackend {
     logLevel: 'info',
   }
   private clientSeq = 1
+  private readonly services = new Map<string, ServiceEntry>()
 
   constructor(opts: MockBackendOptions = {}) {
     this.now = opts.now ?? (() => Date.now())
     this.stepMs = opts.stepMs ?? 700
     this.password = opts.password
     this.startedAt = this.now()
+    for (const s of MOCK_SERVICES) this.services.set(s.name.toLowerCase(), { service: clone(s), doneAt: 0 })
     this.seed()
   }
 
@@ -253,6 +280,15 @@ export class MockBackend {
   /** Advances pending lifecycle transitions and refreshes simulated metrics. */
   private tick(): void {
     const t = this.now()
+    for (const e of this.services.values()) {
+      if (e.target && t >= e.doneAt) {
+        const running = e.target === 'running'
+        e.service = { ...e.service, status: e.target, canStart: !running, canStop: running }
+        e.target = undefined
+        // The mock cannot go offline: a stopped SplitPlay comes back as if the tray had started it again.
+        if (!running && e.service.name === 'SplitPlay') this.changeService(e, 'running', 3)
+      }
+    }
     for (const e of this.desks.values()) {
       while (e.pending.length > 0 && t >= e.nextAt) {
         e.desk.state = e.pending.shift()!
@@ -461,6 +497,26 @@ export class MockBackend {
       return err(405, 'method_not_allowed', `${method} ${path}`)
     }
 
+    // --- host services
+    if (path === '/host/services' && method === 'GET')
+      return ok([...this.services.values()].map((e) => clone(e.service)).filter((s) => s.name !== 'Steam Client Service' || s.status !== 'missing'))
+    const sm = /^\/host\/services\/([^/]+)\/(start|stop)$/.exec(path)
+    if (sm && method === 'POST') {
+      const e = this.services.get(decodeURIComponent(sm[1]!).toLowerCase())
+      if (!e) return err(404, 'not_found', `service '${decodeURIComponent(sm[1]!)}' is not one of the services SplitPlay manages`)
+      if (sm[2] === 'start') {
+        if (!e.service.canStart) return err(409, 'invalid_state', `${e.service.name} cannot be started (${e.service.status})`)
+        this.changeService(e, 'running')
+      } else {
+        if (!e.service.canStop) return err(409, 'invalid_state', `${e.service.name} cannot be stopped (${e.service.status})`)
+        this.changeService(e, 'stopped')
+        // Dependents stop with it, as the SCM does.
+        const umrdp = this.services.get('umrdpservice')
+        if (e.service.name === 'TermService' && umrdp?.service.canStop) this.changeService(umrdp, 'stopped')
+      }
+      return ok(clone(e.service), 202)
+    }
+
     // --- host
     if (path === '/metrics' && method === 'GET') return ok(this.metrics())
     if (path === '/logs' && method === 'GET') return ok(this.logs(req.query ?? {}))
@@ -488,6 +544,12 @@ export class MockBackend {
     if (path === '/config/import' && method === 'POST') return { status: 204 }
 
     return err(404, 'not_found', `${method} ${path} is not part of the mock API`)
+  }
+
+  private changeService(e: ServiceEntry, target: 'running' | 'stopped', steps = 2): void {
+    e.service = { ...e.service, status: target === 'running' ? 'starting' : 'stopping', canStart: false, canStop: false }
+    e.target = target
+    e.doneAt = this.now() + this.stepMs * steps
   }
 
   private newSession(): MockResponse {

@@ -1,0 +1,197 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: MIT -->
+<!-- Shown by the tray (NavigateToString) while the web UI is unreachable. Same tokens as web/src/styles.css.
+     The tray fills in the language, the strings and the first state, and pushes later states as web messages. -->
+<html lang="__LANG__">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SplitPlay</title>
+<style>
+:root {
+  --bg: #f3f3f3;
+  --row: #fbfbfb;
+  --border: rgb(0 0 0 / 6%);
+  --text: #1a1a1a;
+  --text-2: #5d5d5d;
+  --disabled: rgb(0 0 0 / 36%);
+  --accent: #005fb8;
+  --accent-hover: #1a6ebf;
+  --accent-press: #3381c7;
+  --on-accent: #ffffff;
+  --ok: #0f7b0f;
+  --bad: #c42b1c;
+  --idle: #8a8a8a;
+  color-scheme: light;
+  font-family: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #202020;
+    --row: #2b2b2b;
+    --border: rgb(255 255 255 / 6%);
+    --text: #ffffff;
+    --text-2: #c5c5c5;
+    --disabled: rgb(255 255 255 / 36%);
+    --accent: #60cdff;
+    --accent-hover: #5abbe8;
+    --accent-press: #54a9d1;
+    --on-accent: #000000;
+    --ok: #6ccb5f;
+    --bad: #ff99a4;
+    --idle: #9d9d9d;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  user-select: none;
+  cursor: default;
+}
+
+.appname {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 48px;
+  padding: 0 16px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.page {
+  max-width: 1040px;
+  padding: 24px 40px 40px;
+}
+
+h1 {
+  margin: 0 0 28px;
+  font-size: 28px;
+  line-height: 36px;
+  font-weight: 600;
+}
+
+.srow {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 68px;
+  padding: 12px 16px;
+  background: var(--row);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.desc {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--text-2);
+}
+
+.desc::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--idle);
+  flex: none;
+}
+
+.desc.ok::before { background: var(--ok); }
+.desc.busy::before { background: var(--accent); }
+.desc.bad::before { background: var(--bad); }
+
+button {
+  font: inherit;
+  height: 32px;
+  min-width: 120px;
+  padding: 0 12px;
+  border-radius: 4px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-bottom-color: rgb(0 0 0 / 40%);
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) { background: var(--accent-hover); }
+button:active:not(:disabled) { background: var(--accent-press); border-bottom-color: rgb(255 255 255 / 8%); }
+button:disabled { background: var(--disabled); color: var(--bg); border-color: transparent; cursor: default; }
+button:focus-visible { outline: 2px solid var(--text); outline-offset: 1px; }
+button[hidden] { display: none; }
+
+.err {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--bad);
+}
+
+.err:empty { display: none; }
+
+@media (width <= 640px) {
+  .page { padding: 16px 16px 32px; }
+}
+</style>
+</head>
+<body>
+<div class="appname">
+  <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+    <rect x="1" y="2.5" width="6.4" height="11" rx="1.4" fill="var(--accent)" />
+    <rect x="8.6" y="2.5" width="6.4" height="11" rx="1.4" fill="var(--accent)" opacity="0.55" />
+  </svg>
+  <span>SplitPlay</span>
+</div>
+<main class="page">
+  <h1 id="title"></h1>
+  <div class="srow">
+    <div class="text">
+      <span id="name"></span>
+      <span id="status" class="desc" role="status"></span>
+    </div>
+    <button id="start" type="button"></button>
+  </div>
+  <div id="error" class="err" role="alert"></div>
+</main>
+<script>
+  const S = __STRINGS__;
+  const DOTS = { running: 'ok', starting: 'busy', stopping: 'busy', notResponding: 'bad' };
+  const button = document.getElementById('start');
+  document.getElementById('title').textContent = S.title;
+  document.getElementById('name').textContent = S.service;
+  button.textContent = S.start;
+
+  function render(state) {
+    const status = document.getElementById('status');
+    status.textContent = S[state.status] || state.status;
+    status.className = 'desc ' + (DOTS[state.status] || '');
+    button.hidden = !(state.status === 'stopped' || state.status === 'unknown');
+    button.disabled = !!state.busy;
+    document.getElementById('error').textContent = state.error || '';
+  }
+
+  button.addEventListener('click', () => {
+    button.disabled = true;
+    window.chrome?.webview?.postMessage('start');
+  });
+  window.chrome?.webview?.addEventListener('message', (e) => render(e.data));
+  render(__STATE__);
+</script>
+</body>
+</html>

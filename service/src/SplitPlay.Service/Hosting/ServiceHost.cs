@@ -81,6 +81,17 @@ public static class ServiceHost
                 "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsDeskPlatform>(sp),
                 var other => throw new InvalidOperationException($"unsupported Supervisor:Platform '{other}' (expected windows or fake)"),
             });
+        builder.Services.AddSingleton<FakeServiceControl>();
+        builder.Services.AddSingleton<IServiceControl>(sp =>
+            sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch
+            {
+                "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsServiceControl>(sp),
+                _ => sp.GetRequiredService<FakeServiceControl>(),
+            });
+        builder.Services.AddSingleton<RelatedServices>();
+        // Before the supervisor so that TermService is on its way up when autostart desks begin.
+        builder.Services.AddSingleton<RequiredServicesStarter>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<RequiredServicesStarter>());
         builder.Services.AddSingleton<DeskSupervisor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<DeskSupervisor>());
         builder.Services.AddSingleton<EventHub>();

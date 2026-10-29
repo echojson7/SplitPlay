@@ -182,3 +182,21 @@ Tuning parameters applied live (see ARCHITECTURE.md §9). All fields optional; a
   "cpu_set": [4,5,6,7]
 }
 ```
+
+What the worker applies (worker/README.md, *Stream profile*), from `welcome` and every `set_profile`:
+
+| Field | Range | Takes effect |
+|---|---|---|
+| `fec_percent` | 0–255 | next frame (the encoder's bitrate allowance for FEC: next stream) |
+| `min_fps` | 1–1000, capped at the stream's fps | next frame |
+| `pacing_mbps` | 1–100000, send pacing of one stream | next frame |
+| `dpb_frames` | 1–16 (AV1 at most 8), only for clients that leave the reference count to the host | next stream |
+
+`null` restores the worker's default (Sunshine's: FEC 20 %, half the stream's fps, 800 Mbit/s, DPB 5 or 8). A value
+of the wrong type or out of range fails `set_profile` with `bad_request` and nothing is applied. The other fields
+are accepted and ignored by the worker (the client picks mode, bitrate and codec). The service always sends the four
+fields, with its defaults where the desk sets none (config.md). The answer lists what happened:
+
+```json
+{"type":"result","id":5,"ok":true,"data":{"applied":["fec_percent","min_fps","pacing_mbps"],"next_stream":["dpb_frames"],"not_applied":["fps","width","height","bitrate_kbps","codec","gpu_priority"]}}
+```

@@ -16,6 +16,12 @@ public sealed record HostTuningOptions
 
     /// <summary><c>host.composeIntervalMs</c>, written to <c>DWMFRAMEINTERVAL</c>.</summary>
     public int ComposeIntervalMs { get; init; } = 4;
+
+    /// <summary>
+    /// <c>splitplay-worker.exe</c> (installed: <c>{app}\worker</c>): exempted from power throttling when it exists.
+    /// Null: not managed.
+    /// </summary>
+    public string? WorkerExecutable { get; init; }
 }
 
 /// <summary>One registry value the host tuning manages.</summary>
@@ -23,14 +29,18 @@ public sealed record HostTuningOptions
 public sealed record HostTuningItem(string Id, string Key, string Name, RegValue Desired, bool TermWrap = false);
 
 /// <summary>State of one item as reported by <c>status</c>.</summary>
-public sealed record HostItemStatus(string Id, string Key, string Name, RegValue? Current, RegValue? Desired, string State)
+/// <param name="Optional">
+/// A performance setting (power plan, power throttling): reported, but a difference does not keep desks from starting
+/// (the owner may pick another power plan).
+/// </param>
+public sealed record HostItemStatus(string Id, string Key, string Name, RegValue? Current, RegValue? Desired, string State, bool Optional = false)
 {
     public const string Ok = "ok";
     public const string Differs = "differs";
     public const string Skipped = "skipped";
     public const string NotApplicable = "n/a";
 
-    public bool IsOk => State is Ok or Skipped or NotApplicable;
+    public bool IsOk => State is Ok or Skipped or NotApplicable || Optional;
 }
 
 /// <summary>Result of <see cref="HostTuner.Status"/>.</summary>
@@ -83,17 +93,29 @@ public sealed class HostTuner
     public const string DefaultTermServiceDll = @"%SystemRoot%\System32\termsrv.dll";
     public const string DefaultUmRdpServiceDll = @"%SystemRoot%\System32\umrdp.dll";
 
+    /// <summary>Built-in "Ultimate Performance" plan (hidden on most editions until duplicated).</summary>
+    public static readonly Guid UltimatePerformanceScheme = new("e9a42b02-d5df-448d-aa00-03f14749eb61");
+
+    /// <summary>Built-in "High performance" plan (SCHEME_MIN).</summary>
+    public static readonly Guid HighPerformanceScheme = new("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c");
+
+    /// <summary>Where Windows keeps the active plan (shown by <c>status</c>; the plan is switched through the API).</summary>
+    public const string PowerSchemesKey = @"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes";
+
     private const int StartAutomatic = 2;
 
     private readonly IHostRegistry _registry;
     private readonly IHostServices _services;
+    private readonly IHostPower? _power;
     private readonly string _stateFile;
     private readonly TimeProvider _time;
 
-    public HostTuner(IHostRegistry registry, IHostServices services, string stateFile, TimeProvider? time = null)
+    /// <param name="power">Power plan and power throttling access; null leaves both alone (the service's checks).</param>
+    public HostTuner(IHostRegistry registry, IHostServices services, string stateFile, TimeProvider? time = null, IHostPower? power = null)
     {
         _registry = registry;
         _services = services;
+        _power = power;
         _stateFile = stateFile;
         _time = time ?? TimeProvider.System;
     }
@@ -177,8 +199,15 @@ public sealed class HostTuner
         var state = LoadState();
         if (state is not { State: HostTuningState.PreparedState })
         {
-            // Fresh start (never prepared, or reverted): keep only a pending reboot marker.
-            state = new HostTuningState { RebootRequiredSince = state?.RebootRequiredSince, PendingServices = state?.PendingServices ?? [] };
+            // Fresh start (never prepared, or reverted): keep only a pending reboot marker, and power records a revert
+            // could not undo (their previous values are still the owner's).
+            state = new HostTuningState
+            {
+                RebootRequiredSince = state?.RebootRequiredSince,
+                PendingServices = state?.PendingServices ?? [],
+                PowerPlan = state?.PowerPlan,
+                PowerThrottlingExempt = state?.PowerThrottlingExempt ?? [],
+            };
         }
 
         var serviceDllChanged = new List<string>();
@@ -234,6 +263,8 @@ public sealed class HostTuner
                 changes.Add($"TermService start type: {startType} -> {StartAutomatic} (automatic)");
             }
         }
+
+        PreparePower(state, options, changes, notes);
 
         MarkServiceDllChange(state, serviceDllChanged);
         state.State = HostTuningState.PreparedState;
@@ -307,6 +338,8 @@ public sealed class HostTuner
             }
         }
 
+        var (plan, exempt) = RevertPower(state, changes, notes);
+
         MarkServiceDllChange(state, serviceDllChanged);
         var reverted = new HostTuningState
         {
@@ -314,6 +347,8 @@ public sealed class HostTuner
             RevertedAt = _time.GetUtcNow(),
             RebootRequiredSince = state.RebootRequiredSince,
             PendingServices = state.PendingServices,
+            PowerPlan = plan,
+            PowerThrottlingExempt = exempt,
         };
         SaveState(reverted);
         return new HostTuningResult(changes, IsRebootRequired(reverted), notes);
@@ -364,6 +399,8 @@ public sealed class HostTuner
             notes.Add("TermService is not running");
         }
 
+        items.AddRange(PowerStatus(prepared ? state : null, options, notes));
+
         if (!prepared)
         {
             notes.Add(state is null ? $"not prepared ({_stateFile} does not exist)" : "not prepared (reverted)");
@@ -390,6 +427,184 @@ public sealed class HostTuner
         record.Desired = desired;
         SaveState(state);
         return true;
+    }
+
+    // ------------------------------------------------------------------ power
+
+    /// <summary>The plan prepare switches to: Ultimate Performance when it exists, otherwise High performance.</summary>
+    private Guid? PreferredScheme()
+    {
+        var schemes = _power!.Schemes();
+        return schemes.Contains(UltimatePerformanceScheme) ? UltimatePerformanceScheme
+            : schemes.Contains(HighPerformanceScheme) ? HighPerformanceScheme
+            : null;
+    }
+
+    private string Describe(Guid scheme) => _power!.SchemeName(scheme) is { Length: > 0 } name ? $"{name} ({scheme})" : scheme.ToString();
+
+    /// <summary>
+    /// Switches to the High performance (or Ultimate Performance) plan, recording the plan that was active the first
+    /// time, and exempts the worker from power throttling. A failure is a note: these only tune performance.
+    /// </summary>
+    private void PreparePower(HostTuningState state, HostTuningOptions options, List<string> changes, List<string> notes)
+    {
+        if (_power is null)
+        {
+            return;
+        }
+
+        try
+        {
+            var active = _power.ActiveScheme();
+            var target = PreferredScheme();
+            if (target is null)
+            {
+                notes.Add("this system has no High performance power plan (Modern Standby PCs offer only Balanced); the power plan is left as it is");
+            }
+            else if (active is null)
+            {
+                notes.Add("the active power plan cannot be read; it is left as it is");
+            }
+            else
+            {
+                state.PowerPlan ??= new PowerPlanRecord { Previous = active.Value };
+                state.PowerPlan.Desired = target.Value;
+                if (active != target)
+                {
+                    _power.SetActiveScheme(target.Value);
+                    changes.Add($"power plan: {Describe(active.Value)} -> {Describe(target.Value)}");
+                }
+            }
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            notes.Add($"could not switch the power plan: {ex.Message}");
+        }
+
+        if (options.WorkerExecutable is not { Length: > 0 } worker)
+        {
+            return;
+        }
+
+        worker = Path.GetFullPath(worker);
+        if (!File.Exists(worker))
+        {
+            notes.Add($"{worker} not found; power throttling is not changed for it");
+        }
+        else if (!state.PowerThrottlingExempt.Contains(worker, StringComparer.OrdinalIgnoreCase))
+        {
+            try
+            {
+                _power.SetPowerThrottling(worker, exempt: true);
+                state.PowerThrottlingExempt.Add(worker);
+                changes.Add($"power throttling: off for {worker}");
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or TimeoutException)
+            {
+                notes.Add($"could not turn power throttling off for {worker}: {ex.Message}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Restores the recorded power plan unless the owner picked another one since, and gives power throttling of the
+    /// worker back to Windows. Returns what could not be reverted (kept in the state file).
+    /// </summary>
+    private (PowerPlanRecord? Plan, List<string> Exempt) RevertPower(HostTuningState state, List<string> changes, List<string> notes)
+    {
+        if (state.PowerPlan is null && state.PowerThrottlingExempt.Count == 0)
+        {
+            return (null, []);
+        }
+
+        if (_power is null)
+        {
+            notes.Add("power plan and power throttling were not reverted (no power access)");
+            return (state.PowerPlan, state.PowerThrottlingExempt);
+        }
+
+        PowerPlanRecord? keptPlan = null;
+        if (state.PowerPlan is { } plan)
+        {
+            try
+            {
+                var active = _power.ActiveScheme();
+                if (active != plan.Desired)
+                {
+                    notes.Add($"the power plan was changed since prepare ({(active is { } a ? Describe(a) : "unknown")}); it is left as it is");
+                }
+                else if (plan.Previous != plan.Desired)
+                {
+                    if (_power.Schemes().Contains(plan.Previous))
+                    {
+                        _power.SetActiveScheme(plan.Previous);
+                        changes.Add($"power plan: {Describe(plan.Desired)} -> {Describe(plan.Previous)}");
+                    }
+                    else
+                    {
+                        notes.Add($"the previous power plan {plan.Previous} no longer exists; the power plan is left as it is");
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                notes.Add($"could not restore the power plan: {ex.Message}");
+                keptPlan = plan;
+            }
+        }
+
+        var keptExempt = new List<string>();
+        foreach (var worker in state.PowerThrottlingExempt)
+        {
+            try
+            {
+                _power.SetPowerThrottling(worker, exempt: false);
+                changes.Add($"power throttling: Windows decides again for {worker}");
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or TimeoutException)
+            {
+                notes.Add($"could not reset power throttling for {worker}: {ex.Message}");
+                keptExempt.Add(worker);
+            }
+        }
+
+        return (keptPlan, keptExempt);
+    }
+
+    private List<HostItemStatus> PowerStatus(HostTuningState? state, HostTuningOptions options, List<string> notes)
+    {
+        var items = new List<HostItemStatus>();
+        if (_power is null)
+        {
+            return items;
+        }
+
+        try
+        {
+            var active = _power.ActiveScheme();
+            var desired = state?.PowerPlan?.Desired ?? PreferredScheme();
+            var current = active is { } a ? new RegValue(RegKind.String, a.ToString()) : null;
+            items.Add(desired is { } d
+                ? new HostItemStatus("PowerPlan", PowerSchemesKey, "ActivePowerScheme", current, new RegValue(RegKind.String, d.ToString()),
+                    active == d ? HostItemStatus.Ok : HostItemStatus.Differs, Optional: true)
+                : new HostItemStatus("PowerPlan", PowerSchemesKey, "ActivePowerScheme", current, null, HostItemStatus.NotApplicable, Optional: true));
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            notes.Add($"could not read the power plan: {ex.Message}");
+        }
+
+        var recorded = state?.PowerThrottlingExempt ?? [];
+        var worker = options.WorkerExecutable is { Length: > 0 } w ? Path.GetFullPath(w) : null;
+        foreach (var path in recorded.Union(worker is null || !File.Exists(worker) ? [] : [worker], StringComparer.OrdinalIgnoreCase))
+        {
+            var exempt = recorded.Contains(path, StringComparer.OrdinalIgnoreCase);
+            items.Add(new HostItemStatus("PowerThrottling", "powercfg /powerthrottling", path,
+                new RegValue(RegKind.String, exempt ? "disabled" : "Windows decides"), new RegValue(RegKind.String, "disabled"),
+                exempt ? HostItemStatus.Ok : HostItemStatus.Differs, Optional: true));
+        }
+
+        return items;
     }
 
     // ------------------------------------------------------------------ helpers
@@ -480,6 +695,20 @@ public sealed class HostTuningState
     public List<HostTuningRecord> Items { get; set; } = [];
 
     public List<ServiceStartRecord> Services { get; set; } = [];
+
+    /// <summary>The power plan before the first prepare and the one prepare switched to; null if not managed.</summary>
+    public PowerPlanRecord? PowerPlan { get; set; }
+
+    /// <summary>Executables prepare exempted from power throttling (revert gives them back to Windows).</summary>
+    public List<string> PowerThrottlingExempt { get; set; } = [];
+}
+
+/// <summary>The active power plan before SplitPlay changed it, and the plan it set.</summary>
+public sealed class PowerPlanRecord
+{
+    public Guid Previous { get; set; }
+
+    public Guid Desired { get; set; }
 }
 
 /// <summary>One managed value with what was there before SplitPlay touched it.</summary>

@@ -74,4 +74,11 @@ Rules:
 - `profile` may also carry `gpuLuid` and `cpuSet` (array of logical CPU indices), passed to the worker as in ipc.md.
 - Desk port ranges may not overlap each other or contain `host.webPort`; `basePortStride` must be at least 27.
 - `profile.fps` 10–500, `codec` one of `h264`, `hevc`, `av1`; `gpuPriority` `normal`, `high`, `realtime`.
+- Stream settings the worker applies (ipc.md, *Profile object*); a running desk takes a change at once except
+  `dpbFrames` (next stream). Left out, the service sends its defaults: `fecPercent` 0–100, default 20;
+  `minFps` 1–`fps`, default 20 (capped at `fps`: an unchanged desktop is encoded 20 times a second instead of at half
+  the stream rate); `dpbFrames` 1–16, default 16 (a loss of up to 15 frames is repaired with reference frame
+  invalidation instead of an IDR frame); `pacingMbps` 1–100000, default 800 (Sunshine's fixed value; lower it when a
+  Wi-Fi client loses frames on large frames, raise it on 2.5 GbE and faster). In the web UI: Дополнительно → FEC,
+  Минимальный FPS, Скорость отправки.
 - `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz).

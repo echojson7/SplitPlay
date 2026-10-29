@@ -58,5 +58,27 @@ public interface IHostServices
     DateTimeOffset? ProcessStartTime(string name);
 }
 
+/// <summary>Power plans and per-application power throttling as far as the host tuning needs them.</summary>
+public interface IHostPower
+{
+    /// <summary>The active power plan (scheme GUID), or null if it cannot be read.</summary>
+    Guid? ActiveScheme();
+
+    /// <summary>The power plans that exist on this system.</summary>
+    IReadOnlyList<Guid> Schemes();
+
+    /// <summary>Makes a plan the active one; failures are reported as exceptions.</summary>
+    void SetActiveScheme(Guid scheme);
+
+    /// <summary>The plan's name as Windows shows it, or null.</summary>
+    string? SchemeName(Guid scheme);
+
+    /// <summary>
+    /// <c>powercfg /powerthrottling disable /path &lt;exe&gt;</c> (<paramref name="exempt"/>) or <c>reset</c>: the
+    /// executable is never power throttled, or Windows decides again. Failures are reported as exceptions.
+    /// </summary>
+    void SetPowerThrottling(string executable, bool exempt);
+}
+
 /// <summary>A preparation step could not be done (missing TermWrap files, access denied, …).</summary>
 public sealed class HostTuningException(string message, Exception? inner = null) : Exception(message, inner);

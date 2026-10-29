@@ -48,7 +48,7 @@ const live = computed(() => {
   if (!m) return null
   return {
     fps: fmtNumber(m.fps ?? 0),
-    ping: m.rttMs !== undefined ? fmtMs(m.rttMs, false) : t('common.none'),
+    ping: m.rttMs != null ? fmtMs(m.rttMs, false) : t('common.none'),
     encode:
       m.encodeMsP50 !== undefined
         ? t('live.encodeValue', { p50: fmtNumber(m.encodeMsP50, 1, 1), p99: fmtNumber(m.encodeMsP99 ?? 0, 1, 1) })

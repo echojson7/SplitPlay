@@ -61,7 +61,7 @@ function ok(body: unknown, status = 200): MockResponse {
   return { status, body }
 }
 
-const IDLE_METRICS: DeskMetrics = { fps: 0, bitrateKbps: 0, encodeMsP50: 0, encodeMsP99: 0, lossPct: 0, rttMs: 0, clients: 0 }
+const IDLE_METRICS: DeskMetrics = { fps: 0, bitrateKbps: 0, encodeMsP50: 0, encodeMsP99: 0, lossPct: 0, rttMs: null, clients: 0 }
 
 function clone<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T

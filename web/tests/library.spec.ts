@@ -103,6 +103,12 @@ describe('DeskCard', () => {
     expect(w.text()).not.toContain('1920×1080 · 120 FPS')
   })
 
+  it('leaves out a round trip that is not measured yet', async () => {
+    const stream = { client: 'Ноутбук Ани', address: '192.168.1.37', width: 1920, height: 1080, fps: 120, codec: 'hevc', bitrateKbps: 50000, hdr: false }
+    const w = await mountCard(desk('Streaming', { stream, metrics: { fps: 120, bitrateKbps: 0, encodeMsP99: 0, rttMs: null, clients: 1 } }))
+    expect(w.find('[data-live]').text()).toBe('Ноутбук Ани · 120 FPS')
+  })
+
   it('names an unpaired stream by its address', async () => {
     const stream = { client: null, address: '10.0.0.7', width: 1280, height: 720, fps: 60, codec: 'h264', bitrateKbps: 0, hdr: false }
     const w = await mountCard(desk('Streaming', { stream, metrics: { fps: 60, bitrateKbps: 0, encodeMsP99: 0, clients: 1 } }))

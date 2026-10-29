@@ -159,6 +159,6 @@ export function streamSummary(stream: DeskStream): string {
 /** The desk list's second line while streaming: "Laptop · 120 FPS · 8 ms". */
 export function streamLine(stream: DeskStream, metrics: Partial<DeskMetrics>): string {
   const parts = [deviceName(stream), t('unit.fps', { value: fmtNumber(metrics.fps ?? 0) })]
-  if (metrics.rttMs !== undefined) parts.push(fmtMs(metrics.rttMs, false))
+  if (metrics.rttMs != null) parts.push(fmtMs(metrics.rttMs, false))
   return parts.join(' · ')
 }

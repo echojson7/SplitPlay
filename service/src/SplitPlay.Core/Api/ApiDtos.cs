@@ -58,8 +58,8 @@ public sealed class DeskMetricsDto
     /// <summary>Frames the client reported lost, percent of the frames sent in the last interval.</summary>
     public double LossPct { get; set; }
 
-    /// <summary>Round-trip time to the Moonlight client (ENet control peer), ms.</summary>
-    public double RttMs { get; set; }
+    /// <summary>Round-trip time to the Moonlight client (ENet control peer), ms; null while nothing measured it.</summary>
+    public double? RttMs { get; set; }
 
     public double Clients { get; set; }
 
@@ -208,7 +208,7 @@ public sealed record DeskMetricsEntryDto(
     double EncodeMsP50,
     double EncodeMsP99,
     double LossPct,
-    double RttMs,
+    double? RttMs,
     double Clients)
 {
     public static DeskMetricsEntryDto From(string id, DeskMetricsDto m)

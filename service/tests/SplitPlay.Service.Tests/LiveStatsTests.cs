@@ -48,7 +48,7 @@ public sealed class LiveStatsTests
         Assert.Equal(3.4, dto.EncodeMsP50);
         Assert.Equal(6.1, dto.EncodeMsP99);
         Assert.Equal(0.5, dto.LossPct);
-        Assert.Equal(4, dto.RttMs);
+        Assert.Equal(4.0, dto.RttMs);
         Assert.Equal(1, dto.Clients);
         Assert.Equal(["future_key"], dto.Extra!.Keys);
 
@@ -57,6 +57,61 @@ public sealed class LiveStatsTests
         Assert.Contains("\"lossPct\":0.5", json, StringComparison.Ordinal);
         Assert.Contains("\"rttMs\":4", json, StringComparison.Ordinal);
         Assert.DoesNotContain("_", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_unmeasured_round_trip_is_null_not_zero()
+    {
+        var dto = DeskRuntime.MapMetrics(new Dictionary<string, JsonElement>
+        {
+            ["fps"] = Json("0"),
+            ["rtt_ms"] = Json("null"),
+            ["clients"] = Json("0"),
+        });
+
+        Assert.Null(dto.RttMs);
+        Assert.Null(dto.Extra);
+        Assert.Null(DeskRuntime.MapMetrics(null).RttMs);
+        var json = JsonSerializer.Serialize(DeskMetricsEntryDto.From("desk-1", dto), Core.Json.SplitPlayJsonContext.Default.DeskMetricsEntryDto);
+        Assert.Contains("\"rttMs\":null", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Messages_from_a_torn_down_worker_connection_change_nothing()
+    {
+        await using var current = new IpcConnection(new MemoryStream());
+        await using var old = new IpcConnection(new MemoryStream());
+        var rt = Runtime();
+        var streaming = new HeartbeatMessage
+        {
+            Seq = 9,
+            State = "streaming",
+            Metrics = new Dictionary<string, JsonElement> { ["fps"] = Json("120"), ["clients"] = Json("1") },
+            Sessions = Json("""[{"id":1,"address":"192.168.1.42","started_at":"2026-10-29T12:00:00Z"}]"""),
+        };
+
+        // The worker is gone (its run cleared the streams and the connection); its read loop still delivers.
+        Assert.Equal(WorkerUpdate.Ignored, rt.ApplyHeartbeat(old, streaming, DateTimeOffset.UnixEpoch));
+        Assert.Equal(WorkerUpdate.Ignored, rt.ApplyClientConnected(old, Session(1)));
+        Assert.Empty(rt.Streams);
+        Assert.Equal(0, rt.Metrics.Fps);
+        Assert.Equal(default, rt.LastHeartbeat);
+
+        // The next worker is connected; the old one's late client_disconnected for id 1 arrives after it.
+        rt.Connection = current;
+        Assert.Equal(WorkerUpdate.Ignored, rt.ApplyClientDisconnected(old, Session(1)));
+        Assert.Equal(WorkerUpdate.Ignored, rt.ApplyHeartbeat(old, streaming, DateTimeOffset.UnixEpoch));
+        Assert.Empty(rt.Streams);
+
+        // Launch ids restart at 1 in every worker process: the new worker's first stream is not filtered out.
+        Assert.Equal(WorkerUpdate.Publish, rt.ApplyClientConnected(current, Session(1)));
+        Assert.NotEqual(WorkerUpdate.Ignored, rt.ApplyHeartbeat(current, streaming, DateTimeOffset.UnixEpoch.AddSeconds(1)));
+        Assert.Equal([1L], rt.Streams.Select(s => s.Id));
+        Assert.Equal(120, rt.Metrics.Fps);
+        Assert.Equal(DateTimeOffset.UnixEpoch.AddSeconds(1), rt.LastHeartbeat);
+
+        Assert.Equal(WorkerUpdate.Publish, rt.ApplyClientDisconnected(current, Session(1)));
+        Assert.Empty(rt.Streams);
     }
 
     [Fact]
@@ -130,7 +185,7 @@ public sealed class LiveStatsTests
         Assert.Equal(50000, stream.BitrateKbps);
         Assert.NotNull(stream.StartedAt);
         Assert.InRange(streaming.Metrics.Fps, 100, 121);
-        Assert.InRange(streaming.Metrics.RttMs, 1, 10);
+        Assert.InRange(streaming.Metrics.RttMs ?? 0, 1, 10);
         Assert.InRange(streaming.Metrics.EncodeMsP50, 1, streaming.Metrics.EncodeMsP99);
         Assert.Equal(1, streaming.Metrics.Clients);
 
@@ -143,6 +198,7 @@ public sealed class LiveStatsTests
         var stopped = await svc.WaitForStateAsync("desk-1", DeskState.Stopped);
         Assert.Null(stopped.Stream);
         Assert.Equal(0, stopped.Metrics.Fps);
+        Assert.Null(stopped.Metrics.RttMs);
     }
 
     [Fact]

@@ -64,7 +64,7 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
   "autostart": true,
   "gpu": "auto",
   "profile": { "fps": 120, "width": 1920, "height": 1080, "bitrateKbps": 60000, "codec": "hevc" },
-  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": 0, "clients": 0 },
+  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": null, "clients": 0 },
   "stream": null,
   "lastError": null
 }
@@ -86,13 +86,15 @@ A streaming desk:
 
 `stream` is the Moonlight stream the desk serves, `null` when nobody is connected (with several, the earliest).
 `client` and `clientId` name the paired client (`clientId` as in `GET /desks/{id}/clients`), `null` when the worker does
-not know it; `width`, `height`, `fps`, `codec`, `bitrateKbps` and `hdr` are what the client asked for. It changes on the
-worker's `client_connected`/`client_disconnected` events and heartbeats (ipc.md), and is cleared when the worker stops or
+not know it; `width`, `height`, `fps`, `codec`, `bitrateKbps` and `hdr` are what the client asked for. It appears once the
+client has connected the stream's control channel and changes on the worker's `client_connected`/`client_disconnected`
+events and heartbeats (ipc.md), and is cleared when the worker stops or
 restarts. `state` follows it: `Ready` → `Streaming` while a stream runs, back to `Ready` when the last one ends.
 
 `metrics` are the worker's live numbers over the last second (definitions in ipc.md): `fps` and `bitrateKbps` actually
 sent, `encodeMsP50`/`encodeMsP99` host processing latency (capture to encoded frame), `lossPct` frames the client
-reported lost, `rttMs` round-trip time to the client. All 0 when nothing streams.
+reported lost, `rttMs` round-trip time to the client (`null` until one is measured). All 0 (`rttMs` `null`) when
+nothing streams.
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.

@@ -36,29 +36,42 @@ thread once per interval:
 
 With several streams on one desk: fps and rtt_ms are the highest of the
 streams, bitrate_kbps their sum, loss and encode percentiles pooled.
+rtt_ms is null while no stream has a measured round trip. clients is
+the number of streams listed in "sessions".
 
 The heartbeat gets a "sessions" array with one entry per running stream:
 id (the RTSP launch session id), client and client_uuid (the paired
 client owning the launch's TLS client certificate, looked up in
-make_launch_session; null when unknown), address, width/height/fps_requested, codec (h264, hevc, av1),
+make_launch_session; null when unknown), address,
+width/height/fps_requested, codec (h264, hevc, av1),
 bitrate_kbps_requested (Moonlight's configured bitrate, before the host's
 FEC and audio adjustments), hdr (10-bit stream requested), started_at,
 plus the per-stream fps, bitrate_kbps, encode_ms_p50/p99, loss_pct and
 rtt_ms (null until the control peer connects).
 
-Events: client_connected with the session fields when
-stream::session::start() succeeds, client_disconnected when
-stream::session::join() has stopped the stream's threads.
+A stream is reported once stream::session::start() has succeeded and
+its client has connected the ENet control peer (the first traffic after
+RTSP), so a launch whose client never gets through (encoder failure,
+UDP blocked) is never shown. Events: client_connected with the session
+fields at that point, client_disconnected when stream::session::join()
+has stopped the stream's threads. An ended stream is marked finished
+even if it was never reported, so a stop racing start() cannot leave a
+ghost.
 
-Heartbeats and these events are built and sent under one mutex, so a
-heartbeat never contradicts an event sent before it (a stream missing
-right after client_connected or back after client_disconnected).
-session_count(), which reaps ended streams, runs before that lock.
+started(), control_connected() and ended() only queue the events under
+a short, I/O-free lock (they run on RTSP and control threads, inside
+_session_slots). The heartbeat thread takes the queue and the stream
+list in one step, then writes the events followed by the heartbeat, so
+a heartbeat never contradicts an event sent before it and a connect is
+reported within one heartbeat interval. The heartbeat thread no longer
+calls rtsp_stream::session_count() (which joins stopped streams); the
+RTSP thread reaps them within 500 ms.
 
 Cost on the hot path: per sent frame two relaxed atomic adds and, for
 frames with a capture timestamp, one uncontended lock to store a 16-bit
 sample (at most 1024 per interval). The control thread stores one atomic
-per loop and per loss report.
+per loop and per loss report; loss ranges outside 0..UINT32_MAX are
+ignored.
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
@@ -121,7 +134,7 @@ index 7857835f0137b48bc3b71bc46e4eda9dfc7ee05a..05463a038a8a5219346313723af1fc77
  
    /**
 diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
-index b86eef58f7ab10f95379fb6ef16912970c26660c..1ba8f47a60b1889bdef446604740b2954c982fff 100644
+index b86eef58f7ab10f95379fb6ef16912970c26660c..21e55e6a0950696f0221935dd8bf1cc421952359 100644
 --- a/src/splitplay/control_client.cpp
 +++ b/src/splitplay/control_client.cpp
 @@ -28,6 +28,7 @@
@@ -132,13 +145,12 @@ index b86eef58f7ab10f95379fb6ef16912970c26660c..1ba8f47a60b1889bdef446604740b295
  #include "options.h"
  #include "src/config.h"
  #include "src/entry_handler.h"
-@@ -299,20 +300,19 @@ namespace splitplay::control {
+@@ -299,21 +300,24 @@ namespace splitplay::control {
          std::condition_variable_any cv;
          std::uint64_t seq = 0;
          while (!st.stop_requested() && !stopping) {
-+          // session_count() also reaps ended streams (client_disconnected); it must run outside report_heartbeat().
-           const int clients = rtsp_stream::session_count();
-           const char *state = !ready ? "starting" : (clients > 0 ? "streaming" : "idle");
+-          const int clients = rtsp_stream::session_count();
+-          const char *state = !ready ? "starting" : (clients > 0 ? "streaming" : "idle");
 -          send({
 -            {"type", "heartbeat"},
 -            {"seq", ++seq},
@@ -151,78 +163,34 @@ index b86eef58f7ab10f95379fb6ef16912970c26660c..1ba8f47a60b1889bdef446604740b295
 -                          {"loss_pct", 0},
 -                          {"clients", clients},
 -                        }},
-+          live_stats::report_heartbeat([&](json live) {
-+            json metrics = std::move(live["metrics"]);
-+            metrics["clients"] = clients;
-+            send({
-+              {"type", "heartbeat"},
-+              {"seq", ++seq},
-+              {"state", state},
-+              {"metrics", std::move(metrics)},
-+              {"sessions", std::move(live["sessions"])},
-+            });
-           });
+-          });
++          // Stopped streams are reaped (and their client_disconnected queued) by the RTSP thread within 500 ms; this
++          // thread never joins stream threads. Queued client events go first, then the heartbeat: this thread is the
++          // only one writing either to the pipe.
++          live_stats::report_heartbeat(
++            [&](const std::string &name, const json &data) {
++              send_event(name, data);
++            },
++            [&](json metrics, json sessions) {
++              const bool streaming = !sessions.empty();
++              send({
++                {"type", "heartbeat"},
++                {"seq", ++seq},
++                {"state", !ready ? "starting" : (streaming ? "streaming" : "idle")},
++                {"metrics", std::move(metrics)},
++                {"sessions", std::move(sessions)},
++              });
++            }
++          );
            std::unique_lock lk {m};
            cv.wait_for(lk, st, heartbeat_interval, []() {
-@@ -536,6 +536,12 @@ namespace splitplay::control {
-     }
-   }
- 
-+  void send_event(const std::string &name, const nlohmann::json &data) {
-+    if (client) {
-+      client->send_event(name, data);
-+    }
-+  }
-+
-   void stop() {
-     client.reset();
-   }
-@@ -554,6 +560,9 @@ namespace splitplay::control {
-   void request_mode(int, int, int, std::chrono::milliseconds) {
-   }
- 
-+  void send_event(const std::string &, const nlohmann::json &) {
-+  }
-+
-   void stop() {
-   }
- #endif
-diff --git a/src/splitplay/control_client.h b/src/splitplay/control_client.h
-index 69cbb360773281f4a03e097dc84b2177441121cd..cd6035da12562e25485c261d3789493bc591f9ab 100644
---- a/src/splitplay/control_client.h
-+++ b/src/splitplay/control_client.h
-@@ -7,6 +7,10 @@
- 
- // standard includes
- #include <chrono>
-+#include <string>
-+
-+// lib includes
-+#include <nlohmann/json.hpp>
- 
- namespace splitplay::control {
-   /**
-@@ -39,6 +43,14 @@ namespace splitplay::control {
-    */
-   void request_mode(int width, int height, int fps, std::chrono::milliseconds timeout);
- 
-+  /**
-+   * @brief Send `{"type":"event","name":name,"data":data}` to the service. A no-op without a control pipe.
-+   *
-+   * @param name Event name (docs/contracts/ipc.md).
-+   * @param data Event payload.
-+   */
-+  void send_event(const std::string &name, const nlohmann::json &data);
-+
-   /**
-    * @brief Stop the heartbeat and reader threads and close the pipe.
-    */
+             return false;
 diff --git a/src/splitplay/live_stats.cpp b/src/splitplay/live_stats.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a6c8358b1
+index 0000000000000000000000000000000000000000..7e1d22163ecab27da08c4392802bc605ae2a04e5
 --- /dev/null
 +++ b/src/splitplay/live_stats.cpp
-@@ -0,0 +1,285 @@
+@@ -0,0 +1,331 @@
 +/**
 + * @file src/splitplay/live_stats.cpp
 + * @brief Live stream statistics for the SplitPlay heartbeat (docs/contracts/ipc.md).
@@ -235,13 +203,14 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +#include <cmath>
 +#include <cstddef>
 +#include <cstdio>
++#include <deque>
++#include <limits>
 +#include <mutex>
 +#include <string_view>
 +#include <utility>
 +#include <vector>
 +
 +// local includes
-+#include "control_client.h"
 +#include "live_stats.h"
 +
 +using json = nlohmann::json;
@@ -251,7 +220,9 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +    /// Latency samples kept per heartbeat interval and stream; more than any frame rate Moonlight offers.
 +    constexpr std::size_t max_samples = 1024;
 +    /// A single loss report never counts more than this many frames (protects against a bogus range).
-+    constexpr std::int64_t max_lost_per_report = 1000;
++    constexpr std::uint64_t max_lost_per_report = 1000;
++    /// Events kept for the next heartbeat; only reached without a control pipe (nobody drains the queue).
++    constexpr std::size_t max_pending_events = 64;
 +  }  // namespace
 +
 +  class session_stats_t {
@@ -260,7 +231,7 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +        info {std::move(i)} {
 +    }
 +
-+    session_info_t info;  ///< Written by started() before the stream is published, read-only afterwards.
++    session_info_t info;  ///< Fixed by create(); `address` and `started_at` are set under state_mutex before registering.
 +
 +    std::atomic<std::uint64_t> frames {0};  ///< Video frames sent.
 +    std::atomic<std::uint64_t> bytes {0};  ///< Video bytes sent (FEC and headers included).
@@ -272,20 +243,25 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +    std::array<std::uint16_t, max_samples> samples {};  ///< Capture-to-send latencies, 0.1 ms units.
 +    std::size_t sample_count = 0;
 +
-+    // Owned by the heartbeat (serialised by report_mutex).
++    // Guarded by state_mutex.
++    bool running = false;  ///< started() was called.
++    bool peer = false;  ///< The control stream's ENet peer connected.
++    bool finished = false;  ///< ended() was called; the stream is never registered afterwards.
++    bool registered = false;  ///< Listed in heartbeats; client_connected queued.
 +    std::uint64_t seen_frames = 0;
 +    std::uint64_t seen_bytes = 0;
 +    std::uint64_t seen_lost = 0;
 +    std::chrono::steady_clock::time_point seen_at {};
-+
-+    bool registered = false;  ///< Guarded by registry_mutex.
 +  };
 +
 +  namespace {
-+    /// Orders heartbeats and client events on the pipe; taken before registry_mutex, never under it.
++    /// Serialises report_heartbeat() so that queued events and heartbeats leave in order. Taken by the heartbeat
++    /// thread only, before state_mutex; never by a streaming or RTSP thread.
 +    std::mutex report_mutex;
-+    std::mutex registry_mutex;
++    /// Guards the registry, the event queue and the per-stream state flags. Held only for short, I/O-free work.
++    std::mutex state_mutex;
 +    std::vector<std::shared_ptr<session_stats_t>> registry;  ///< Running streams, in start order.
++    std::deque<std::pair<std::string, json>> pending_events;  ///< client_connected/client_disconnected, oldest first.
 +
 +    double round1(double v) {
 +      return std::round(v * 10.0) / 10.0;
@@ -335,6 +311,34 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +      rank = std::clamp<std::size_t>(rank, 1, v.size());
 +      return static_cast<double>(v[rank - 1]) / 10.0;
 +    }
++
++    /// Caller holds state_mutex.
++    void queue_event(const char *name, json data) {
++      if (pending_events.size() >= max_pending_events) {
++        pending_events.pop_front();
++      }
++      pending_events.emplace_back(name, std::move(data));
++    }
++
++    /// Caller holds state_mutex. Registers the stream once it is both running and connected, unless it has ended.
++    void register_if_live(const std::shared_ptr<session_stats_t> &stats) {
++      if (!stats->running || !stats->peer || stats->finished || stats->registered) {
++        return;
++      }
++      stats->info.started_at = std::chrono::system_clock::now();
++      // Measure from here: what was sent while the client connected is not part of the first interval.
++      stats->seen_frames = stats->frames.load(std::memory_order_relaxed);
++      stats->seen_bytes = stats->bytes.load(std::memory_order_relaxed);
++      stats->seen_lost = stats->lost.load(std::memory_order_relaxed);
++      stats->seen_at = std::chrono::steady_clock::now();
++      {
++        std::lock_guard lg {stats->samples_mutex};
++        stats->sample_count = 0;
++      }
++      stats->registered = true;
++      registry.push_back(stats);
++      queue_event("client_connected", info_json(stats->info));
++    }
 +  }  // namespace
 +
 +  std::string codec_name(int video_format) {
@@ -356,42 +360,40 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +    if (!stats) {
 +      return;
 +    }
-+    std::lock_guard order {report_mutex};
-+    json event;
-+    {
-+      std::lock_guard lg {registry_mutex};
-+      if (stats->registered) {
-+        return;
-+      }
-+      // An IPv4 client on a dual-stack socket shows up as ::ffff:a.b.c.d.
-+      constexpr std::string_view v4_mapped {"::ffff:"};
-+      const bool mapped = address.size() > v4_mapped.size() && address.compare(0, v4_mapped.size(), v4_mapped) == 0 && address.find('.') != std::string::npos;
-+      stats->info.address = mapped ? address.substr(v4_mapped.size()) : address;
-+      stats->info.started_at = std::chrono::system_clock::now();
-+      stats->seen_at = std::chrono::steady_clock::now();
-+      stats->registered = true;
-+      registry.push_back(stats);
-+      event = info_json(stats->info);
++    std::lock_guard lg {state_mutex};
++    if (stats->running || stats->finished) {
++      // A stop that raced the start already ended the stream: never report it.
++      return;
 +    }
-+    control::send_event("client_connected", event);
++    // An IPv4 client on a dual-stack socket shows up as ::ffff:a.b.c.d.
++    constexpr std::string_view v4_mapped {"::ffff:"};
++    const bool mapped = address.size() > v4_mapped.size() && address.compare(0, v4_mapped.size(), v4_mapped) == 0 && address.find('.') != std::string::npos;
++    stats->info.address = mapped ? address.substr(v4_mapped.size()) : address;
++    stats->running = true;
++    register_if_live(stats);
++  }
++
++  void control_connected(const std::shared_ptr<session_stats_t> &stats) {
++    if (!stats) {
++      return;
++    }
++    std::lock_guard lg {state_mutex};
++    stats->peer = true;
++    register_if_live(stats);
 +  }
 +
 +  void ended(const std::shared_ptr<session_stats_t> &stats) {
 +    if (!stats) {
 +      return;
 +    }
-+    std::lock_guard order {report_mutex};
-+    json event;
-+    {
-+      std::lock_guard lg {registry_mutex};
-+      auto it = std::find(registry.begin(), registry.end(), stats);
-+      if (it == registry.end()) {
-+        return;
-+      }
-+      registry.erase(it);
-+      event = info_json(stats->info);
++    std::lock_guard lg {state_mutex};
++    stats->finished = true;
++    if (!stats->registered) {
++      return;
 +    }
-+    control::send_event("client_disconnected", event);
++    stats->registered = false;
++    registry.erase(std::remove(registry.begin(), registry.end(), stats), registry.end());
++    queue_event("client_disconnected", info_json(stats->info));
 +  }
 +
 +  void frame_sent(session_stats_t *stats, std::uint64_t wire_bytes, std::optional<std::uint16_t> latency_100us) noexcept {
@@ -409,7 +411,9 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +  }
 +
 +  void frames_lost(session_stats_t *stats, std::int64_t first, std::int64_t last) noexcept {
-+    if (!stats || last < first) {
++    // Frame indices are 32-bit on the wire; anything else is a bogus report.
++    constexpr std::int64_t max_index = std::numeric_limits<std::uint32_t>::max();
++    if (!stats || last < first || last < 0 || last > max_index) {
 +      return;
 +    }
 +    // Reports come from the control thread only; a later range may overlap an earlier one.
@@ -417,16 +421,17 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +    if (last <= highest) {
 +      return;
 +    }
-+    first = std::max(first, highest + 1);
++    first = std::max(first, highest + 1);  // >= 0, so last - first cannot overflow
 +    stats->highest_lost.store(last, std::memory_order_relaxed);
-+    stats->lost.fetch_add(static_cast<std::uint64_t>(std::min(last - first + 1, max_lost_per_report)), std::memory_order_relaxed);
++    const auto count = static_cast<std::uint64_t>(last - first) + 1;
++    stats->lost.fetch_add(std::min(count, max_lost_per_report), std::memory_order_relaxed);
 +  }
 +
 +  void loss_count(session_stats_t *stats, std::int32_t count) noexcept {
 +    if (!stats || count <= 0) {
 +      return;
 +    }
-+    stats->lost.fetch_add(static_cast<std::uint64_t>(std::min<std::int64_t>(count, max_lost_per_report)), std::memory_order_relaxed);
++    stats->lost.fetch_add(std::min(static_cast<std::uint64_t>(count), max_lost_per_report), std::memory_order_relaxed);
 +  }
 +
 +  void rtt(session_stats_t *stats, std::uint32_t rtt_ms) noexcept {
@@ -435,16 +440,10 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +    }
 +  }
 +
-+  void report_heartbeat(const std::function<void(json)> &send) {
++  void report_heartbeat(const event_sink_t &send_event, const heartbeat_sink_t &send_heartbeat) {
 +    std::lock_guard order {report_mutex};
 +
-+    std::vector<std::shared_ptr<session_stats_t>> active;
-+    {
-+      std::lock_guard lg {registry_mutex};
-+      active = registry;
-+    }
-+
-+    const auto now = std::chrono::steady_clock::now();
++    std::vector<std::pair<std::string, json>> events;
 +    std::vector<std::uint16_t> pooled;
 +    double max_fps = 0;
 +    std::uint64_t total_kbps = 0;
@@ -453,47 +452,56 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +    std::int64_t max_rtt = -1;
 +    json sessions = json::array();
 +
-+    for (const auto &s : active) {
-+      std::vector<std::uint16_t> mine;
-+      {
-+        std::lock_guard lg {s->samples_mutex};
-+        mine.assign(s->samples.begin(), s->samples.begin() + static_cast<std::ptrdiff_t>(s->sample_count));
-+        s->sample_count = 0;
++    {
++      // The events and the streams are taken in one step: every event queued so far is reflected in this
++      // heartbeat's sessions, and no later one is.
++      std::lock_guard lg {state_mutex};
++      events.assign(std::make_move_iterator(pending_events.begin()), std::make_move_iterator(pending_events.end()));
++      pending_events.clear();
++
++      const auto now = std::chrono::steady_clock::now();
++      for (const auto &s : registry) {
++        std::vector<std::uint16_t> mine;
++        {
++          std::lock_guard slg {s->samples_mutex};
++          mine.assign(s->samples.begin(), s->samples.begin() + static_cast<std::ptrdiff_t>(s->sample_count));
++          s->sample_count = 0;
++        }
++
++        const auto frames = s->frames.load(std::memory_order_relaxed);
++        const auto bytes = s->bytes.load(std::memory_order_relaxed);
++        const auto lost = s->lost.load(std::memory_order_relaxed);
++        const auto rtt_ms = s->rtt_ms.load(std::memory_order_relaxed);
++
++        const auto d_frames = frames - s->seen_frames;
++        const auto d_bytes = bytes - s->seen_bytes;
++        const auto d_lost = lost - s->seen_lost;
++        const double seconds = std::chrono::duration<double>(now - s->seen_at).count();
++        s->seen_frames = frames;
++        s->seen_bytes = bytes;
++        s->seen_lost = lost;
++        s->seen_at = now;
++
++        const double fps = seconds > 0.05 ? static_cast<double>(d_frames) / seconds : 0;
++        const auto kbps = seconds > 0.05 ? static_cast<std::uint64_t>(static_cast<double>(d_bytes) * 8 / 1000 / seconds) : 0;
++        const double loss = d_frames > 0 ? std::min(100.0, static_cast<double>(d_lost) * 100.0 / static_cast<double>(d_frames)) : 0;
++
++        json entry = info_json(s->info);
++        entry["fps"] = round1(fps);
++        entry["bitrate_kbps"] = kbps;
++        entry["loss_pct"] = round1(loss);
++        entry["rtt_ms"] = rtt_ms >= 0 ? json(rtt_ms) : json(nullptr);
++        pooled.insert(pooled.end(), mine.begin(), mine.end());
++        entry["encode_ms_p50"] = percentile_ms(mine, 0.50);
++        entry["encode_ms_p99"] = percentile_ms(mine, 0.99);
++        sessions.push_back(std::move(entry));
++
++        max_fps = std::max(max_fps, fps);
++        total_kbps += kbps;
++        total_frames += d_frames;
++        total_lost += d_lost;
++        max_rtt = std::max(max_rtt, rtt_ms);
 +      }
-+
-+      const auto frames = s->frames.load(std::memory_order_relaxed);
-+      const auto bytes = s->bytes.load(std::memory_order_relaxed);
-+      const auto lost = s->lost.load(std::memory_order_relaxed);
-+      const auto rtt_ms = s->rtt_ms.load(std::memory_order_relaxed);
-+
-+      const auto d_frames = frames - s->seen_frames;
-+      const auto d_bytes = bytes - s->seen_bytes;
-+      const auto d_lost = lost - s->seen_lost;
-+      const double seconds = std::chrono::duration<double>(now - s->seen_at).count();
-+      s->seen_frames = frames;
-+      s->seen_bytes = bytes;
-+      s->seen_lost = lost;
-+      s->seen_at = now;
-+
-+      const double fps = seconds > 0.05 ? static_cast<double>(d_frames) / seconds : 0;
-+      const auto kbps = seconds > 0.05 ? static_cast<std::uint64_t>(static_cast<double>(d_bytes) * 8 / 1000 / seconds) : 0;
-+      const double loss = d_frames > 0 ? std::min(100.0, static_cast<double>(d_lost) * 100.0 / static_cast<double>(d_frames)) : 0;
-+
-+      json entry = info_json(s->info);
-+      entry["fps"] = round1(fps);
-+      entry["bitrate_kbps"] = kbps;
-+      entry["loss_pct"] = round1(loss);
-+      entry["rtt_ms"] = rtt_ms >= 0 ? json(rtt_ms) : json(nullptr);
-+      pooled.insert(pooled.end(), mine.begin(), mine.end());
-+      entry["encode_ms_p50"] = percentile_ms(mine, 0.50);
-+      entry["encode_ms_p99"] = percentile_ms(mine, 0.99);
-+      sessions.push_back(std::move(entry));
-+
-+      max_fps = std::max(max_fps, fps);
-+      total_kbps += kbps;
-+      total_frames += d_frames;
-+      total_lost += d_lost;
-+      max_rtt = std::max(max_rtt, rtt_ms);
 +    }
 +
 +    const double loss = total_frames > 0 ? std::min(100.0, static_cast<double>(total_lost) * 100.0 / static_cast<double>(total_frames)) : 0;
@@ -503,17 +511,23 @@ index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a
 +      {"encode_ms_p50", percentile_ms(pooled, 0.50)},
 +      {"encode_ms_p99", percentile_ms(pooled, 0.99)},
 +      {"loss_pct", round1(loss)},
-+      {"rtt_ms", std::max<std::int64_t>(max_rtt, 0)},
++      {"rtt_ms", max_rtt >= 0 ? json(max_rtt) : json(nullptr)},
++      {"clients", sessions.size()},
 +    };
-+    send({{"metrics", std::move(metrics)}, {"sessions", std::move(sessions)}});
++
++    // Pipe I/O happens here, on the heartbeat thread, outside state_mutex: events first, then the heartbeat.
++    for (auto &[name, data] : events) {
++      send_event(name, data);
++    }
++    send_heartbeat(std::move(metrics), std::move(sessions));
 +  }
 +}  // namespace splitplay::live_stats
 diff --git a/src/splitplay/live_stats.h b/src/splitplay/live_stats.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..f0582665eb315ec596f6594ae8c9c649af1b4181
+index 0000000000000000000000000000000000000000..c781266a12ac384e56b0420f9dc9eae4bd456e48
 --- /dev/null
 +++ b/src/splitplay/live_stats.h
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,129 @@
 +/**
 + * @file src/splitplay/live_stats.h
 + * @brief Live stream statistics for the SplitPlay heartbeat and the client_connected/client_disconnected events
@@ -524,7 +538,10 @@ index 0000000000000000000000000000000000000000..f0582665eb315ec596f6594ae8c9c649
 + * and the frames the client reports lost. Everything else (rates, percentiles, JSON) happens on the heartbeat
 + * thread once per second.
 + *
-+ * Heartbeats and the client events are built and sent under one mutex, so the service never reads a heartbeat that
++ * A stream is reported once it is running (started()) and its client has connected the control stream
++ * (control_connected()), so a launch whose client never gets through is never shown. started(), control_connected()
++ * and ended() only queue the client_connected/client_disconnected events; the heartbeat thread sends them, followed by
++ * the heartbeat, so streaming and RTSP threads never wait on the pipe and the service never reads a heartbeat that
 + * contradicts an event sent before it (a stream missing right after client_connected, or back after
 + * client_disconnected).
 + */
@@ -557,7 +574,7 @@ index 0000000000000000000000000000000000000000..f0582665eb315ec596f6594ae8c9c649
 +    std::string codec;  ///< `h264`, `hevc` or `av1`.
 +    int bitrate_kbps_requested = 0;  ///< Bitrate the client asked for (its configured bitrate when it sends one).
 +    bool hdr = false;  ///< The client asked for a 10-bit HDR stream.
-+    std::chrono::system_clock::time_point started_at;  ///< Set by started().
++    std::chrono::system_clock::time_point started_at;  ///< When the stream was first reported.
 +  };
 +
 +  /**
@@ -571,13 +588,14 @@ index 0000000000000000000000000000000000000000..f0582665eb315ec596f6594ae8c9c649
 +  std::string codec_name(int video_format);
 +
 +  /**
-+   * @brief Create the counters for a stream that is being set up. Nothing is reported until started().
++   * @brief Create the counters for a stream that is being set up. Nothing is reported until started() and
++   *        control_connected() were both called.
 +   */
 +  std::shared_ptr<session_stats_t> create(session_info_t info);
 +
 +  /**
-+   * @brief The stream is running: report it in heartbeats and send `event client_connected` (through
-+   *        splitplay::control::send_event, a no-op without a control pipe).
++   * @brief The stream's threads are running (RTSP thread). Once the control peer is connected too, the stream is
++   *        listed in heartbeats and `event client_connected` is queued. Ignored after ended().
 +   *
 +   * @param stats Counters from create(); null is ignored.
 +   * @param address Client IP address.
@@ -585,7 +603,14 @@ index 0000000000000000000000000000000000000000..f0582665eb315ec596f6594ae8c9c649
 +  void started(const std::shared_ptr<session_stats_t> &stats, const std::string &address);
 +
 +  /**
-+   * @brief The stream has ended: stop reporting it and send `event client_disconnected`. Safe to call twice.
++   * @brief The client connected the stream's ENet control peer (control thread): the first proof that it reached
++   *        the host after RTSP. Registers the stream when started() was called. Never blocks on I/O.
++   */
++  void control_connected(const std::shared_ptr<session_stats_t> &stats);
++
++  /**
++   * @brief The stream has ended: stop reporting it and queue `event client_disconnected` if it was reported. A
++   *        started() or control_connected() that comes later is ignored. Safe to call twice; never blocks on I/O.
 +   */
 +  void ended(const std::shared_ptr<session_stats_t> &stats);
 +
@@ -616,17 +641,24 @@ index 0000000000000000000000000000000000000000..f0582665eb315ec596f6594ae8c9c649
 +   */
 +  void rtt(session_stats_t *stats, std::uint32_t rtt_ms) noexcept;
 +
++  /// Sends one queued event: name and data.
++  using event_sink_t = std::function<void(const std::string &, const nlohmann::json &)>;
++  /// Sends the heartbeat: `metrics` and `sessions`.
++  using heartbeat_sink_t = std::function<void(nlohmann::json, nlohmann::json)>;
++
 +  /**
-+   * @brief Measure the desk metrics and running streams since the previous call and hand them to `send` (heartbeat
-+   *        thread). `send` runs under the lock that also orders started() and ended() with their events.
++   * @brief Hand the queued events, then the desk metrics and running streams measured since the previous call, to
++   *        the sinks (heartbeat thread). Every event handed over is already reflected in the sessions and no later
++   *        one is; calls are serialised, so events and heartbeats leave in order.
 +   *
-+   * @param send Receives `{"metrics":{"fps","bitrate_kbps","encode_ms_p50","encode_ms_p99","loss_pct","rtt_ms"},
-+   *             "sessions":[...]}` and sends the heartbeat.
++   * @param send_event Receives each queued client_connected/client_disconnected event, oldest first.
++   * @param send_heartbeat Receives `metrics` (`fps`, `bitrate_kbps`, `encode_ms_p50`, `encode_ms_p99`, `loss_pct`,
++   *                       `rtt_ms` (null when no stream has one yet), `clients`) and the `sessions` array.
 +   */
-+  void report_heartbeat(const std::function<void(nlohmann::json)> &send);
++  void report_heartbeat(const event_sink_t &send_event, const heartbeat_sink_t &send_heartbeat);
 +}  // namespace splitplay::live_stats
 diff --git a/src/stream.cpp b/src/stream.cpp
-index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81aabd19ecf 100644
+index fa0151997bddb89941efd69ed8c4abd612063e50..faa5ae413ef8b87abfb37e506482300e9778ce06 100644
 --- a/src/stream.cpp
 +++ b/src/stream.cpp
 @@ -32,6 +32,7 @@ extern "C" {
@@ -646,7 +678,17 @@ index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81a
      safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
      safe::signal_t controlEnd;  ///< Signal raised when the control channel exits.
  
-@@ -1126,6 +1129,8 @@ namespace stream {
+@@ -658,6 +661,9 @@ namespace stream {
+ 
+       session_p->control.peer = peer;
+ 
++      // SplitPlay: the client got through to the control stream; the stream is reported from now on
++      splitplay::live_stats::control_connected(session_p->sp_stats);
++
+       // Use the local address from the control connection as the source address
+       // for other communications to the client. This is necessary to ensure
+       // proper routing on multi-homed hosts.
+@@ -1126,6 +1132,8 @@ namespace stream {
  
        auto lastGoodFrame = stats[3];
  
@@ -655,7 +697,7 @@ index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81a
        BOOST_LOG(verbose)
          << "type [IDX_LOSS_STATS]"sv << std::endl
          << "---begin stats---" << std::endl
-@@ -1151,6 +1156,8 @@ namespace stream {
+@@ -1151,6 +1159,8 @@ namespace stream {
          << "firstFrame [" << firstFrame << ']' << std::endl
          << "lastFrame [" << lastFrame << ']';
  
@@ -664,7 +706,7 @@ index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81a
        session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
      });
  
-@@ -1299,6 +1306,8 @@ namespace stream {
+@@ -1299,6 +1309,8 @@ namespace stream {
            if (!session->control.peer) {
              has_session_awaiting_peer = true;
            } else {
@@ -673,7 +715,7 @@ index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81a
              auto &feedback_queue = session->control.feedback_queue;
              while (feedback_queue->peek()) {
                auto feedback_msg = feedback_queue->pop();
-@@ -1527,6 +1536,7 @@ namespace stream {
+@@ -1527,6 +1539,7 @@ namespace stream {
          frame_header.lastPayloadLen = session->config.packetsize - sizeof(NV_VIDEO_PACKET);
        }
  
@@ -681,7 +723,7 @@ index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81a
        if (packet->frame_timestamp) {
          auto duration_to_latency = [](const std::chrono::steady_clock::duration &duration) {
            const auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
-@@ -1536,6 +1546,7 @@ namespace stream {
+@@ -1536,6 +1549,7 @@ namespace stream {
          uint16_t latency = duration_to_latency(std::chrono::steady_clock::now() - *packet->frame_timestamp);
          frame_header.frame_processing_latency = latency;
          frame_processing_latency_logger.collect_and_log(latency / 10.);
@@ -689,7 +731,7 @@ index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81a
        } else {
          frame_header.frame_processing_latency = 0;
        }
-@@ -1574,6 +1585,7 @@ namespace stream {
+@@ -1574,6 +1588,7 @@ namespace stream {
        }
  
        std::array<std::string_view, MAX_FEC_BLOCKS> fec_blocks;
@@ -697,7 +739,7 @@ index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81a
        auto fec_blocks_begin = std::begin(fec_blocks);
        auto fec_blocks_end = std::begin(fec_blocks) + fec_blocks_needed;
  
-@@ -1773,11 +1785,14 @@ namespace stream {
+@@ -1773,11 +1788,14 @@ namespace stream {
                               << (packet->is_idr() ? " Key" : "")
                               << (packet->after_ref_frame_invalidation ? " RFI" : "");
  
@@ -712,27 +754,27 @@ index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81a
        } catch (const std::exception &e) {
          BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
          std::this_thread::sleep_for(100ms);
-@@ -2181,6 +2196,9 @@ namespace stream {
+@@ -2181,6 +2199,9 @@ namespace stream {
        BOOST_LOG(debug) << "Resetting Input..."sv;
        input::reset(session.input);
  
-+      // SplitPlay: the stream is over (event client_disconnected, no longer in heartbeats)
++      // SplitPlay: the stream is over (client_disconnected queued, no longer in heartbeats)
 +      splitplay::live_stats::ended(session.sp_stats);
 +
        // If this is the last session, invoke the platform callbacks
        if (--running_sessions == 0) {
          bool revert_display_config {config::video.dd.config_revert_on_disconnect};
-@@ -2245,6 +2263,9 @@ namespace stream {
+@@ -2245,6 +2266,9 @@ namespace stream {
  #endif
        }
  
-+      // SplitPlay: report the stream (event client_connected, listed in heartbeats until join())
++      // SplitPlay: the stream runs; it is reported (client_connected, heartbeats) once its control peer connects too
 +      splitplay::live_stats::started(session.sp_stats, addr_string);
 +
        return 0;
      }
  
-@@ -2260,6 +2281,24 @@ namespace stream {
+@@ -2260,6 +2284,24 @@ namespace stream {
        session->launch_session_id = launch_session.id;
        session->client_cert = launch_session.client_cert;
  

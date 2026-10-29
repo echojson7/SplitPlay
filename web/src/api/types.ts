@@ -88,8 +88,8 @@ export interface DeskMetrics {
   encodeMsP99: number
   /** Frames the client reported lost, percent of the frames sent. */
   lossPct?: number
-  /** Round-trip time to the Moonlight client, ms. */
-  rttMs?: number
+  /** Round-trip time to the Moonlight client, ms; null until one is measured (older services: absent). */
+  rttMs?: number | null
   clients: number
 }
 

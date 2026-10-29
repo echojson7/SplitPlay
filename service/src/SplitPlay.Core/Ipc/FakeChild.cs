@@ -351,7 +351,7 @@ public static class FakeChild
         private bool _streaming;
         private DateTimeOffset _startedAt;
 
-        private readonly record struct Live(double Fps, int BitrateKbps, double EncodeMsP50, double EncodeMsP99, double LossPct, int RttMs);
+        private readonly record struct Live(double Fps, int BitrateKbps, double EncodeMsP50, double EncodeMsP99, double LossPct, int? RttMs);
 
         public void Dispose() => _order.Dispose();
 
@@ -415,7 +415,18 @@ public static class FakeChild
             {
                 if (!_streaming)
                 {
-                    return new HeartbeatMessage { Seq = seq, State = "idle", Metrics = Metrics(new Live(), clients: 0) };
+                    // As the worker: no stream, no round trip, an empty session list.
+                    return new HeartbeatMessage
+                    {
+                        Seq = seq,
+                        State = "idle",
+                        Metrics = Metrics(new Live(), clients: 0),
+                        Sessions = ToElement(w =>
+                        {
+                            w.WriteStartArray();
+                            w.WriteEndArray();
+                        }),
+                    };
                 }
 
                 var live = Next();
@@ -472,7 +483,14 @@ public static class FakeChild
             w.WriteNumber("encode_ms_p50", l.EncodeMsP50);
             w.WriteNumber("encode_ms_p99", l.EncodeMsP99);
             w.WriteNumber("loss_pct", l.LossPct);
-            w.WriteNumber("rtt_ms", l.RttMs);
+            if (l.RttMs is int rtt)
+            {
+                w.WriteNumber("rtt_ms", rtt);
+            }
+            else
+            {
+                w.WriteNull("rtt_ms");
+            }
         }
 
         /// <summary>One heartbeat interval's numbers.</summary>

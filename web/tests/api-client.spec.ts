@@ -58,7 +58,7 @@ describe('ApiClient', () => {
     expect((await client.getDesk('anna')).stream).toBeNull()
     advance(200)
     const stopped = await client.getDesk('anna')
-    expect(stopped.metrics).toMatchObject({ fps: 0, clients: 0 })
+    expect(stopped.metrics).toMatchObject({ fps: 0, rttMs: null, clients: 0 })
     await client.startDesk('anna')
     advance(1000)
     const again = await client.getDesk('anna')

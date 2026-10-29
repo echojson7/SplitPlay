@@ -37,7 +37,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0008` session audio | captures the session's default render endpoint ("Remote Audio") through WASAPI loopback; no Steam Streaming Speakers install, no virtual sink unless `virtual_sink` is set, the default endpoint is never changed; the session's endpoints are logged at start-up |
 | `0009` desk defaults | `apps.json` offers only "Desktop"; `capture=ddx`, `origin_web_ui_allowed=pc`, `system_tray=disabled` by default |
 | `0010` self-test | `--self-test <seconds>`: captures the session's display, moves the mouse with SendInput and reads the default endpoint via WASAPI loopback, writes `<desk-dir>/self-test.json` |
-| `0011` live stats | heartbeats carry real stream numbers (`fps`, `bitrate_kbps`, `encode_ms_p50/p99`, `loss_pct`, `rtt_ms`) and a `sessions` list (client name and uuid, address, mode, codec, requested bitrate, HDR); `event client_connected`/`client_disconnected` when a stream starts and ends. Counters are bumped on the streaming threads, everything else runs on the heartbeat thread |
+| `0011` live stats | heartbeats carry real stream numbers (`fps`, `bitrate_kbps`, `encode_ms_p50/p99`, `loss_pct`, `rtt_ms`) and a `sessions` list (client name and uuid, address, mode, codec, requested bitrate, HDR); `event client_connected`/`client_disconnected` when a stream is up (its client connected the control stream) and when it ends. Streaming threads only bump counters and RTSP/control threads only queue the events; the heartbeat thread does the rest and all the pipe writes |
 
 ### Changing a patch or adding one
 
@@ -208,8 +208,9 @@ Control IPC behaviour (protocol 1):
 - `heartbeat` every 1000 ms from `welcome` on, with `state` `starting` until `ready`, then `idle` or `streaming`.
   `metrics.clients` is the number of active streams; `metrics` has the live numbers of the last second and
   `sessions` lists the streams (definitions and sources in ipc.md).
-- `event client_connected` / `client_disconnected` when a Moonlight stream starts and ends, ordered with the
-  heartbeats (a heartbeat sent after the event always agrees with it).
+- `event client_connected` / `client_disconnected` when a Moonlight stream is up (control stream connected) and when
+  it ends. The heartbeat thread sends them right before the heartbeat that reflects them, so a heartbeat sent after
+  the event always agrees with it; no other thread writes them to the pipe.
 - `ready` (with `ports.base`) once the HTTP base port accepts connections on loopback.
 - `event mode_requested` on a Moonlight launch, see above.
 - `shutdown` is answered and the worker exits with code 0. `pair`, `list_clients` and `unpair` are served;

@@ -273,17 +273,33 @@ public sealed class AdminPipeServer(
 
     /// <summary>
     /// Writes the answer line and waits (bounded by <paramref name="ct"/>) for the client to close its end, so that the
-    /// answer is read before the pipe goes away. No unbounded WaitForPipeDrain.
+    /// answer is read before the pipe goes away. No unbounded WaitForPipeDrain. The client's side is read from before
+    /// the answer is written: a caller refused at connect is still writing its request, and a write on a full pipe only
+    /// completes once the other end reads, so both ends would otherwise wait on each other until the deadline.
     /// </summary>
     private static async Task TryAnswerAsync(NamedPipeServerStream pipe, AdminTokenResponse response, CancellationToken ct)
     {
+        var drain = DrainAsync(pipe, ct);
         try
         {
             var bytes = JsonSerializer.SerializeToUtf8Bytes(response, AdminPipeJsonContext.Default.AdminTokenResponse);
             await pipe.WriteAsync(bytes, ct).ConfigureAwait(false);
             await pipe.WriteAsync("\n"u8.ToArray(), ct).ConfigureAwait(false);
             await pipe.FlushAsync(ct).ConfigureAwait(false);
-            var sink = new byte[64];
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+        {
+        }
+
+        await drain.ConfigureAwait(false);
+    }
+
+    /// <summary>Reads and discards until the client closes its end or <paramref name="ct"/> fires.</summary>
+    private static async Task DrainAsync(NamedPipeServerStream pipe, CancellationToken ct)
+    {
+        try
+        {
+            var sink = new byte[256];
             while (await pipe.ReadAsync(sink, ct).ConfigureAwait(false) > 0)
             {
             }
@@ -343,7 +359,7 @@ public sealed class AdminPipeServer(
         }
 
         return new NamedPipeServerStream(LocalName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte,
-            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly, AdminPipe.MaxLineBytes, AdminPipe.MaxLineBytes);
     }
 
     [SupportedOSPlatform("windows")]
@@ -368,6 +384,7 @@ public sealed class AdminPipeServer(
 
         var flags = PipeOptions.Asynchronous | (first ? PipeOptions.FirstPipeInstance : PipeOptions.None);
         return NamedPipeServerStreamAcl.Create(LocalName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
-            PipeTransmissionMode.Byte, flags, 0, 0, security);
+            // Room for one request and one answer line, so that neither side's single write waits on the other's read.
+            PipeTransmissionMode.Byte, flags, AdminPipe.MaxLineBytes, AdminPipe.MaxLineBytes, security);
     }
 }

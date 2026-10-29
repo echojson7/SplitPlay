@@ -248,8 +248,12 @@ public sealed class SecurityTests
         Assert.Contains("desk session", line, StringComparison.Ordinal);
         Assert.True(server.Dropped >= 1);
 
+        // A real client writes its request while the refusal is being written: it must still get the refusal, and
+        // well before the connection deadline (on Windows both writes used to wait on each other until it fired).
+        var started = DateTime.UtcNow;
         var ex = await Assert.ThrowsAsync<AdminPipeException>(() => AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "test", TimeSpan.FromSeconds(5), ns));
         Assert.Contains("desk session", ex.Message, StringComparison.Ordinal);
+        Assert.True(DateTime.UtcNow - started < AdminPipeServer.RequestTimeout, "the refusal waited for the connection deadline");
     }
 
     [Fact]
@@ -301,8 +305,10 @@ public sealed class SecurityTests
             Assert.NotNull(await AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "test", TimeSpan.FromSeconds(5), ns));
         }
 
+        var started = DateTime.UtcNow;
         var ex = await Assert.ThrowsAsync<AdminPipeException>(() => AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "test", TimeSpan.FromSeconds(5), ns));
         Assert.Contains("too many", ex.Message, StringComparison.Ordinal);
+        Assert.True(DateTime.UtcNow - started < AdminPipeServer.RequestTimeout, "the refusal waited for the connection deadline");
     }
 
     [Fact]

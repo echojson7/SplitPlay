@@ -29,7 +29,10 @@ const form = reactive({
   fecPercent: d.profile.fecPercent === undefined ? '' : String(d.profile.fecPercent),
   minFps: d.profile.minFps === undefined ? '' : String(d.profile.minFps),
   gpuPriority: (d.profile.gpuPriority ?? '') as GpuPriority | '',
+  // Stored as the worker's `gamepad` setting; the service defaults it to ds4.
+  gamepad: d.workerSettings?.gamepad === 'x360' ? 'x360' : 'ds4',
   workerSettings: Object.entries(d.workerSettings ?? {})
+    .filter(([k]) => k !== 'gamepad')
     .map(([k, v]) => `${k}=${v}`)
     .join('\n'),
 })
@@ -73,6 +76,8 @@ function toConfig(): DeskConfig {
       config.disableBluetoothUserService = form.bluetooth
     if (props.desk.steamIsolation !== undefined || !form.steam) config.steamIsolation = form.steam
     const ws = parseWorkerSettings(form.workerSettings)
+    delete ws.gamepad
+    if (form.gamepad === 'x360') ws.gamepad = 'x360'
     if (Object.keys(ws).length > 0) config.workerSettings = ws
     else delete config.workerSettings
     if (form.password !== '') config.password = form.password
@@ -135,6 +140,13 @@ const gpuOptions = computed(() => {
         <label for="adv-codec">{{ t('adv.codec') }}</label>
         <select id="adv-codec" v-model="form.codec" name="codec">
           <option v-for="c in CODECS" :key="c" :value="c">{{ c.toUpperCase() }}</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="adv-gamepad">{{ t('adv.gamepad') }}</label>
+        <select id="adv-gamepad" v-model="form.gamepad" name="gamepad" :disabled="running">
+          <option value="ds4">DualShock 4</option>
+          <option value="x360">Xbox 360</option>
         </select>
       </div>
       <div class="field">

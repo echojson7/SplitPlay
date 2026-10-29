@@ -30,7 +30,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0001` product identity | executable `splitplay-worker`, SplitPlay version string (`--version`, `--help`, log), `--desk-dir` for all config/state paths, working directory = exe directory, tray off by default, no browser launch |
 | `0002` control client | child side of [`ipc.md`](../docs/contracts/ipc.md), role `worker`: `--pipe`/`--desk`, hello/welcome/ready, 1 s heartbeats, `shutdown`, `pair`/`list_clients`/`unpair`, exit when the pipe breaks |
 | `0003` session targeting | the user token for launched apps comes from the worker's own session instead of `WTSGetActiveConsoleSessionId()` |
-| `0004` ViGEm option | CMake option `SUNSHINE_ENABLE_VIGEM` (default `OFF`); `build.sh` turns it **on** for the interim ViGEm gamepads (see *Gamepads (interim)* below) until SplitPlay's own pad driver in Stage 4 |
+| `0004` ViGEm option | CMake option `SUNSHINE_ENABLE_VIGEM` (default `OFF`); `build.sh` turns it **on** for ViGEm gamepads (see *Gamepads* below) |
 | `0005` build fix | the NVENC object libraries link `${Boost_LIBRARIES}`, so they find Boost.Log when Boost 1.89 comes from FetchContent (MSYS2 now ships a newer Boost than the pinned tree accepts) |
 | `0006` display settings | libdisplaydevice is not used (nothing is applied, reverted or "recovered", encoder probing no longer depends on its CCD view); a Moonlight launch/resume sends `event mode_requested {width,height,fps}` and waits up to 3 s for the session to change size |
 | `0007` capture visibility | the capture banner names the session, DXGI output and adapter LUID; DXGI's view of the session is logged when no output is found; a warning when the session renders on Microsoft Basic Render Driver |
@@ -159,9 +159,12 @@ the worker sees are the session's own.
 - **Input.** Keyboard, mouse (absolute and relative), scroll, pen and touch go through `SendInput`/
   `InjectSyntheticPointerInput` into session N. Keys are sent as scan codes, so the session's keyboard layout (the
   desk user's, e.g. Russian) maps them; text from Moonlight's keyboard uses `KEYEVENTF_UNICODE`.
-- **Gamepads (interim).** Moonlight controllers become ViGEm virtual pads (Xbox 360, or DualShock 4 when `auto`
-  picks it for a PlayStation controller) through ViGEmBus, which the SplitPlay installer bundles and installs when it
-  is missing (client Windows only; ViGEmBus 1.22 refuses Windows Server). This is the interim path until SplitPlay's per-session pad driver (Stage 4): ViGEm pads are global,
+- **Gamepads.** Moonlight controllers become ViGEm virtual pads through ViGEmBus. The service sets `gamepad=ds4`:
+  XInput hands an Xbox 360 pad's button state only to the console session's foreground window (rumble still arrives),
+  so an emulated X360 pad does nothing inside a desk, while a DualShock 4 is a HID device that the desk's games read
+  directly or through Steam Input. A desk can switch back to Xbox 360 in its advanced settings. ViGEm comes, which the SplitPlay installer bundles and installs when it
+  is missing (client Windows only; ViGEmBus 1.22 refuses Windows Server). SplitPlay stays on ViGEm (no own pad driver:
+  without an EV certificate it would need Windows test mode). ViGEm pads are global,
   so every session, the console included, sees every desk's pads. Without ViGEmBus the worker logs "ViGEmBus is not
   installed or running" at start-up and reports no gamepads; everything else, the self-test included, is unchanged.
 - **Audio.** The session's default render endpoint is "Remote Audio" (the seat announces rdpsnd); the worker captures

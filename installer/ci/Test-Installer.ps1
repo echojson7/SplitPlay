@@ -64,9 +64,17 @@ function Get-StubCalls {
 }
 
 # ViGEmBus: setup installs it only when no ViGEmBus driver is present and records that in HKLM\Software\SplitPlay.
+# Same test as setup's ViGEmBusPresent: the driver binary exists in System32\drivers or where the service points (a
+# service key without its binary does not count).
 function Test-ViGEmBus {
-    (Test-Path (Join-Path $env:SystemRoot 'System32\drivers\ViGEmBus.sys')) -or
-        (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\ViGEmBus')
+    if (Test-Path (Join-Path $env:SystemRoot 'System32\drivers\ViGEmBus.sys')) { return $true }
+    $svc = Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\ViGEmBus' -ErrorAction SilentlyContinue
+    if (-not $svc -or -not $svc.PSObject.Properties['ImagePath'] -or -not $svc.ImagePath) { return $false }
+    $image = [string] $svc.ImagePath
+    if ($image -match '^\\SystemRoot\\') { $image = Join-Path $env:SystemRoot $image.Substring(12) }
+    elseif ($image.StartsWith('\??\')) { $image = $image.Substring(4) }
+    elseif (-not $image.Contains(':')) { $image = Join-Path $env:SystemRoot $image }
+    return (Test-Path -LiteralPath $image)
 }
 
 # The product code setup recorded for the ViGEmBus it installed, or $null.
@@ -168,7 +176,7 @@ function Test-Removed([string] $label, [bool] $dataKept, $vigemRecord = $null) {
     Check 'no ViGEmBus record left in HKLM\Software\SplitPlay' ($null -eq (Get-ViGEmRecord))
     if ($vigemRecord) {
         Check "ViGEmBus ($vigemRecord), installed by setup, was uninstalled" (-not (Test-Path (Join-Path $uninstallKey $vigemRecord)))
-        Write-Host "  ViGEmBus driver or service left behind: $(Test-ViGEmBus)"
+        Write-Host "  ViGEmBus driver left behind: $(Test-ViGEmBus)"
     } elseif ($vigemPreinstalled) {
         Check 'ViGEmBus that setup did not install was left alone' (Test-ViGEmBus)
     }

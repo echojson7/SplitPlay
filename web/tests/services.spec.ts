@@ -80,17 +80,18 @@ describe('ServicesFlyout', () => {
 
   it('stops a service without asking when nothing depends on it', async () => {
     const w = await openFlyout()
-    await w.find('[data-service="Audiosrv"] [data-action="stop"]').trigger('click')
+    await w.find('[data-service="UmRdpService"] [data-action="stop"]').trigger('click')
     await flushPromises()
     expect(document.querySelector('[role="dialog"][aria-modal="true"]')).toBeNull()
-    expect(w.find('[data-service="Audiosrv"]').text()).toContain('Останавливается')
-    expect(w.find('[data-service="Audiosrv"] button').exists()).toBe(false)
+    expect(w.find('[data-service="UmRdpService"]').text()).toContain('Останавливается')
+    expect(w.find('[data-service="UmRdpService"] button').exists()).toBe(false)
     w.unmount()
   })
 
   it.each([
     ['TermService', 'Остановить удалённый рабочий стол?', 'Сеансы всех столов завершатся.'],
     ['SplitPlay', 'Остановить SplitPlay?', 'Все столы остановятся, окно потеряет связь со службой.'],
+    ['Audiosrv', 'Остановить звук Windows?', 'Звук пропадёт на всех столах и на этом ПК.'],
   ])('asks before stopping %s', async (name, title, text) => {
     const stop = vi.spyOn(ApiClient.prototype, 'stopService')
     const w = await openFlyout()

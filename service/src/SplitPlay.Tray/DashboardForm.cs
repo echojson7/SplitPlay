@@ -10,8 +10,10 @@ namespace SplitPlay.Tray;
 /// A window hosting WebView2 on the service's web UI. Closing it hides it; Quit closes it for real.
 /// <para>
 /// The UI is loaded only once <c>/api/v1/health</c> answers. Until then, and whenever loading it fails or the service
-/// stops answering, the window shows <see cref="FallbackPage"/> (service status and Start) and retries on its own.
-/// Loading at start-up or a failed load also starts a stopped service (elevated once if the user may not start it).
+/// stops answering, the window shows <see cref="FallbackPage"/> (service status and Start) and retries on its own while
+/// the window is visible. Only the first load after the tray starts also starts a stopped service (elevated once if the
+/// user may not start it): a service the user stopped later stays stopped until they press Start. When the API answers
+/// but the UI itself does not load (an HTTP error), the page shows the error and waits for Retry.
 /// The WebView stays hidden while the UI loads, so its own error page is never seen.
 /// </para>
 /// </summary>
@@ -33,6 +35,9 @@ internal sealed class DashboardForm : Form
     /// <summary>UI shown: notices when the service stops answering.</summary>
     private readonly System.Windows.Forms.Timer _monitor = new() { Interval = 3000 };
 
+    /// <summary>The automatic start is used by the first dashboard load of this tray process only.</summary>
+    private static bool s_autoStartUsed;
+
     private bool _closing;
     private bool _fallback;
     private bool _starting;
@@ -40,6 +45,9 @@ internal sealed class DashboardForm : Form
     private bool _autoElevated;
     private int _misses;
     private string? _error;
+
+    /// <summary>The API answers but the UI did not load: the HTTP status or WebView error; no automatic retries.</summary>
+    private string? _uiError;
     private string _status = "unknown";
     private DateTime? _runningSince;
 
@@ -98,13 +106,15 @@ internal sealed class DashboardForm : Form
             core.NavigationCompleted += OnNavigationCompleted;
             core.WebMessageReceived += OnWebMessageReceived;
 
+            var autoStart = !s_autoStartUsed;
+            s_autoStartUsed = true;
             if (await ApiAnswersAsync())
             {
                 NavigateToUi();
             }
             else
             {
-                await ShowFallbackAsync(startService: true);
+                await ShowFallbackAsync(startService: autoStart);
             }
         }
         catch (WebView2RuntimeNotFoundException)
@@ -123,6 +133,7 @@ internal sealed class DashboardForm : Form
     private void NavigateToUi()
     {
         _fallback = false;
+        _uiError = null;
         _retry.Stop();
         _misses = 0;
         _monitor.Start();
@@ -154,14 +165,51 @@ internal sealed class DashboardForm : Form
             return;
         }
 
-        await SafeAsync(() => ShowFallbackAsync(startService: true));
+        if (_fallback)
+        {
+            return;
+        }
+
+        // Never starts the service: a reload after the user stopped it must not bring it back.
+        var status = e.HttpStatusCode;
+        var reason = status > 0 ? $"HTTP {status}" : e.WebErrorStatus.ToString();
+        await SafeAsync(async () =>
+        {
+            if (await ApiAnswersAsync())
+            {
+                // The service is up but serves no UI (missing wwwroot, a 5xx): retrying on a timer would loop forever.
+                _uiError = FallbackPage.Text("errorUi", reason);
+            }
+
+            await ShowFallbackAsync(startService: false);
+        });
     }
 
     private async void OnWebMessageReceived(object? sender, CoreWebView2WebMessageReceivedEventArgs e)
     {
-        if (_fallback && e.TryGetWebMessageAsString() == "start")
+        if (!_fallback)
         {
-            await SafeAsync(() => StartServiceAsync(automatic: false));
+            return;
+        }
+
+        switch (e.TryGetWebMessageAsString())
+        {
+            case "start":
+                await SafeAsync(() => StartServiceAsync(automatic: false));
+                break;
+            case "retry":
+                NavigateToUi();
+                break;
+        }
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible && _fallback)
+        {
+            // Polling pauses while the window is hidden; check right away when it comes back.
+            _ = SafeAsync(RetryAsync);
         }
     }
 
@@ -185,7 +233,7 @@ internal sealed class DashboardForm : Form
         {
             _fallback = true;
             _status = await Task.Run(ServiceStarter.Query);
-            _webView.CoreWebView2.NavigateToString(FallbackPage.Build(PageStatus(), _starting, _error));
+            _webView.CoreWebView2.NavigateToString(FallbackPage.Build(PageStatus(), _starting, Error(), Button()));
             _retry.Start();
         }
 
@@ -216,7 +264,7 @@ internal sealed class DashboardForm : Form
             {
                 case StartOutcome.AccessDenied when !automatic || !_autoElevated:
                     _autoElevated = true;
-                    var (ok, error) = await ServiceStarter.StartElevatedAsync();
+                    var (ok, error) = await ServiceStarter.StartElevatedAsync(Handle);
                     if (!ok)
                     {
                         _error = error is null ? FallbackPage.Text("errorElevation") : FallbackPage.Text("errorStart", error);
@@ -245,7 +293,8 @@ internal sealed class DashboardForm : Form
 
     private async Task RetryAsync()
     {
-        if (!_fallback || _probing)
+        // Nothing to poll for while the window is hidden (OnVisibleChanged checks once when it is shown).
+        if (!_fallback || _probing || !Visible)
         {
             return;
         }
@@ -253,7 +302,7 @@ internal sealed class DashboardForm : Form
         _probing = true;
         try
         {
-            if (await ApiAnswersAsync())
+            if (_uiError is null && await ApiAnswersAsync())
             {
                 NavigateToUi();
                 return;
@@ -295,6 +344,11 @@ internal sealed class DashboardForm : Form
     /// <summary>The page status: a running service that does not answer is still starting for a while.</summary>
     private string PageStatus()
     {
+        if (_uiError is not null)
+        {
+            return _status;
+        }
+
         if (_status != "running")
         {
             _runningSince = null;
@@ -305,11 +359,19 @@ internal sealed class DashboardForm : Form
         return DateTime.UtcNow - _runningSince < StartupGrace ? "starting" : "notResponding";
     }
 
+    private string? Error() => _uiError ?? _error;
+
+    /// <summary>The page's one button: Retry after a UI error, Start for a stopped service, else none.</summary>
+    private string? Button() =>
+        _uiError is not null ? "retry"
+        : _status is "stopped" or "unknown" ? "start"
+        : null;
+
     private void Push()
     {
         if (_fallback && _webView.CoreWebView2 is { } core)
         {
-            core.PostWebMessageAsJson(FallbackPage.StateJson(PageStatus(), _starting, _error));
+            core.PostWebMessageAsJson(FallbackPage.StateJson(PageStatus(), _starting, Error(), Button()));
         }
     }
 

@@ -14,6 +14,12 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
   changes state (POST, PUT, DELETE) must send `X-CSRF-Token`, otherwise it gets 403 `csrf_failed`.
 - Stage 2 skeleton: the admin token pipe is not implemented yet, so loopback requests are served without a session.
   The service listens on loopback only until LAN access (HTTPS) is implemented.
+- Browser checks in front of every `/api` route (403 `forbidden`):
+  - a POST, PUT or DELETE with `Sec-Fetch-Site: cross-site`, or with an `Origin` that is not the request's own
+    scheme://host:port (`Origin: null` included), is refused: another site's page could otherwise post a form here,
+    and it carries no `SameSite=Strict` cookie, so the CSRF check would not apply. Requests without these headers (CLI,
+    scripts) and the UI itself (same origin, on loopback or on the LAN host) pass;
+  - on a loopback connection the `Host` header must be `localhost` or an IP address (DNS rebinding).
 
 | Request | Body | Answer |
 |---|---|---|
@@ -162,7 +168,7 @@ The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}`
 | `validation_failed` | 400 | the body breaks a rule of config.md |
 | `unauthorized` | 401 | no valid session |
 | `invalid_password` | 401 | wrong admin password |
-| `csrf_failed`, `forbidden` | 403 | missing or wrong `X-CSRF-Token`; not allowed |
+| `csrf_failed`, `forbidden` | 403 | missing or wrong `X-CSRF-Token`; not allowed (non-loopback caller, cross-origin state change, unexpected `Host`) |
 | `not_found` | 404 | unknown desk or client |
 | `already_exists` | 409 | desk id, user or base port taken |
 | `console_user` | 409 | the desk's user is the one signed in at the console |

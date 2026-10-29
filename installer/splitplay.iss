@@ -247,11 +247,12 @@ const
   MsiIdleWaitSec = 60;
   ExitTimedOut = 1460; { ERROR_TIMEOUT }
   { DACL of the SplitPlay service: the default ACEs (SYSTEM, Administrators, interactive users IU, service logons SU)
-    with SERVICE_START (RP) added for interactive users and Authenticated Users (AU), so that the tray can start a
-    stopped service without elevation. Rights: CC query config, LC query status, SW enumerate dependents, RP start,
-    LO interrogate, CR user-defined control, RC read permissions. Stop (WP), pause (DT), reconfigure (DC), delete (SD)
-    and permission changes (WD, WO) stay with SYSTEM and Administrators. ServiceSacl is the default audit ACE. }
-  ServiceDacl = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWRPLOCRRC;;;AU)(A;;CCLCSWLOCRRC;;;SU)';
+    with SERVICE_START (RP) added for interactive users, so that the tray can start a stopped service without
+    elevation. IU covers console and RDP sign-ins. Rights: CC query config, LC query status, SW enumerate dependents,
+    RP start, LO interrogate, CR user-defined control, RC read permissions. Stop (WP), pause (DT), reconfigure (DC),
+    delete (SD) and permission changes (WD, WO) stay with SYSTEM and Administrators. ServiceSacl is the default audit
+    ACE. }
+  ServiceDacl = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)';
   ServiceSacl = 'S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)';
 
 var

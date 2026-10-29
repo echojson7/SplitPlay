@@ -175,20 +175,23 @@ button[hidden] { display: none; }
   const button = document.getElementById('start');
   document.getElementById('title').textContent = S.title;
   document.getElementById('name').textContent = S.service;
-  button.textContent = S.start;
+  let action = null;
 
   function render(state) {
     const status = document.getElementById('status');
     status.textContent = S[state.status] || state.status;
     status.className = 'desc ' + (DOTS[state.status] || '');
-    button.hidden = !(state.status === 'stopped' || state.status === 'unknown');
+    action = state.button || null;
+    button.hidden = !action;
+    button.textContent = action ? S[action] : '';
     button.disabled = !!state.busy;
     document.getElementById('error').textContent = state.error || '';
   }
 
   button.addEventListener('click', () => {
+    if (!action) return;
     button.disabled = true;
-    window.chrome?.webview?.postMessage('start');
+    window.chrome?.webview?.postMessage(action);
   });
   window.chrome?.webview?.addEventListener('message', (e) => render(e.data));
   render(__STATE__);

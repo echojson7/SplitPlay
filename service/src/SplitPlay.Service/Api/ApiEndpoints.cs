@@ -47,9 +47,27 @@ public static partial class ApiEndpoints
             return;
         }
 
+        // DNS rebinding: a page on an attacker's name that resolves to 127.0.0.1 would be "same origin" with us.
+        if (!HostAllowed(context))
+        {
+            await WriteErrorAsync(context, StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden,
+                $"unexpected Host header '{context.Request.Host}'").ConfigureAwait(false);
+            return;
+        }
+
+        var changesState = !HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method)
+                           && !HttpMethods.IsOptions(context.Request.Method);
+
+        // Another site's page (a form post, fetch without CORS) carries no SameSite=Strict cookie, so the CSRF check
+        // below would not apply to it: refuse state changes that a browser marks as coming from another origin.
+        if (changesState && CrossOriginProblem(context.Request) is { } crossOrigin)
+        {
+            await WriteErrorAsync(context, StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden, crossOrigin).ConfigureAwait(false);
+            return;
+        }
+
         // A browser session must echo its CSRF token on state-changing requests.
-        if (!HttpMethods.IsGet(context.Request.Method) && !HttpMethods.IsHead(context.Request.Method)
-            && !HttpMethods.IsOptions(context.Request.Method)
+        if (changesState
             && !context.Request.Path.StartsWithSegments(BuildInfo.ApiPrefix + "/auth/login", StringComparison.OrdinalIgnoreCase)
             && context.RequestServices.GetRequiredService<AuthService>().Current(context) is { } session
             && context.Request.Headers[AuthService.CsrfHeader] != session.CsrfToken)
@@ -81,6 +99,54 @@ public static partial class ApiEndpoints
             await WriteErrorAsync(context, StatusCodes.Status500InternalServerError, ApiErrorCodes.Internal, ex.Message).ConfigureAwait(false);
         }
     });
+
+    /// <summary>
+    /// Why a state-changing request is refused as cross-origin, or null: <c>Sec-Fetch-Site: cross-site</c>, or an
+    /// <c>Origin</c> other than the request's own scheme://host:port (<c>Origin: null</c> included). Requests without
+    /// either header (CLI, scripts) pass; so does the UI, which is served from the same origin (loopback or LAN host).
+    /// </summary>
+    internal static string? CrossOriginProblem(HttpRequest request)
+    {
+        if (string.Equals(request.Headers["Sec-Fetch-Site"].ToString(), "cross-site", StringComparison.OrdinalIgnoreCase))
+        {
+            return "cross-site request refused";
+        }
+
+        var origin = request.Headers.Origin.ToString();
+        if (origin.Length == 0)
+        {
+            return null;
+        }
+
+        if (!Uri.TryCreate(origin, UriKind.Absolute, out var o) || o.Scheme is not ("http" or "https") || !request.Host.HasValue)
+        {
+            return $"request from origin '{origin}' refused";
+        }
+
+        var port = request.Host.Port ?? (request.IsHttps ? 443 : 80);
+        var same = string.Equals(o.Scheme, request.Scheme, StringComparison.OrdinalIgnoreCase)
+                   && string.Equals(o.Host, request.Host.Host, StringComparison.OrdinalIgnoreCase)
+                   && o.Port == port;
+        return same ? null : $"request from origin '{origin}' refused";
+    }
+
+    /// <summary>
+    /// On a loopback connection the Host header must be <c>localhost</c> or an IP address: any other name can only come
+    /// from a DNS name that resolves to this machine (DNS rebinding). LAN connections are not restricted here.
+    /// </summary>
+    internal static bool HostAllowed(HttpContext context)
+    {
+        var local = context.Connection.LocalIpAddress;
+        if (local is not null && !IPAddress.IsLoopback(local))
+        {
+            return true;
+        }
+
+        var host = context.Request.Host.Host;
+        return host.Length == 0
+               || string.Equals(host, "localhost", StringComparison.OrdinalIgnoreCase)
+               || IPAddress.TryParse(host.Trim('[', ']'), out _);
+    }
 
     public static void MapSplitPlayApi(this IEndpointRouteBuilder app)
     {

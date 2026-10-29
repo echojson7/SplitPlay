@@ -106,6 +106,11 @@ public sealed class RelatedServices(IServiceControl control, ILogger<RelatedServ
             {
                 logger.LogWarning("{Message}", ex.Message);
             }
+            catch (Exception ex)
+            {
+                // Nobody awaits this task: an unexpected failure must at least reach the log.
+                logger.LogError(ex, "Stopping {Service} failed", entry.Name);
+            }
         });
 
         return ToDto(entry, info with { Status = HostServiceStatus.Stopping, AcceptsStop = false });

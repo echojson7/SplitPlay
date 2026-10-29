@@ -104,9 +104,9 @@ repository's `LICENSE` and `NOTICE.md` are added by the script.
    refuses 64-bit Windows Server, and on the windows-2022 runner its setup never returned.
 9. Runs `splitplay.exe service install` (only if the service is not registered yet) and starts the service.
    On upgrade the service is stopped before files are replaced and started again afterwards. Every install also
-   sets the service's permissions with `sc sdset`: the default ACEs plus start (`RP`) for interactive users (`IU`)
-   and Authenticated Users (`AU`), so that the tray can start a stopped service without elevation; stop,
-   reconfigure and delete stay with SYSTEM and Administrators.
+   sets the service's permissions with `sc sdset`: the default ACEs plus start (`RP`) for interactive users (`IU`,
+   console and RDP sign-ins), so that the tray can start a stopped service without elevation; stop, reconfigure
+   and delete stay with SYSTEM and Administrators.
 10. Start menu: `SplitPlay` (tray) and `SplitPlay Web UI` (http://127.0.0.1:38299/). Optional task
    (on by default): start the tray at sign-in for all users (`HKLM\...\Run\SplitPlayTray`, value
    `"...\SplitPlay.Tray.exe" --autostart`). Started from the Start menu or the final "Launch SplitPlay" checkbox,

@@ -16,6 +16,7 @@ internal static class FallbackPage
         ["title"] = "Services",
         ["service"] = "SplitPlay service",
         ["start"] = "Start",
+        ["retry"] = "Retry",
         ["running"] = "Running",
         ["starting"] = "Starting",
         ["stopping"] = "Stopping",
@@ -26,6 +27,7 @@ internal static class FallbackPage
         ["errorElevation"] = "Administrator rights are needed",
         ["errorDisabled"] = "The service is disabled",
         ["errorStart"] = "Could not start the service: {0}",
+        ["errorUi"] = "The interface did not open: {0}",
     };
 
     private static readonly Dictionary<string, string> Ru = new()
@@ -33,6 +35,7 @@ internal static class FallbackPage
         ["title"] = "Службы",
         ["service"] = "Служба SplitPlay",
         ["start"] = "Запустить",
+        ["retry"] = "Повторить",
         ["running"] = "Работает",
         ["starting"] = "Запускается",
         ["stopping"] = "Останавливается",
@@ -43,6 +46,7 @@ internal static class FallbackPage
         ["errorElevation"] = "Нужны права администратора",
         ["errorDisabled"] = "Служба отключена",
         ["errorStart"] = "Не удалось запустить службу: {0}",
+        ["errorUi"] = "Интерфейс не открылся: {0}",
     };
 
     private static bool Russian => CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru";
@@ -53,12 +57,15 @@ internal static class FallbackPage
     public static string Text(string key, params object[] args) =>
         args.Length == 0 ? Strings[key] : string.Format(CultureInfo.CurrentCulture, Strings[key], args);
 
-    /// <summary>The state pushed to the page: <c>{"status":"…","busy":false,"error":null}</c>.</summary>
-    public static string StateJson(string status, bool busy, string? error) =>
-        JsonSerializer.Serialize(new Dictionary<string, object?> { ["status"] = status, ["busy"] = busy, ["error"] = error });
+    /// <summary>
+    /// The state pushed to the page: <c>{"status":"…","busy":false,"error":null,"button":"start"}</c>; <c>button</c> is
+    /// <c>start</c>, <c>retry</c> or null, and is also the message the page posts back when it is pressed.
+    /// </summary>
+    public static string StateJson(string status, bool busy, string? error, string? button) =>
+        JsonSerializer.Serialize(new Dictionary<string, object?> { ["status"] = status, ["busy"] = busy, ["error"] = error, ["button"] = button });
 
     /// <summary>The whole page for NavigateToString, rendered in <paramref name="status"/>.</summary>
-    public static string Build(string status, bool busy, string? error)
+    public static string Build(string status, bool busy, string? error, string? button)
     {
         using var stream = typeof(FallbackPage).Assembly.GetManifestResourceStream("SplitPlay.Tray.FallbackPage.html")
                            ?? throw new InvalidOperationException("FallbackPage.html is not embedded");
@@ -66,6 +73,6 @@ internal static class FallbackPage
         return reader.ReadToEnd()
             .Replace("__LANG__", Russian ? "ru" : "en", StringComparison.Ordinal)
             .Replace("__STRINGS__", JsonSerializer.Serialize(Strings), StringComparison.Ordinal)
-            .Replace("__STATE__", StateJson(status, busy, error), StringComparison.Ordinal);
+            .Replace("__STATE__", StateJson(status, busy, error, button), StringComparison.Ordinal);
     }
 }

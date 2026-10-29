@@ -91,9 +91,10 @@ internal static class ServiceStarter
     /// <summary>
     /// Runs <c>splitplay.exe service start</c> (next to the service, <c>{app}\service</c>) through ShellExecute
     /// <c>runas</c>: one UAC prompt. Falls back to <c>sc.exe start</c> when the CLI is not there. Completes when the
-    /// command exits; returns false and the reason when the prompt was declined or the command failed.
+    /// command exits; returns false and the reason when the prompt was declined or the command failed. The UAC prompt
+    /// is owned by <paramref name="owner"/> (the dashboard window); the launch runs off the UI thread.
     /// </summary>
-    public static async Task<(bool Ok, string? Error)> StartElevatedAsync()
+    public static async Task<(bool Ok, string? Error)> StartElevatedAsync(IntPtr owner)
     {
         var cli = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "service", "splitplay.exe"));
         var info = File.Exists(cli)
@@ -102,9 +103,12 @@ internal static class ServiceStarter
         info.UseShellExecute = true;
         info.Verb = "runas";
         info.WindowStyle = ProcessWindowStyle.Hidden;
+        info.ErrorDialog = true;
+        info.ErrorDialogParentHandle = owner;
         try
         {
-            using var process = Process.Start(info);
+            // ShellExecuteEx with runas blocks until the prompt is answered: not on the UI thread.
+            using var process = await Task.Run(() => Process.Start(info)).ConfigureAwait(false);
             if (process is null)
             {
                 return (false, null);

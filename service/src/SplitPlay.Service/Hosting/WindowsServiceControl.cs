@@ -44,7 +44,7 @@ public sealed class WindowsServiceControl(IHostApplicationLifetime lifetime) : I
         {
             sc.Start();
         }
-        catch (InvalidOperationException ex)
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
         {
             throw new ServiceControlException($"could not start {name}: {(ex.InnerException ?? ex).Message}", ex);
         }
@@ -65,7 +65,12 @@ public sealed class WindowsServiceControl(IHostApplicationLifetime lifetime) : I
             // Stops running dependents first (UmRdpService before TermService), waiting for each.
             sc.Stop(stopDependentServices: true);
         }
-        catch (InvalidOperationException ex)
+        catch (System.ServiceProcess.TimeoutException ex)
+        {
+            // A dependent did not stop within 30 s.
+            throw new ServiceControlException($"could not stop {name}: {ex.Message}", ex);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception)
         {
             throw new ServiceControlException($"could not stop {name}: {(ex.InnerException ?? ex).Message}", ex);
         }

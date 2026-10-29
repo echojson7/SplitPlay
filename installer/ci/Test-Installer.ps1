@@ -100,11 +100,10 @@ function Get-AceRights([string] $sddl, [string] $sid) {
 function Test-ServiceDacl {
     $sddl = (& sc.exe sdshow SplitPlay | Where-Object { $_ -match '^D:' }) -join ''
     Write-Host "  service SDDL: $sddl"
-    foreach ($sid in 'IU', 'AU') {
-        $rights = @(Get-AceRights $sddl $sid)
-        Check "service DACL: $sid may query and start ($($rights -join ' '))" (($rights -contains 'RP') -and ($rights -contains 'LC'))
-        Check "service DACL: $sid may not stop, reconfigure or delete" (-not (@($rights | Where-Object { $_ -in 'WP', 'DC', 'SD', 'WD', 'WO', 'DT' }).Count))
-    }
+    $rights = @(Get-AceRights $sddl 'IU')
+    Check "service DACL: interactive users may query and start ($($rights -join ' '))" (($rights -contains 'RP') -and ($rights -contains 'LC'))
+    Check 'service DACL: interactive users may not stop, reconfigure or delete' (-not (@($rights | Where-Object { $_ -in 'WP', 'DC', 'SD', 'WD', 'WO', 'DT' }).Count))
+    Check 'service DACL: no Authenticated Users ACE' (@(Get-AceRights $sddl 'AU').Count -eq 0)
     $admins = @(Get-AceRights $sddl 'BA')
     Check "service DACL: Administrators keep full control ($($admins -join ' '))" (@('RP', 'WP', 'DC', 'SD', 'WD', 'WO' | Where-Object { $admins -notcontains $_ }).Count -eq 0)
 }

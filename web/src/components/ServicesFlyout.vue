@@ -16,6 +16,7 @@ const POLL_MS = 3000
 const CONFIRM: Record<string, { title: MessageKey; text: MessageKey }> = {
   SplitPlay: { title: 'services.confirmSplitPlay', text: 'services.confirmSplitPlayText' },
   TermService: { title: 'services.confirmTermService', text: 'services.confirmTermServiceText' },
+  Audiosrv: { title: 'services.confirmAudiosrv', text: 'services.confirmAudiosrvText' },
 }
 
 const LABELS: Record<string, MessageKey> = {

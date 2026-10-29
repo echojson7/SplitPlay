@@ -9,6 +9,7 @@
 ; Setup command-line parameters (besides the standard Inno Setup ones):
 ;   /AllowUnsupportedOS=1  install on Windows older than 11 22H2 or on Windows Server (CI, testing)
 ;   /SkipWebView2=1        do not download the WebView2 runtime even if it is missing
+;   /SkipViGEmBus=1        do not install the bundled ViGEmBus driver even if it is missing
 ;   /SkipTermWrap=1        install the TermWrap files but leave TermService's ServiceDll alone
 ;                          ("splitplay host prepare --skip-termwrap"; CI runners must keep their RDP stack)
 ; Uninstaller parameters:
@@ -29,6 +30,10 @@
 #endif
 #ifndef WebPort
   #define WebPort "38299"
+#endif
+; ViGEmBus (nefarius/ViGEmBus, BSD-3-Clause): the official signed setup, staged unmodified in <StageDir>\vigembus.
+#ifndef ViGEmBusSetup
+  #define ViGEmBusSetup "ViGEmBus_1.22.0_x64_x86_arm64.exe"
 #endif
 
 ; VersionInfoVersion must be numeric: strip any "-suffix" from AppVersion.
@@ -67,6 +72,9 @@
 #endif
 #if !FileExists(AddBackslash(StageDir) + "termwrap\UmWrap.dll")
   #error Missing staged file termwrap\UmWrap.dll (check /DStageDir, see installer/README.md)
+#endif
+#if !FileExists(AddBackslash(StageDir) + "vigembus\" + ViGEmBusSetup)
+  #error Missing staged ViGEmBus setup in vigembus\ (check /DStageDir and /DViGEmBusSetup, see installer/README.md)
 #endif
 
 [Setup]
@@ -147,6 +155,8 @@ en.StatusService=Registering and starting the SplitPlay service...
 ru.StatusService=Регистрация и запуск службы SplitPlay...
 en.StatusWebView2=Installing the WebView2 runtime...
 ru.StatusWebView2=Установка среды WebView2...
+en.StatusViGEmBus=Installing the ViGEmBus gamepad driver...
+ru.StatusViGEmBus=Установка драйвера геймпадов ViGEmBus...
 en.StatusHost=Preparing Remote Desktop for SplitPlay desks...
 ru.StatusHost=Настройка удалённого рабочего стола для столов SplitPlay...
 en.HostPrepareFailed=Preparing the Remote Desktop host failed (exit code %1). Desks cannot start until it succeeds: run "splitplay host prepare" from an elevated prompt and see the setup log for details.
@@ -180,6 +190,8 @@ Source: "{#StageDir}\worker\*"; DestDir: "{app}\worker"; Components: core; Flags
 Source: "{#StageDir}\termwrap\*"; DestDir: "{app}\termwrap"; Components: termwrap; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
 ; Driver packages are shipped but not installed in Stage 2 (pnputil comes with the drivers in Stage 4).
 Source: "{#StageDir}\drivers\*"; DestDir: "{app}\drivers"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; Interim gamepads (until the Stage 4 pad driver): extracted to {tmp} and run only when ViGEmBus is missing.
+Source: "{#StageDir}\vigembus\{#ViGEmBusSetup}"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Components: core; Flags: ignoreversion
 Source: "..\NOTICE.md"; DestDir: "{app}"; Components: core; Flags: ignoreversion
 
@@ -215,11 +227,21 @@ const
   WebView2File = 'MicrosoftEdgeWebview2Setup.exe';
   BuildWin11_22H2 = 22621;
   BuildWin11_24H2 = 26100;
+  { ViGEmBus. SplitPlay records in SplitPlayKey that it installed the driver, and removes it on uninstall only then. }
+  SplitPlayKey = 'Software\SplitPlay';
+  ViGEmBusMarkerValue = 'ViGEmBusInstalledBySplitPlay';
+  ViGEmBusProductValue = 'ViGEmBusProductCode';
+  ViGEmBusServiceKey = 'SYSTEM\CurrentControlSet\Services\ViGEmBus';
+  { ProductCode of the ViGEmBus 1.22.0 MSI (winget manifest ViGEm.ViGEmBus 1.22.0), used only when its Uninstall entry
+    is not found after setup. }
+  ViGEmBusProductCode = '{9C581C76-2D68-40F8-AA6F-94D3C5215C05}';
+  UninstallKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall';
 
 var
   DownloadPage: TDownloadWizardPage;
   WebView2Downloaded: Boolean;
   HostRebootRequired: Boolean;
+  ViGEmBusRebootRequired: Boolean;
   UninstallRebootRequired: Boolean;
 
 { Runs a program hidden and waits; returns its exit code, or -1 if it could not start. }
@@ -404,12 +426,140 @@ end;
 
 function NeedRestart: Boolean;
 begin
-  Result := HostRebootRequired;
+  Result := HostRebootRequired or ViGEmBusRebootRequired;
 end;
 
 function UninstallNeedRestart: Boolean;
 begin
   Result := UninstallRebootRequired;
+end;
+
+{ True when a ViGEmBus driver is installed: its binary exists in System32\drivers or where its service points. }
+function ViGEmBusPresent: Boolean;
+var
+  Path: String;
+begin
+  Result := FileExists(ExpandConstant('{sys}\drivers\ViGEmBus.sys'));
+  if not Result and RegQueryStringValue(HKLM, ViGEmBusServiceKey, 'ImagePath', Path) then
+  begin
+    if Pos('\SYSTEMROOT\', Uppercase(Path)) = 1 then
+      Path := ExpandConstant('{win}') + Copy(Path, Length('\SystemRoot') + 1, Length(Path))
+    else if Pos('\??\', Path) = 1 then
+      Path := Copy(Path, 5, Length(Path))
+    else if Pos(':', Path) = 0 then
+      Path := ExpandConstant('{win}\') + Path;
+    Result := FileExists(Path);
+  end;
+end;
+
+{ The Windows Installer product code of the installed ViGEmBus (its Uninstall entry), or '' if there is none. }
+function FindViGEmBusProductIn(const RootKey: Integer): String;
+var
+  Keys: TArrayOfString;
+  I: Integer;
+  Name: String;
+begin
+  Result := '';
+  if not RegGetSubkeyNames(RootKey, UninstallKey, Keys) then
+    Exit;
+  for I := 0 to GetArrayLength(Keys) - 1 do
+    if (Copy(Keys[I], 1, 1) = '{') and RegQueryStringValue(RootKey, UninstallKey + '\' + Keys[I], 'DisplayName', Name) and
+      ((Pos('VIGEM', Uppercase(Name)) > 0) or (Pos('VIRTUAL GAMEPAD EMULATION', Uppercase(Name)) > 0)) then
+    begin
+      Log('ViGEmBus Uninstall entry: ' + Keys[I] + ' (' + Name + ')');
+      Result := Keys[I];
+      Exit;
+    end;
+end;
+
+function FindViGEmBusProduct: String;
+begin
+  Result := FindViGEmBusProductIn(HKLM64);
+  if Result = '' then
+    Result := FindViGEmBusProductIn(HKLM32);
+end;
+
+{ Interim gamepads (until the Stage 4 per-session pad driver): the workers emulate Moonlight's gamepads as ViGEm pads,
+  which every session sees. Installs the bundled ViGEmBus only when no ViGEmBus driver is present; a failure is logged
+  and setup continues (desks then have no gamepads). }
+procedure InstallViGEmBus;
+var
+  Code: Integer;
+  Product: String;
+begin
+  if ParamIsSet('SkipViGEmBus') then
+  begin
+    Log('/SkipViGEmBus=1: ViGEmBus is not installed');
+    Exit;
+  end;
+  if ViGEmBusPresent then
+  begin
+    if RegValueExists(HKLM, SplitPlayKey, ViGEmBusMarkerValue) then
+      Log('ViGEmBus is present (installed by SplitPlay before)')
+    else
+      Log('ViGEmBus is already present and was not installed by SplitPlay: leaving it alone');
+    Exit;
+  end;
+  WizardForm.StatusLabel.Caption := CustomMessage('StatusViGEmBus');
+  try
+    ExtractTemporaryFile('{#ViGEmBusSetup}');
+  except
+    Log('ViGEmBus: could not extract the setup: ' + GetExceptionMessage);
+    Exit;
+  end;
+  { Advanced Installer bootstrapper: /exenoui = no bootstrapper UI, /qn /norestart go to msiexec, /exelog = its log. }
+  Code := RunHidden(ExpandConstant('{tmp}\{#ViGEmBusSetup}'),
+    '/exenoui /qn /norestart /exelog ' + AddQuotes(DataDir + '\logs\vigembus-setup.log'));
+  if (Code = 3010) or (Code = 1641) then
+    ViGEmBusRebootRequired := True;
+  if (Code <> 0) and (Code <> 3010) and (Code <> 1641) then
+    Log(Format('ViGEmBus setup failed (exit code %d); continuing without gamepads, see %s', [Code,
+      DataDir + '\logs\vigembus-setup.log']))
+  else if not ViGEmBusPresent then
+    Log('ViGEmBus setup reported success but no ViGEmBus driver is present; continuing without gamepads')
+  else
+  begin
+    Product := FindViGEmBusProduct;
+    if Product = '' then
+    begin
+      Log('ViGEmBus: no Uninstall entry found, recording the 1.22.0 product code');
+      Product := ViGEmBusProductCode;
+    end;
+    RegWriteStringValue(HKLM, SplitPlayKey, ViGEmBusProductValue, Product);
+    RegWriteDWordValue(HKLM, SplitPlayKey, ViGEmBusMarkerValue, 1);
+    Log('ViGEmBus installed by SplitPlay (product ' + Product + ')');
+  end;
+end;
+
+{ Removes ViGEmBus only if SplitPlay installed it. A failed removal is logged and keeps the record. }
+procedure UninstallViGEmBus;
+var
+  Product: String;
+  Code: Integer;
+begin
+  if not RegValueExists(HKLM, SplitPlayKey, ViGEmBusMarkerValue) then
+  begin
+    Log('ViGEmBus was not installed by SplitPlay: leaving it alone');
+    Exit;
+  end;
+  if not RegQueryStringValue(HKLM, SplitPlayKey, ViGEmBusProductValue, Product) or (Product = '') then
+    Product := ViGEmBusProductCode;
+  Code := RunHidden(SysTool('msiexec.exe'), '/x ' + Product + ' /qn /norestart /l*v ' +
+    AddQuotes(DataDir + '\logs\vigembus-uninstall.log'));
+  if (Code = 0) or (Code = 3010) or (Code = 1641) or (Code = 1605) then
+  begin
+    if Code = 1605 then
+      Log('ViGEmBus ' + Product + ' is no longer installed')
+    else
+      Log('ViGEmBus removed');
+    if (Code = 3010) or (Code = 1641) then
+      UninstallRebootRequired := True;
+    RegDeleteValue(HKLM, SplitPlayKey, ViGEmBusMarkerValue);
+    RegDeleteValue(HKLM, SplitPlayKey, ViGEmBusProductValue);
+    RegDeleteKeyIfEmpty(HKLM, SplitPlayKey);
+  end
+  else
+    Log(Format('Removing ViGEmBus failed (msiexec exit code %d); it stays installed', [Code]));
 end;
 
 procedure InstallAndStartService;
@@ -439,6 +589,7 @@ begin
   SecureDataDir;
   AddFirewallRules;
   PrepareHost;
+  InstallViGEmBus;
   InstallAndStartService;
   if WebView2Downloaded then
   begin
@@ -471,6 +622,8 @@ begin
     Code := RunHidden(ExpandConstant('{app}\service\splitplay.exe'), 'host revert');
     if Code = ExitRebootRequired then
       UninstallRebootRequired := True;
+    { After the service is gone, so that no worker holds a ViGEm pad any more. }
+    UninstallViGEmBus;
     RunHidden(SysTool('netsh.exe'), 'advfirewall firewall delete rule name="' + FirewallRuleWeb + '"');
     { netsh cannot delete by wildcard. }
     RunHidden(SysTool('WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' +

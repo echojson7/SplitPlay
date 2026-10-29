@@ -46,12 +46,16 @@ Compilation fails with a clear error if a required staged file is missing.
     Zydis.dll                 disassembler used by both
     EndpWrap.dll              optional; shipped if present but not wired up by SplitPlay
     LICENSE                   TermWrap's MIT licence (should be staged with the DLLs)
+  vigembus\
+    ViGEmBus_1.22.0_x64_x86_arm64.exe   official signed ViGEmBus setup (nefarius/ViGEmBus, BSD-3-Clause), unmodified;
+                              ci.yml downloads it from the pinned release URL and checks its SHA256
 ```
 
 Required files (checked at compile time): `service\SplitPlay.Service.exe`, `service\splitplay.exe`,
 `tray\SplitPlay.Tray.exe`, `service\wwwroot\index.html`, the three files in `native\`,
-`worker\splitplay-worker.exe`, `worker\COPYING`, `termwrap\TermWrap.dll` and `termwrap\UmWrap.dll`. The repository's
-`LICENSE` and `NOTICE.md` are added by the script.
+`worker\splitplay-worker.exe`, `worker\COPYING`, `termwrap\TermWrap.dll`, `termwrap\UmWrap.dll` and the ViGEmBus
+setup in `vigembus\` (file name from `/DViGEmBusSetup`, default `ViGEmBus_1.22.0_x64_x86_arm64.exe`). The
+repository's `LICENSE` and `NOTICE.md` are added by the script.
 
 `termwrap\` is a top-level stage folder, not part of `native\`: if the native build's artifact carries TermWrap in a
 `termwrap` subfolder, the stage step copies it to `<StageDir>\termwrap`.
@@ -82,21 +86,30 @@ Required files (checked at compile time): `service\SplitPlay.Service.exe`, `serv
    running, the command exits with 3010 and setup asks for a restart (`NeedRestart`; `/NORESTART` suppresses it).
    Until that restart desks go to Faulted with "RDP host not prepared: reboot required". A failure shows a message
    and setup continues; `splitplay host prepare` can be run again later, and `splitplay host status` shows each item.
-8. Runs `splitplay.exe service install` (only if the service is not registered yet) and starts the service.
+8. ViGEmBus (interim gamepads until SplitPlay's per-session pad driver in Stage 4; its virtual pads are visible to
+   every session): when no ViGEmBus driver is present (`System32\drivers\ViGEmBus.sys`, or the binary of the
+   `ViGEmBus` service), runs the bundled setup silently with `/exenoui /qn /norestart /exelog
+   %ProgramData%\SplitPlay\logs\vigembus-setup.log` (Advanced Installer bootstrapper: no bootstrapper UI, msiexec
+   without UI, no restart). If the driver is then present, setup records `ViGEmBusInstalledBySplitPlay=1` and the
+   MSI product code (`ViGEmBusProductCode`) in `HKLM\Software\SplitPlay`. A failure is only logged; SplitPlay is
+   installed anyway and desks have no gamepads. An existing ViGEmBus is left alone. Exit code 3010 asks for a restart.
+9. Runs `splitplay.exe service install` (only if the service is not registered yet) and starts the service.
    On upgrade the service is stopped before files are replaced and started again afterwards.
-9. Start menu: `SplitPlay` (tray) and `SplitPlay Web UI` (http://127.0.0.1:38299/). Optional task
+10. Start menu: `SplitPlay` (tray) and `SplitPlay Web UI` (http://127.0.0.1:38299/). Optional task
    (on by default): start the tray at sign-in for all users (`HKLM\...\Run\SplitPlayTray`, value
    `"...\SplitPlay.Tray.exe" --autostart`). Started from the Start menu or the final "Launch SplitPlay" checkbox,
    the tray opens its dashboard window; with `--autostart` it stays an icon. A second start brings the running
    tray's window to the front instead of adding another icon.
-10. WebView2: if the Evergreen runtime is missing, downloads Microsoft's bootstrapper and runs it silently.
+11. WebView2: if the Evergreen runtime is missing, downloads Microsoft's bootstrapper and runs it silently.
    A failed download only shows a warning.
 
 Uninstall stops and removes the service (`splitplay.exe service uninstall`, falling back to `net stop` and
 `sc delete`; stopping the service stops every desk and logs its session off), runs `splitplay.exe host revert`
 (restores the exact values recorded in `host-tuning.json`, deleting the ones that did not exist before; when it
 reverted a loaded ServiceDll it exits with 3010 and the uninstaller asks for a restart, and `TermWrap.dll` is deleted
-at that restart), closes the tray, removes the `SplitPlay Web UI` rule and every per-desk `SplitPlay desk *` rule,
+at that restart), removes ViGEmBus with `msiexec /x <ViGEmBusProductCode> /qn /norestart` only if
+`HKLM\Software\SplitPlay` records that SplitPlay installed it (a failed removal is logged and keeps the record),
+closes the tray, removes the `SplitPlay Web UI` rule and every per-desk `SplitPlay desk *` rule,
 the shortcuts and autostart entry, and asks whether to keep `%ProgramData%\SplitPlay` (silent uninstall keeps it).
 Windows accounts created for desks are not removed by the uninstaller; `splitplay desk delete <id> --delete-user`
 (or `DELETE /api/v1/desks/{id}?deleteUser=true`) removes one together with its stored password.
@@ -109,6 +122,7 @@ Standard Inno Setup switches (`/SILENT`, `/VERYSILENT`, `/SUPPRESSMSGBOXES`, `/L
 |---|---|---|
 | setup | `/AllowUnsupportedOS=1` | skip the Windows version and edition checks (CI, testing) |
 | setup | `/SkipWebView2=1` | never download WebView2 |
+| setup | `/SkipViGEmBus=1` | do not install ViGEmBus even if it is missing (desks then have no gamepads) |
 | setup | `/SkipTermWrap=1` | install the TermWrap files but run `host prepare --skip-termwrap` (TermService untouched; CI) |
 | setup | `/COMPONENTS=core` | do not install TermWrap at all |
 | setup | `/TASKS="!trayautostart"` | do not start the tray at sign-in |
@@ -124,9 +138,14 @@ idle `SplitPlay` service), checks that ISCC refuses an empty stage, compiles the
 keeping data, reinstall without the TermWrap component and uninstall with `/PurgeData=1`, checking files, service
 state, firewall rules (including removal of per-desk rules), ProgramData ACL, shortcuts, the `--autostart` Run value,
 that setup ran `host prepare --skip-termwrap` before starting the service and the uninstaller ran `host revert` (the
-stub records its calls in `%ProgramData%\SplitPlay-ci-stub-calls.log`) and that the runner's TermService
-`ServiceDll` never changes. Every install there uses `/SkipTermWrap=1`. The `installer-preview` artifact is the
+stub records its calls in `%ProgramData%\SplitPlay-ci-stub-calls.log`), that setup ran the (stub) ViGEmBus setup with
+the silent switches without recording it as installed, that the uninstaller removes a recorded ViGEmBus product and
+only then runs msiexec, and that the runner's TermService `ServiceDll` never changes. Every install there uses `/SkipTermWrap=1`. The `installer-preview` artifact is the
 resulting setup built from stub binaries, so it is only good for trying the wizard.
+
+In the integration workflow `Test-Installer.ps1 -RealStage` runs the setup built from the real artifacts, so the real
+ViGEmBus setup runs on the runner: when it installs the driver, the record must match and every uninstall must remove
+it again; when Windows Server refuses the driver, the test only warns.
 
 [`ci/Test-EndToEnd.ps1`](ci/Test-EndToEnd.ps1) runs in the integration workflow on the setup built from the real
 artifacts (also with `/SkipTermWrap=1`): it checks the installer's host preparation, switches the service to the stub

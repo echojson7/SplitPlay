@@ -25,6 +25,8 @@ $runKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run'
 $ruleName = 'SplitPlay Web UI'
 $stubCalls = Join-Path $env:ProgramData 'SplitPlay-ci-stub-calls.log'
 $termServiceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters'
+$splitPlayKey = 'HKLM:\Software\SplitPlay'
+$uninstallKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall'
 $failures = 0
 
 # The runner's own Remote Desktop stack must never be touched (/SkipTermWrap=1 everywhere below).
@@ -61,6 +63,20 @@ function Get-StubCalls {
     return $calls
 }
 
+# ViGEmBus: setup installs it only when no ViGEmBus driver is present and records that in HKLM\Software\SplitPlay.
+function Test-ViGEmBus {
+    (Test-Path (Join-Path $env:SystemRoot 'System32\drivers\ViGEmBus.sys')) -or
+        (Test-Path 'HKLM:\SYSTEM\CurrentControlSet\Services\ViGEmBus')
+}
+
+# The product code setup recorded for the ViGEmBus it installed, or $null.
+function Get-ViGEmRecord {
+    $p = Get-ItemProperty -Path $splitPlayKey -ErrorAction SilentlyContinue
+    if (-not $p -or -not $p.PSObject.Properties['ViGEmBusInstalledBySplitPlay']) { return $null }
+    if ($p.PSObject.Properties['ViGEmBusProductCode']) { return [string] $p.ViGEmBusProductCode }
+    return ''
+}
+
 function Test-TermServiceUntouched {
     $now = (Get-ItemProperty -Path $termServiceKey -Name ServiceDll).ServiceDll
     Check "TermService ServiceDll unchanged ($now)" ($now -eq $termServiceDll)
@@ -88,6 +104,20 @@ function Test-Installed([string] $label, [bool] $termWrap = $true) {
         Check 'host prepare ran before the service was started' (
             [array]::IndexOf($calls, 'splitplay.exe host prepare --skip-termwrap') -ge 0 -and
             [array]::IndexOf($calls, 'splitplay.exe host prepare --skip-termwrap') -lt [array]::IndexOf($calls, 'SplitPlay.Service.exe --stub-service'))
+        $vigemCalls = @($calls | Where-Object { $_ -like 'ViGEmBus_*.exe /exenoui /qn /norestart /exelog *' })
+        if ($vigemPreinstalled) { Check 'setup did not run the ViGEmBus setup (ViGEmBus already present)' ($vigemCalls.Count -eq 0) }
+        else { Check 'setup ran the ViGEmBus setup silently (/exenoui /qn /norestart)' ($vigemCalls.Count -eq 1) }
+        Check 'no ViGEmBus record (the stub setup installs no driver)' ($null -eq (Get-ViGEmRecord))
+    }
+    if ($RealStage) {
+        $record = Get-ViGEmRecord
+        if ($vigemPreinstalled) {
+            Check 'ViGEmBus was already on the runner: setup did not record it as its own' ($null -eq $record)
+        } elseif ($null -ne $record) {
+            Check "ViGEmBus installed by setup (product $record) and present" (Test-ViGEmBus)
+        } else {
+            Write-Host '::warning::setup did not install ViGEmBus on this runner (see vigembus-setup.log and the setup log)'
+        }
     }
     Test-TermServiceUntouched
     $svc = Get-Service -Name SplitPlay -ErrorAction SilentlyContinue
@@ -132,9 +162,16 @@ function New-DeskRule {
     New-NetFirewallRule -DisplayName 'SplitPlay desk ci-1 (TCP)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 48084, 48089, 48110 -Profile Private | Out-Null
 }
 
-function Test-Removed([string] $label, [bool] $dataKept) {
+function Test-Removed([string] $label, [bool] $dataKept, $vigemRecord = $null) {
     Write-Host "== $label"
     Wait-Until { -not (Test-Path $app) }
+    Check 'no ViGEmBus record left in HKLM\Software\SplitPlay' ($null -eq (Get-ViGEmRecord))
+    if ($vigemRecord) {
+        Check "ViGEmBus ($vigemRecord), installed by setup, was uninstalled" (-not (Test-Path (Join-Path $uninstallKey $vigemRecord)))
+        Write-Host "  ViGEmBus driver or service left behind: $(Test-ViGEmBus)"
+    } elseif ($vigemPreinstalled) {
+        Check 'ViGEmBus that setup did not install was left alone' (Test-ViGEmBus)
+    }
     if (-not $RealStage) {
         # With the real CLI the revert itself is checked by Test-EndToEnd.ps1.
         $calls = @(Get-StubCalls)
@@ -154,6 +191,8 @@ function Test-Removed([string] $label, [bool] $dataKept) {
 $common = '/AllowUnsupportedOS=1 /SkipWebView2=1 /SkipTermWrap=1'
 $uninstaller = Join-Path $app 'unins000.exe'
 Remove-Item $stubCalls -ErrorAction SilentlyContinue
+$vigemPreinstalled = Test-ViGEmBus
+Write-Host "ViGEmBus present before: $vigemPreinstalled"
 
 # 1. Fresh install.
 Check 'install exit code 0' ((Invoke-Silent $Setup 'install.log' $common) -eq 0)
@@ -166,16 +205,34 @@ Test-Installed 'after reinstall'
 
 # 3. Uninstall, keeping ProgramData (the silent default).
 New-DeskRule
+$vigemRecord = Get-ViGEmRecord
+if (-not $RealStage) {
+    # As if setup had installed ViGEmBus: the uninstaller must try to remove that product (msiexec answers 1605,
+    # unknown product) and then drop the record.
+    $vigemFake = '{00000000-0000-0000-0000-000000000000}'
+    New-Item -Path $splitPlayKey -Force | Out-Null
+    New-ItemProperty -Path $splitPlayKey -Name ViGEmBusInstalledBySplitPlay -PropertyType DWord -Value 1 -Force | Out-Null
+    New-ItemProperty -Path $splitPlayKey -Name ViGEmBusProductCode -PropertyType String -Value $vigemFake -Force | Out-Null
+}
 Check 'uninstall exit code 0' ((Invoke-Silent $uninstaller 'uninstall.log') -eq 0)
-Test-Removed 'after uninstall (keep data)' $true
+Test-Removed 'after uninstall (keep data)' $true $vigemRecord
+if (-not $RealStage) {
+    Check 'uninstaller ran msiexec /x for the recorded ViGEmBus product' (
+        $null -ne (Select-String -Path (Join-Path $LogDir 'uninstall.log') -SimpleMatch "msiexec.exe`" /x $vigemFake /qn /norestart"))
+}
 Check 'config.json kept' (Test-Path (Join-Path $data 'config.json'))
 
 # 4. Install again over the kept data without the TermWrap component, then uninstall with /PurgeData=1.
 Check 'install over kept data exit code 0' ((Invoke-Silent $Setup 'install2.log' "$common /COMPONENTS=core") -eq 0)
 Test-Installed 'after install over kept data (core only)' $false
 New-DeskRule
+$vigemRecord = Get-ViGEmRecord
 Check 'uninstall /PurgeData=1 exit code 0' ((Invoke-Silent $uninstaller 'uninstall2.log' '/PurgeData=1') -eq 0)
-Test-Removed 'after uninstall (purge)' $false
+Test-Removed 'after uninstall (purge)' $false $vigemRecord
+if (-not $vigemRecord) {
+    Check 'uninstaller did not run msiexec (no ViGEmBus installed by setup)' (
+        $null -eq (Select-String -Path (Join-Path $LogDir 'uninstall2.log') -SimpleMatch 'msiexec.exe'))
+}
 
 if ($failures -gt 0) {
     Write-Host "$failures check(s) failed; setup logs are in $LogDir"

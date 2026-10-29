@@ -16,6 +16,9 @@
 ;                          ("splitplay host prepare --skip-termwrap"; CI runners must keep their RDP stack)
 ; Uninstaller parameters:
 ;   /PurgeData=1           also delete %ProgramData%\SplitPlay (default: keep it; interactive runs ask)
+;   /DeleteDeskAccounts=1  also delete the Windows accounts SplitPlay created for desks, with their profiles (default:
+;                          keep them; interactive runs offer a check box, off by default). Accounts SplitPlay did not
+;                          create are never deleted.
 ;   /ViGEmBusTimeout=<s>   as for setup, for removing a ViGEmBus that SplitPlay installed
 
 #if VER < EncodeVer(6, 3, 0)
@@ -150,6 +153,10 @@ en.ServiceStartFailed=The SplitPlay service was installed but did not start (exi
 ru.ServiceStartFailed=Служба SplitPlay установлена, но не запустилась (код %1). Логи: %2.
 en.KeepDataQuestion=Keep the SplitPlay configuration, desk data and logs in %1?%n%nYes: keep them for a later reinstall.%nNo: delete them.
 ru.KeepDataQuestion=Сохранить конфигурацию, данные столов и логи SplitPlay в %1?%n%nДа: оставить для повторной установки.%nНет: удалить.
+en.UninstallOptions=Uninstall SplitPlay
+ru.UninstallOptions=Удаление SplitPlay
+en.DeleteDeskAccounts=Also delete the desk accounts SplitPlay created
+ru.DeleteDeskAccounts=Удалить и учётные записи столов, созданные SplitPlay
 en.StatusAcl=Securing the data folder...
 ru.StatusAcl=Настройка прав на папку данных...
 en.StatusFirewall=Adding firewall rules...
@@ -261,6 +268,7 @@ var
   HostRebootRequired: Boolean;
   ViGEmBusRebootRequired: Boolean;
   UninstallRebootRequired: Boolean;
+  DeleteDeskAccounts: Boolean;
 
 { Runs a program hidden and waits; returns its exit code, or -1 if it could not start. }
 function RunHidden(const FileName, Params: String): Integer;
@@ -762,10 +770,70 @@ begin
   end;
 end;
 
+{ The uninstall options: one check box, off by default. False when the owner cancels. }
+function AskUninstallOptions: Boolean;
+var
+  Form: TSetupForm;
+  Check: TNewCheckBox;
+  OkButton, CancelButton: TNewButton;
+begin
+  Form := CreateCustomForm;
+  try
+    Form.ClientWidth := ScaleX(440);
+    Form.ClientHeight := ScaleY(96);
+    Form.Caption := CustomMessage('UninstallOptions');
+
+    Check := TNewCheckBox.Create(Form);
+    Check.Parent := Form;
+    Check.Left := ScaleX(16);
+    Check.Top := ScaleY(18);
+    Check.Width := Form.ClientWidth - ScaleX(32);
+    Check.Height := ScaleY(20);
+    Check.Caption := CustomMessage('DeleteDeskAccounts');
+    Check.Checked := False;
+
+    OkButton := TNewButton.Create(Form);
+    OkButton.Parent := Form;
+    OkButton.Width := ScaleX(80);
+    OkButton.Height := ScaleY(24);
+    OkButton.Left := Form.ClientWidth - ScaleX(16 + 80 + 8 + 80);
+    OkButton.Top := Form.ClientHeight - ScaleY(16 + 24);
+    OkButton.Caption := SetupMessage(msgButtonOK);
+    OkButton.ModalResult := mrOk;
+    OkButton.Default := True;
+
+    CancelButton := TNewButton.Create(Form);
+    CancelButton.Parent := Form;
+    CancelButton.Width := ScaleX(80);
+    CancelButton.Height := ScaleY(24);
+    CancelButton.Left := Form.ClientWidth - ScaleX(16 + 80);
+    CancelButton.Top := OkButton.Top;
+    CancelButton.Caption := SetupMessage(msgButtonCancel);
+    CancelButton.ModalResult := mrCancel;
+    CancelButton.Cancel := True;
+
+    Form.ActiveControl := OkButton;
+    Result := Form.ShowModal = mrOk;
+    DeleteDeskAccounts := Check.Checked;
+  finally
+    Form.Free;
+  end;
+end;
+
+function InitializeUninstall: Boolean;
+begin
+  Result := True;
+  DeleteDeskAccounts := ParamIsSet('DeleteDeskAccounts');
+  if not UninstallSilent and not DeleteDeskAccounts then
+    Result := AskUninstallOptions;
+  Log(Format('Delete the desk accounts SplitPlay created: %d', [Ord(DeleteDeskAccounts)]));
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Purge: Boolean;
   Code: Integer;
+  Params: String;
 begin
   if CurUninstallStep = usUninstall then
   begin
@@ -782,6 +850,13 @@ begin
         RunHidden(SysTool('sc.exe'), 'delete ' + ServiceName);
       end;
     end;
+    { With the desks stopped: undo what each desk changed (its Steam values in the desk user's hive, its sign-in screen
+      entry and firewall rules) and, when asked, delete the accounts SplitPlay created. Accounts SplitPlay did not
+      create are never deleted. }
+    Params := 'cleanup';
+    if DeleteDeskAccounts then
+      Params := Params + ' --delete-accounts';
+    RunHiddenWithTimeout(ExpandConstant('{app}\service\SplitPlay.Service.exe'), Params, 180, 'SplitPlay.Service');
     { Restore the exact Remote Desktop settings recorded by "host prepare" (TermService's ServiceDll included). }
     Code := RunHidden(ExpandConstant('{app}\service\splitplay.exe'), 'host revert');
     if Code = ExitRebootRequired then

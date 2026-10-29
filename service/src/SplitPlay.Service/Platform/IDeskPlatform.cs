@@ -58,6 +58,10 @@ public interface IDeskPlatform
     /// </summary>
     void DeleteDesk(DeskConfig desk, bool deleteUser);
 
+    /// <summary>Deletes a Windows account SplitPlay created, with its profile (no-op when it does not exist).</summary>
+    /// <exception cref="DeskUserNotManagedException">The account was not created by SplitPlay; it is never deleted.</exception>
+    void DeleteManagedAccount(string user);
+
     /// <summary>
     /// Runs once the desk session is logged on. Returns true if something was changed that only applies at the next
     /// logon (the console user's keyboard layouts were copied for the first time, or the Steam isolation environment
@@ -77,6 +81,9 @@ public interface IDeskPlatform
     /// that is no longer its user is shown again. Best effort: failures are logged.
     /// </summary>
     void UpdateLogonListing(DeskConfig desk);
+
+    /// <summary>Shows the account the desk hid on the sign-in screen again (no-op when it hid none). Best effort.</summary>
+    void ShowOnLogon(string deskId);
 
     /// <summary>The machine's <c>steam.exe</c> (from <c>HKLM\SOFTWARE\WOW6432Node\Valve\Steam\InstallPath</c>), or null.</summary>
     string? SteamExecutable();

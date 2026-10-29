@@ -9,6 +9,7 @@ namespace SplitPlay.Service;
 /// <code>
 /// SplitPlay.Service.exe [--console] [--data-root DIR] [--web-port N] [--web-root DIR] [--Section:Key=value …]
 /// SplitPlay.Service.exe fake-child --pipe NAME --desk ID [--heartbeat-ms N] [--behavior normal|…] [--role R]
+/// SplitPlay.Service.exe cleanup [--data-root DIR] [--delete-accounts]   (the uninstaller, after the service is gone)
 /// </code>
 /// Without <c>--console</c> and when started by the SCM it runs as the <c>SplitPlay</c> Windows service.
 /// </summary>
@@ -19,6 +20,11 @@ public static class Program
         if (args.Length > 0 && args[0] == "fake-child")
         {
             return await FakeChildCommand.RunAsync(args[1..]).ConfigureAwait(false);
+        }
+
+        if (args.Length > 0 && args[0] == "cleanup")
+        {
+            return UninstallCleanup.Command(args[1..]);
         }
 
         ServiceHostOptions options;

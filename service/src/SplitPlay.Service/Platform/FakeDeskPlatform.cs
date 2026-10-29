@@ -222,6 +222,24 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         }
     }
 
+    public void DeleteManagedAccount(string user)
+    {
+        if (!_accounts.TryGetValue(user, out var account))
+        {
+            return;
+        }
+
+        if (!account.CreatedBySplitPlay)
+        {
+            throw new DeskUserNotManagedException($"Windows account '{user}' was not created by SplitPlay");
+        }
+
+        _accounts.TryRemove(user, out _);
+        _hives.TryRemove(user, out _);
+        _profiles.TryRemove(user, out _);
+        _actions.Enqueue($"userdel {user}");
+    }
+
     public bool OnSessionLogon(DeskConfig desk, int sessionId, string deskDirectory)
     {
         _actions.Enqueue($"logon {desk.Id} {sessionId}");
@@ -312,6 +330,15 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         else
         {
             listing.Forget();
+        }
+    }
+
+    public void ShowOnLogon(string deskId)
+    {
+        var listing = LogonState(deskId);
+        if (listing.RecordedUser() is { } recorded && listing.Show(Machine))
+        {
+            _actions.Enqueue($"show {recorded}");
         }
     }
 

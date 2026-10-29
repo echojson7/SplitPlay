@@ -3,7 +3,8 @@
 # /SkipTermWrap=1: the runner's TermService keeps its own termsrv.dll), host preparation by the installer, then the
 # installed service (LocalSystem) provisions a desk account and runs a desk with the real splitplay-stubworker.exe in
 # the runner's console session through the whole control-IPC lifecycle, driven by the installed CLI and checked over
-# the Web API; finally a purging uninstall, which must revert the host settings.
+# the Web API; finally a purging uninstall with /DeleteDeskAccounts=1, which must revert the host settings, delete the
+# desk accounts SplitPlay created and leave every other account alone.
 # The stub worker and "no seat" are selected through the service's Environment registry value (a loopback RDP
 # session from the real seat is covered by service/build/smoke-test.ps1 when a native build is available).
 # Needs an elevated shell; GitHub-hosted Windows runners are.
@@ -30,6 +31,14 @@ $serviceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\SplitPlay'
 $tsKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
 $termServiceKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters'
 $deskUser = $null
+$deskUser2 = $null
+$userListKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList'
+# A local account SplitPlay did not create: no uninstall option may delete it.
+$ownUser = 'e2e-own'
+
+function Get-UserListValue([string] $user) {
+    (Get-ItemProperty -Path $userListKey -Name $user -ErrorAction SilentlyContinue).$user
+}
 
 function Step([string] $what) { Write-Host "== $what" }
 
@@ -133,6 +142,7 @@ try {
     if (-not $rdu) { throw "$deskUser is not in Remote Desktop Users" }
     if (-not (Test-Path (Join-Path $data 'secrets\desks\e2e-1.bin'))) { throw 'the desk secret was not stored' }
     if (-not (Get-NetFirewallRule -DisplayName 'SplitPlay desk e2e-1 *' -ErrorAction SilentlyContinue)) { throw 'no per-desk firewall rules' }
+    if ((Get-UserListValue $deskUser) -ne 0) { throw "$deskUser is not hidden from the sign-in screen (UserList)" }
 
     # Heartbeats keep the desk Ready for longer than the 3 s hang timeout.
     Start-Sleep -Seconds 6
@@ -164,6 +174,16 @@ try {
     if (Get-LocalUser -Name $deskUser -ErrorAction SilentlyContinue) { throw "$deskUser still exists after delete --delete-user" }
     if (Test-Path (Join-Path $data 'secrets\desks\e2e-1.bin')) { throw 'the desk secret is still there after delete --delete-user' }
     if (Get-NetFirewallRule -DisplayName 'SplitPlay desk e2e-1 *' -ErrorAction SilentlyContinue) { throw 'per-desk firewall rules left after delete' }
+    if ($null -ne (Get-UserListValue $deskUser)) { throw "the UserList entry of $deskUser is still there after delete" }
+
+    Step 'a second desk for the uninstall to clean up'
+    New-LocalUser -Name $ownUser -Password (ConvertTo-SecureString 'E2e-Own-Pass-1!' -AsPlainText -Force) -AccountNeverExpires | Out-Null
+    Invoke-Cli desk create e2e-2 --name "End to end 2" --fps 15 --width 640 --height 360
+    $deskUser2 = (Get-Desk 'e2e-2').user
+    Invoke-Cli desk start e2e-2 --wait --timeout 90
+    if ((Get-Desk 'e2e-2').state -ne 'Ready') { throw "desk e2e-2 did not start: $((Get-Desk 'e2e-2').lastError)" }
+    if ((Get-UserListValue $deskUser2) -ne 0) { throw "$deskUser2 is not hidden from the sign-in screen (UserList)" }
+    Invoke-Cli desk stop e2e-2 --wait --timeout 30
     $ok = $true
 } finally {
     if (-not $ok) {
@@ -174,8 +194,18 @@ try {
     Copy-Item -Recurse -Force -Path (Join-Path $data 'logs') -Destination (Join-Path $LogDir 'programdata-logs') -ErrorAction SilentlyContinue
     Step 'uninstall (purge)'
     $uninstaller = Join-Path $app 'unins000.exe'
-    if (Test-Path $uninstaller) { Invoke-Silent $uninstaller 'e2e-uninstall.log' '/PurgeData=1' }
-    if ($deskUser -and (Get-LocalUser -Name $deskUser -ErrorAction SilentlyContinue)) { Remove-LocalUser -Name $deskUser }
+    if (Test-Path $uninstaller) { Invoke-Silent $uninstaller 'e2e-uninstall.log' '/PurgeData=1 /DeleteDeskAccounts=1' }
+    $ownLeft = $null -ne (Get-LocalUser -Name $ownUser -ErrorAction SilentlyContinue)
+    $desk2Left = $deskUser2 -and (Get-LocalUser -Name $deskUser2 -ErrorAction SilentlyContinue)
+    $desk2Listed = $deskUser2 -and ($null -ne (Get-UserListValue $deskUser2))
+    foreach ($u in @($deskUser, $deskUser2, $ownUser)) {
+        if ($u -and (Get-LocalUser -Name $u -ErrorAction SilentlyContinue)) { Remove-LocalUser -Name $u }
+    }
+}
+if ($ok) {
+    if (-not $ownLeft) { throw "the uninstaller deleted $ownUser, an account SplitPlay did not create" }
+    if ($desk2Left) { throw "the uninstaller with /DeleteDeskAccounts=1 did not delete $deskUser2" }
+    if ($desk2Listed) { throw "the UserList entry of $deskUser2 is still there after the uninstall" }
 }
 $fDenyAfter = (Get-ItemProperty -Path $tsKey -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections
 if ($fDenyAfter -ne $fDenyBefore) { throw "uninstall did not revert fDenyTSConnections ($fDenyAfter, was $fDenyBefore)" }

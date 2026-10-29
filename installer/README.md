@@ -115,16 +115,23 @@ repository's `LICENSE` and `NOTICE.md` are added by the script.
 11. WebView2: if the Evergreen runtime is missing, downloads Microsoft's bootstrapper and runs it silently.
    A failed download only shows a warning.
 
-Uninstall stops and removes the service (`splitplay.exe service uninstall`, falling back to `net stop` and
-`sc delete`; stopping the service stops every desk and logs its session off), runs `splitplay.exe host revert`
+Uninstall first offers one check box, off by default: also delete the desk accounts SplitPlay created
+(`/DeleteDeskAccounts=1` when silent). It stops and removes the service (`splitplay.exe service uninstall`, falling
+back to `net stop` and `sc delete`; stopping the service stops every desk and logs its session off), runs
+`SplitPlay.Service.exe cleanup` (180 s limit), which for every desk in `config.json` and every leftover desk folder
+undoes the Steam isolation values in the desk user's hive, shows the account on the sign-in screen again (the
+`UserList` value goes back to what it was) and removes the desk's firewall rules, and with `--delete-accounts` logs
+off and deletes the accounts SplitPlay created (desk accounts and any left by desks deleted earlier) with their
+profiles and stored passwords; accounts SplitPlay did not create are never deleted. Other stored passwords stay in
+the data folder for a reinstall over kept data. Then it runs `splitplay.exe host revert`
 (restores the exact values recorded in `host-tuning.json`, deleting the ones that did not exist before; when it
 reverted a loaded ServiceDll it exits with 3010 and the uninstaller asks for a restart, and `TermWrap.dll` is deleted
 at that restart), removes ViGEmBus with `msiexec /x <ViGEmBusProductCode> /qn /norestart` (same timeout) only if
 `HKLM\Software\SplitPlay` records that SplitPlay installed it (a failed removal is logged and keeps the record),
 closes the tray, removes the `SplitPlay Web UI` rule and every per-desk `SplitPlay desk *` rule,
 the shortcuts and autostart entry, and asks whether to keep `%ProgramData%\SplitPlay` (silent uninstall keeps it).
-Windows accounts created for desks are not removed by the uninstaller; `splitplay desk delete <id> --delete-user`
-(or `DELETE /api/v1/desks/{id}?deleteUser=true`) removes one together with its stored password.
+SplitPlay creates no scheduled tasks. `splitplay desk delete <id> --delete-user` (or
+`DELETE /api/v1/desks/{id}?deleteUser=true`) removes one desk account at any time.
 
 ## Command-line parameters
 
@@ -141,6 +148,7 @@ Standard Inno Setup switches (`/SILENT`, `/VERYSILENT`, `/SUPPRESSMSGBOXES`, `/L
 | setup | `/COMPONENTS=core` | do not install TermWrap at all |
 | setup | `/TASKS="!trayautostart"` | do not start the tray at sign-in |
 | unins000.exe | `/PurgeData=1` | also delete `%ProgramData%\SplitPlay` |
+| unins000.exe | `/DeleteDeskAccounts=1` | also delete the Windows accounts SplitPlay created for desks, with their profiles |
 
 ## CI
 
@@ -149,7 +157,8 @@ Standard Inno Setup switches (`/SILENT`, `/VERYSILENT`, `/SUPPRESSMSGBOXES`, `/L
 compiled with the .NET Framework `csc.exe` that ships with Windows; its `service install` registers a real,
 idle `SplitPlay` service), checks that ISCC refuses an empty stage, compiles the installer and runs
 [`ci/Test-Installer.ps1`](ci/Test-Installer.ps1): silent install, upgrade over a running service, uninstall
-keeping data, reinstall without the TermWrap component and uninstall with `/PurgeData=1`, checking files, service
+keeping data, reinstall without the TermWrap component and uninstall with `/PurgeData=1 /DeleteDeskAccounts=1`
+(the uninstaller must run `cleanup`, then `cleanup --delete-accounts`, after removing the service), checking files, service
 state and its DACL (users may start, not stop), firewall rules (including removal of per-desk rules), ProgramData ACL, shortcuts, the `--autostart` Run value,
 that setup ran `host prepare --skip-termwrap` before starting the service and the uninstaller ran `host revert` (the
 stub records its calls in `%ProgramData%\SplitPlay-ci-stub-calls.log`), that setup ran the (stub) ViGEmBus setup with
@@ -168,5 +177,6 @@ and `Test-EndToEnd.ps1` take the default Windows Server skip.
 artifacts (also with `/SkipTermWrap=1`): it checks the installer's host preparation, switches the service to the stub
 worker without a seat through the service's `Environment` registry value (`Supervisor__Worker=stub`,
 `Supervisor__Seat=none`, `Supervisor__WorkerSession=console`), runs a desk (account provisioning, per-desk firewall
-rules, worker in the console session, crash recovery), deletes it with `--delete-user` and checks that the purging
-uninstall reverted the host settings.
+rules, sign-in screen entry, worker in the console session, crash recovery), deletes it with `--delete-user`, runs a
+second desk and checks that the purging uninstall with `/DeleteDeskAccounts=1` reverted the host settings, deleted the
+second desk's account and its `UserList` entry and left a local account SplitPlay did not create alone.

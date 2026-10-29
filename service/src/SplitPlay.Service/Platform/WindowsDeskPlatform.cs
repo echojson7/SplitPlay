@@ -217,6 +217,32 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         _logger.LogInformation("Deleted Windows account {User} of desk {Desk}", desk.User, desk.Id);
     }
 
+    public void DeleteManagedAccount(string user)
+    {
+        var account = LocalAccounts.Get(user);
+        if (account is null)
+        {
+            return;
+        }
+
+        if (!account.CreatedBySplitPlay)
+        {
+            throw new DeskUserNotManagedException($"Windows account '{user}' was not created by SplitPlay; it is never deleted by SplitPlay");
+        }
+
+        SecurityIdentifier? sid = null;
+        try
+        {
+            sid = LocalAccounts.SidOf(user);
+        }
+        catch (IdentityNotMappedException)
+        {
+        }
+
+        LocalAccounts.Delete(user, sid);
+        _logger.LogInformation("Deleted Windows account {User}", user);
+    }
+
     // ------------------------------------------------------------------ firewall
 
     public static string FirewallRuleName(string deskId, string protocol) => $"SplitPlay desk {deskId} ({protocol})";
@@ -343,7 +369,7 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         }
     }
 
-    private void ShowOnLogon(string deskId)
+    public void ShowOnLogon(string deskId)
     {
         try
         {

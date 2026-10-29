@@ -777,7 +777,12 @@ var
   Check: TNewCheckBox;
   OkButton, CancelButton: TNewButton;
 begin
+  { Inno Setup 6.5 gave CreateCustomForm its size and scaling parameters. }
+#if VER >= EncodeVer(6, 5, 0)
+  Form := CreateCustomForm(ScaleX(440), ScaleY(96), False, False);
+#else
   Form := CreateCustomForm;
+#endif
   try
     Form.ClientWidth := ScaleX(440);
     Form.ClientHeight := ScaleY(96);

@@ -180,7 +180,7 @@ try {
     if ($null -ne (Get-UserListValue $deskUser)) { throw "the UserList entry of $deskUser is still there after delete" }
 
     Step 'a second desk for the uninstall to clean up'
-    New-LocalUser -Name $ownUser -Password (ConvertTo-SecureString 'E2e-Own-Pass-1!' -AsPlainText -Force) -AccountNeverExpires | Out-Null
+    New-LocalUser -Name $ownUser -Password (ConvertTo-SecureString ('Zq7#vR' + (Get-Random -Minimum 100000 -Maximum 999999) + '!mK') -AsPlainText -Force) -AccountNeverExpires | Out-Null
     Invoke-Cli desk create e2e-2 --name "End to end 2" --fps 15 --width 640 --height 360
     $deskUser2 = (Get-Desk 'e2e-2').user
     Invoke-Cli desk start e2e-2 --wait --timeout 90

@@ -269,7 +269,8 @@ try {
         if ($health.version -ne '0.1.0') { throw "unexpected version $($health.version)" }
 
         Step 'console mode: related Windows services (SCM queries, allow-list)'
-        $services = @(Invoke-RestMethod -Uri "$base/host/services" -TimeoutSec 10)
+        # Invoke-RestMethod writes a JSON array as one object; ForEach-Object unrolls it into the services.
+        $services = @(Invoke-RestMethod -Uri "$base/host/services" -TimeoutSec 10 | ForEach-Object { $_ })
         Write-Host ($services | ForEach-Object { "$($_.name)=$($_.status)/$($_.startType) start=$($_.canStart) stop=$($_.canStop)" })
         $names = @($services | ForEach-Object { $_.name })
         foreach ($n in 'SplitPlay', 'TermService', 'UmRdpService', 'ViGEmBus', 'Audiosrv') {

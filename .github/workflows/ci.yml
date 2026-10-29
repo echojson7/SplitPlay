@@ -72,6 +72,22 @@ jobs:
             '{0}: {1} files, {2:N1} MB' -f $d.Name, $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB)
           }
 
+      # ViGEmBus (nefarius/ViGEmBus, BSD-3-Clause): interim gamepads until the Stage 4 pad driver. The official signed
+      # setup, pinned by URL and SHA256, bundled unmodified; setup runs it only when no ViGEmBus driver is present.
+      - name: Stage ViGEmBus setup (pinned, SHA256-checked)
+        env:
+          VIGEMBUS_URL: https://github.com/nefarius/ViGEmBus/releases/download/v1.22.0/ViGEmBus_1.22.0_x64_x86_arm64.exe
+          VIGEMBUS_SHA256: 89220a7865076b342892f98865f3499fb7c4cfd673159e89d352c360fd014c6a
+        run: |
+          $dir = New-Item -ItemType Directory -Force build/stage/vigembus
+          $file = Join-Path $dir ([IO.Path]::GetFileName($env:VIGEMBUS_URL))
+          Invoke-WebRequest -Uri $env:VIGEMBUS_URL -OutFile $file -MaximumRetryCount 3 -RetryIntervalSec 5
+          $hash = (Get-FileHash -Algorithm SHA256 $file).Hash
+          if ($hash -ne $env:VIGEMBUS_SHA256) { throw "ViGEmBus setup SHA256 $hash does not match the pinned $env:VIGEMBUS_SHA256" }
+          $sig = Get-AuthenticodeSignature $file
+          "$((Get-Item $file).Name): SHA256 ok, signature $($sig.Status), signer $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { "::warning::ViGEmBus setup signature status is $($sig.Status) (the SHA256 pin matched)" }
+
       - name: Locate Inno Setup
         run: |
           function Find-Iscc {

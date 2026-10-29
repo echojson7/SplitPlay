@@ -56,7 +56,18 @@ function Wait-Health([int] $seconds) {
     }
 }
 
-function Get-Desk([string] $id) { Invoke-RestMethod -Uri "$base/desks/$id" }
+# Everything but /health and /auth/* needs the admin: a bearer token from the admin pipe (this shell is elevated).
+$script:apiToken = $null
+function Get-ApiHeaders {
+    if (-not $script:apiToken) {
+        $out = (& $cli auth token 2>&1) -join "`n"
+        if ($LASTEXITCODE -ne 0) { throw "splitplay auth token exited with ${LASTEXITCODE}: $out" }
+        $script:apiToken = $out.Trim()
+    }
+    @{ Authorization = "Bearer $script:apiToken" }
+}
+
+function Get-Desk([string] $id) { Invoke-RestMethod -Headers (Get-ApiHeaders) -Uri "$base/desks/$id" }
 
 $fDenyBefore = (Get-ItemProperty -Path $tsKey -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections
 $dllBefore = (Get-ItemProperty -Path $termServiceKey -Name ServiceDll).ServiceDll
@@ -95,6 +106,10 @@ try {
     $session = Invoke-RestMethod -Uri "$base/auth/session"
     Write-Host "auth session: $($session | ConvertTo-Json -Compress)"
     if (-not $session.setupRequired) { throw 'a fresh install should report setupRequired' }
+    if ($session.authenticated) { throw 'an anonymous caller must not be authenticated' }
+    $refused = $false
+    try { Invoke-RestMethod -Uri "$base/desks" | Out-Null } catch { $refused = $_.Exception.Response.StatusCode.value__ -eq 401 }
+    if (-not $refused) { throw 'GET /desks without a token was not refused with 401' }
 
     Step 'desk lifecycle with the real stub worker (service as LocalSystem)'
     # The stub worker renders and checks synthetic frames on the CPU (WARP); keep it light so that it does not starve
@@ -124,9 +139,9 @@ try {
     $desk = Get-Desk 'e2e-1'
     if ($desk.state -ne 'Ready') { throw "desk left Ready after 6 s: $($desk.state) ($($desk.lastError))" }
 
-    $metrics = Invoke-RestMethod -Uri "$base/metrics"
+    $metrics = Invoke-RestMethod -Headers (Get-ApiHeaders) -Uri "$base/metrics"
     Write-Host "metrics: $($metrics | ConvertTo-Json -Compress -Depth 5)"
-    $logs = @(Invoke-RestMethod -Uri "$base/logs?desk=e2e-1&tail=50")
+    $logs = @(Invoke-RestMethod -Headers (Get-ApiHeaders) -Uri "$base/logs?desk=e2e-1&tail=50")
     Write-Host "desk log lines: $($logs.Count)"
 
     Step 'worker crash is recovered'

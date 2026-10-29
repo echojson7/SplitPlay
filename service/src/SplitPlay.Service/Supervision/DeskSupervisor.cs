@@ -135,6 +135,33 @@ public sealed class DeskSupervisor : IHostedService
 
     public DeskDto Get(string id) => Find(id).ToDto();
 
+    /// <summary>
+    /// True when <paramref name="sessionId"/> is the RDP session a seat opened for a desk (its desk user's session).
+    /// A worker started in some other session without a seat (<c>Supervisor:Seat=none</c>, tests) does not make that
+    /// session a desk.
+    /// </summary>
+    public bool IsDeskSession(int sessionId)
+    {
+        if (sessionId <= 0)
+        {
+            // Session 0 is the services' session, never a desk.
+            return false;
+        }
+
+        foreach (var rt in _desks.Values)
+        {
+            lock (rt.Gate)
+            {
+                if (rt.Seat?.Session == sessionId)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
     public MetricsDto Metrics()
     {
         var now = _time.GetUtcNow();

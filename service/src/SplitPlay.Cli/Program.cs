@@ -34,6 +34,9 @@ public static class Program
         config export <file.zip>
         config import <file.zip>
 
+        auth token                  print a bearer token for the Web API (valid 15 minutes), for scripts:
+                                    Authorization: Bearer <token>
+
         host prepare [--skip-termwrap] [--termwrap-dir DIR] [--compose-interval-ms N] [--json]
                                     prepare Remote Desktop for desks (TermWrap, RDP policies); records the
                                     previous values in <data root>\host-tuning.json
@@ -44,6 +47,8 @@ public static class Program
         version
 
         The Web API URL defaults to SPLITPLAY_URL or http://127.0.0.1:<host.webPort>/ from config.json.
+        Desk, config and auth commands need an administrator signed in at this PC, an elevated prompt, or a
+        token in SPLITPLAY_TOKEN.
         Exit codes: 0 ok, 1 error, 2 usage, 3 service unreachable, 4 timeout.
         """;
 
@@ -83,6 +88,8 @@ public static class Program
                 "host" => Fail("'host' commands need Windows"),
                 "desk" or "desks" => await DeskCommands.RunDeskAsync(verb, rest, Api).ConfigureAwait(false),
                 "config" => await DeskCommands.RunConfigAsync(verb, rest, Api).ConfigureAwait(false),
+                "auth" when verb == "token" => await PrintTokenAsync(rest, Api).ConfigureAwait(false),
+                "auth" => throw new UsageException($"unknown auth command '{verb}'"),
                 _ => throw new UsageException($"unknown command '{group}'"),
             };
         }
@@ -113,6 +120,14 @@ public static class Program
             Console.Error.WriteLine($"error: {ex.Message}");
             return 1;
         }
+    }
+
+    private static async Task<int> PrintTokenAsync(Args args, Func<ApiClient> api)
+    {
+        args.EnsureNoUnknownOptions();
+        using var client = api();
+        Console.WriteLine(await client.TokenAsync().ConfigureAwait(false));
+        return 0;
     }
 
     private static int Fail(string message)

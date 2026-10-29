@@ -30,7 +30,7 @@ public static partial class ApiEndpoints
     [GeneratedRegex("^[0-9]{4}$", RegexOptions.CultureInvariant)]
     private static partial Regex PinRegex();
 
-    /// <summary>Error handling and the loopback guard for <c>/api</c>.</summary>
+    /// <summary>Error handling, the loopback and origin guards and the admin check for <c>/api</c>.</summary>
     public static IApplicationBuilder UseApiErrorHandling(this IApplicationBuilder app) => app.Use(async (context, next) =>
     {
         if (!context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase))
@@ -39,7 +39,7 @@ public static partial class ApiEndpoints
             return;
         }
 
-        // Stage 2 skeleton: no admin password exists yet, so only loopback callers are served (web-api.md).
+        // LAN access (HTTPS) is not implemented yet: only loopback callers are served (web-api.md).
         var remote = context.Connection.RemoteIpAddress;
         if (remote is not null && !IPAddress.IsLoopback(remote))
         {
@@ -66,10 +66,30 @@ public static partial class ApiEndpoints
             return;
         }
 
-        // A browser session must echo its CSRF token on state-changing requests.
+        // Desk users are other people: a process in a desk session gets nothing but /health, token or not.
+        var isHealth = IsRoute(context, "GET", "/health");
+        if (!isHealth && PeerInDeskSession(context))
+        {
+            await WriteErrorAsync(context, StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden,
+                "requests from a desk session are not accepted").ConfigureAwait(false);
+            return;
+        }
+
+        // Everything but health and the sign-in endpoints needs the admin: a session (password login, or the tray's
+        // from the admin pipe) or a bearer token from the admin pipe (CLI).
+        var auth = context.RequestServices.GetRequiredService<AuthService>();
+        if (!isHealth && !IsAuthRoute(context) && !auth.IsAdmin(context))
+        {
+            await WriteErrorAsync(context, StatusCodes.Status401Unauthorized, ApiErrorCodes.Unauthorized,
+                "sign in with the admin password, or open SplitPlay from the tray").ConfigureAwait(false);
+            return;
+        }
+
+        // A browser session must echo its CSRF token on state-changing requests (a bearer token is no ambient credential).
         if (changesState
-            && !context.Request.Path.StartsWithSegments(BuildInfo.ApiPrefix + "/auth/login", StringComparison.OrdinalIgnoreCase)
-            && context.RequestServices.GetRequiredService<AuthService>().Current(context) is { } session
+            && !IsRoute(context, "POST", "/auth/login")
+            && !auth.HasValidBearer(context)
+            && auth.Current(context) is { } session
             && context.Request.Headers[AuthService.CsrfHeader] != session.CsrfToken)
         {
             await WriteErrorAsync(context, StatusCodes.Status403Forbidden, ApiErrorCodes.CsrfFailed,
@@ -99,6 +119,27 @@ public static partial class ApiEndpoints
             await WriteErrorAsync(context, StatusCodes.Status500InternalServerError, ApiErrorCodes.Internal, ex.Message).ConfigureAwait(false);
         }
     });
+
+    private static bool IsRoute(HttpContext context, string method, string path) =>
+        string.Equals(context.Request.Method, method, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(context.Request.Path.Value?.TrimEnd('/'), BuildInfo.ApiPrefix + path, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The sign-in endpoints, open without a session (<c>/auth/password</c> checks the caller itself).</summary>
+    private static bool IsAuthRoute(HttpContext context) =>
+        IsRoute(context, "GET", "/auth/session") || IsRoute(context, "POST", "/auth/login")
+        || IsRoute(context, "POST", "/auth/logout") || IsRoute(context, "POST", "/auth/password");
+
+    /// <summary>True when the TCP peer is a process in a desk session (Auth:PeerCheck).</summary>
+    private static bool PeerInDeskSession(HttpContext context)
+    {
+        if (!context.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuthOptions>>().Value.PeerCheck)
+        {
+            return false;
+        }
+
+        return context.RequestServices.GetRequiredService<IPeerInspector>().PeerSession(context) is int session
+               && context.RequestServices.GetRequiredService<DeskSupervisor>().IsDeskSession(session);
+    }
 
     /// <summary>
     /// Why a state-changing request is refused as cross-origin, or null: <c>Sec-Fetch-Site: cross-site</c>, or an
@@ -158,9 +199,9 @@ public static partial class ApiEndpoints
         // ---- auth
         api.MapGet("/auth/session", (HttpContext context, AuthService auth) =>
         {
+            // setupRequired: no admin password yet (only the tray, the CLI or an elevated prompt can manage the host).
             var session = auth.Current(context);
-            var setupRequired = !auth.HasPassword;
-            return Results.Json(new AuthSessionDto(setupRequired, session is not null || setupRequired, session?.CsrfToken), Ctx.AuthSessionDto);
+            return Results.Json(new AuthSessionDto(!auth.HasPassword, auth.IsAdmin(context), session?.CsrfToken), Ctx.AuthSessionDto);
         });
 
         api.MapPost("/auth/login", async (HttpContext context, AuthService auth) =>
@@ -191,6 +232,13 @@ public static partial class ApiEndpoints
             if (body.NewPassword is null || body.NewPassword.Length < AuthService.MinPasswordLength)
             {
                 throw ApiException.Validation($"newPassword: must be at least {AuthService.MinPasswordLength} characters");
+            }
+
+            if (!auth.HasPassword && !auth.IsAdmin(context))
+            {
+                // Otherwise anybody on this PC (a desk user) could set the first password and take the host over.
+                throw new ApiException(StatusCodes.Status401Unauthorized, ApiErrorCodes.Unauthorized,
+                    "the first admin password can only be set from the tray, the CLI or an elevated prompt");
             }
 
             if (auth.HasPassword && !auth.Verify(body.CurrentPassword))
@@ -373,6 +421,12 @@ public static partial class ApiEndpoints
             if (!context.WebSockets.IsWebSocketRequest)
             {
                 throw ApiException.BadRequest("expected a WebSocket upgrade");
+            }
+
+            // Cross-site WebSocket hijacking: another site's page may open the socket too.
+            if (CrossOriginProblem(context.Request) is { } crossOrigin)
+            {
+                throw new ApiException(StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden, crossOrigin);
             }
 
             using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);

@@ -96,6 +96,21 @@ public static class ServiceHost
         builder.Services.AddHostedService(sp => sp.GetRequiredService<DeskSupervisor>());
         builder.Services.AddSingleton<EventHub>();
         builder.Services.AddSingleton<AuthService>();
+        builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.Section));
+        builder.Services.AddSingleton<FakeAdminCallerCheck>();
+        builder.Services.AddSingleton<IAdminCallerCheck>(sp =>
+            sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch
+            {
+                "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsAdminCallerCheck>(sp),
+                _ => sp.GetRequiredService<FakeAdminCallerCheck>(),
+            });
+        builder.Services.AddSingleton<FakePeerInspector>();
+        builder.Services.AddSingleton<IPeerInspector>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? new WindowsPeerInspector()
+                : sp.GetRequiredService<FakePeerInspector>());
+        builder.Services.AddSingleton<AdminPipeServer>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<AdminPipeServer>());
         builder.Services.AddSingleton<GpuInventory>();
         builder.Services.Configure<FirewallOptions>(builder.Configuration.GetSection(FirewallOptions.Section));
         builder.Services.AddSingleton<IFirewallRule, NetshFirewallRule>();

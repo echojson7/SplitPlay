@@ -3,28 +3,35 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using SplitPlay.Core.Ipc;
 using SplitPlay.Service.Hosting;
 
 namespace SplitPlay.Service.Api;
 
 /// <summary>
-/// Admin password and browser sessions (web-api.md "Authentication").
+/// Who may manage the host (web-api.md "Authentication"): browser sessions from the admin password, and the sessions
+/// and bearer tokens that <see cref="AdminPipeServer"/> hands to the tray and the CLI of the host's administrator.
 /// </summary>
 /// <remarks>
-/// Stage 2: the password hash is PBKDF2-SHA256 in <c>secrets\admin-password.json</c> under the data root; Stage 3 moves
-/// it to Argon2id under DPAPI-machine (ARCHITECTURE.md §6). Sessions live in memory (a service restart logs browsers
-/// out). Loopback callers are still served without a session because the CLI/tray token pipe does not exist yet; the
-/// session and CSRF checks apply to requests that carry the session cookie.
+/// The password hash is PBKDF2-SHA256 in <c>secrets\admin-password.json</c> under the data root (ARCHITECTURE.md §6
+/// plans Argon2id under DPAPI-machine). Sessions and tokens live in memory: a service restart ends them, and the tray
+/// asks for a new one. A request is the admin's when it carries a valid session cookie or bearer token.
 /// </remarks>
 public sealed class AuthService
 {
-    public const string CookieName = "splitplay_session";
+    public const string CookieName = AdminPipe.SessionCookie;
     public const string CsrfHeader = "X-CSRF-Token";
     public const int MinPasswordLength = 8;
     private const int Iterations = 600_000;
-    private static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(12);
+
+    /// <summary>Lifetime of a browser session (password login, or the tray's session from the admin pipe).</summary>
+    public static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(12);
+
+    /// <summary>Lifetime of a bearer token from the admin pipe (one CLI run).</summary>
+    public static readonly TimeSpan BearerLifetime = TimeSpan.FromMinutes(15);
 
     private readonly ConcurrentDictionary<string, Session> _sessions = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _bearers = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private readonly string _file;
     private readonly TimeProvider _time;
@@ -50,11 +57,16 @@ public sealed class AuthService
         }
     }
 
-    public sealed record Session(string Id, string CsrfToken, DateTimeOffset Expires);
+    /// <param name="FromPipe">Handed out over the admin pipe: a password change does not end it.</param>
+    public sealed record Session(string Id, string CsrfToken, DateTimeOffset Expires, bool FromPipe = false);
+
+    /// <summary>True when the request carries a valid session cookie or bearer token: it comes from the host's admin.</summary>
+    public bool IsAdmin(HttpContext context) => HasValidBearer(context) || Current(context) is not null;
 
     /// <summary>The valid session named by the request's cookie, if any.</summary>
     public Session? Current(HttpContext context)
     {
+        ArgumentNullException.ThrowIfNull(context);
         if (!context.Request.Cookies.TryGetValue(CookieName, out var id) || string.IsNullOrEmpty(id))
         {
             return null;
@@ -71,6 +83,50 @@ public sealed class AuthService
         }
 
         return null;
+    }
+
+    /// <summary>True when the request carries a valid <c>Authorization: Bearer</c> token (no CSRF token needed).</summary>
+    public bool HasValidBearer(HttpContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        var header = context.Request.Headers.Authorization.ToString();
+        if (!header.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var token = header["Bearer ".Length..].Trim();
+        if (token.Length == 0 || !_bearers.TryGetValue(token, out var expires))
+        {
+            return false;
+        }
+
+        if (expires > _time.GetUtcNow())
+        {
+            return true;
+        }
+
+        _bearers.TryRemove(token, out _);
+        return false;
+    }
+
+    /// <summary>A new bearer token (admin pipe; tests).</summary>
+    public AdminToken IssueBearer(TimeSpan? lifetime = null)
+    {
+        Prune();
+        var token = Token();
+        var expires = _time.GetUtcNow() + (lifetime ?? BearerLifetime);
+        _bearers[token] = expires;
+        return new AdminToken(token, null, expires);
+    }
+
+    /// <summary>A new session for the tray's WebView (admin pipe): the cookie value and its CSRF token.</summary>
+    public AdminToken IssuePipeSession()
+    {
+        Prune();
+        var session = new Session(Token(), Token(), _time.GetUtcNow() + SessionLifetime, FromPipe: true);
+        _sessions[session.Id] = session;
+        return new AdminToken(session.Id, session.CsrfToken, session.Expires);
     }
 
     public bool Verify(string? password)
@@ -90,7 +146,7 @@ public sealed class AuthService
         return CryptographicOperations.FixedTimeEquals(hash, Convert.FromBase64String(record.Hash));
     }
 
-    /// <summary>Stores a new password and ends every existing session.</summary>
+    /// <summary>Stores a new password and ends every session that was opened with a password.</summary>
     public void SetPassword(string password)
     {
         var salt = RandomNumberGenerator.GetBytes(16);
@@ -105,13 +161,22 @@ public sealed class AuthService
             _password = record;
         }
 
-        _sessions.Clear();
+        foreach (var (id, session) in _sessions)
+        {
+            if (!session.FromPipe)
+            {
+                _sessions.TryRemove(id, out _);
+            }
+        }
+
         _logger.LogInformation("Admin password changed");
     }
 
     /// <summary>Starts a session and sets the HttpOnly cookie on the response.</summary>
     public Session StartSession(HttpContext context)
     {
+        ArgumentNullException.ThrowIfNull(context);
+        Prune();
         var session = new Session(Token(), Token(), _time.GetUtcNow() + SessionLifetime);
         _sessions[session.Id] = session;
         context.Response.Cookies.Append(CookieName, session.Id, new CookieOptions
@@ -136,6 +201,26 @@ public sealed class AuthService
     }
 
     private static string Token() => Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+
+    private void Prune()
+    {
+        var now = _time.GetUtcNow();
+        foreach (var (token, expires) in _bearers)
+        {
+            if (expires <= now)
+            {
+                _bearers.TryRemove(token, out _);
+            }
+        }
+
+        foreach (var (id, session) in _sessions)
+        {
+            if (session.Expires <= now)
+            {
+                _sessions.TryRemove(id, out _);
+            }
+        }
+    }
 
     private PasswordRecord? Load()
     {

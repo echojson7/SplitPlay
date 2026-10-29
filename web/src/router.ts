@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 import { createRouter, createWebHashHistory, type RouteRecordRaw, type Router } from 'vue-router'
 import { api } from './api/client'
+import { trayHost } from './host'
 import { store } from './store'
 
 declare module 'vue-router' {
   interface RouteMeta {
-    /** Reachable without a session (login, setup). */
+    /** Reachable without a session (login). */
     public?: boolean
-    setup?: boolean
     /** Top bar tab to highlight. */
     section?: 'library' | 'settings' | 'diagnostics'
   }
@@ -35,19 +35,10 @@ export const routes: RouteRecordRaw[] = [
   { path: '/metrics', redirect: '/diagnostics/metrics' },
   { path: '/logs', redirect: '/diagnostics/logs' },
   { path: '/login', name: 'login', component: () => import('./views/LoginView.vue'), meta: { public: true } },
-  { path: '/setup', name: 'setup', component: () => import('./views/LoginView.vue'), meta: { public: true, setup: true } },
+  // The admin password is set in Settings (only the tray, the CLI or a signed-in browser can set it).
+  { path: '/setup', redirect: '/settings' },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
-
-export const SETUP_SKIPPED_KEY = 'splitplay.setupSkipped'
-
-function setupSkipped(): boolean {
-  try {
-    return globalThis.sessionStorage?.getItem(SETUP_SKIPPED_KEY) === '1'
-  } catch {
-    return false
-  }
-}
 
 export function createAppRouter(): Router {
   const router = createRouter({ history: createWebHashHistory(), routes })
@@ -62,17 +53,14 @@ export function createAppRouter(): Router {
       }
     }
     const s = store.state.session!
-    if (s.setupRequired) {
-      if (to.name !== 'setup' && !setupSkipped()) return { name: 'setup', query: { redirect: to.fullPath } }
-      return true
-    }
-    if (to.meta.setup) return { name: s.authenticated ? 'settings' : 'login' }
     if (!s.authenticated && !to.meta.public) return { name: 'login', query: { redirect: to.fullPath } }
     if (s.authenticated && to.meta.public) return { name: 'library' }
     return true
   })
 
   api.onUnauthorized = () => {
+    // In the tray: its session expired or the service restarted; the tray signs in again and reloads the page.
+    trayHost()?.postMessage('auth')
     if (store.state.session) store.state.session = { ...store.state.session, authenticated: false }
     const current = router.currentRoute.value
     if (!current.meta.public) void router.push({ name: 'login', query: { redirect: current.fullPath } })

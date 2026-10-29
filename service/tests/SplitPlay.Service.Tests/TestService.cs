@@ -34,8 +34,14 @@ internal sealed class TestService : IAsyncDisposable
 
     public string DataRoot { get; }
 
-    /// <summary>Client for the in-process server; available once started.</summary>
+    /// <summary>Client for the in-process server with an admin bearer token (as the CLI gets one); available once started.</summary>
     public HttpClient Client { get; private set; } = null!;
+
+    /// <summary>The bearer token <see cref="Client"/> sends.</summary>
+    public string Token { get; private set; } = "";
+
+    /// <summary>A client without any credential (a plain browser or another local process).</summary>
+    public HttpClient AnonymousClient() => App.GetTestClient();
 
     public FakeChildLauncher Launcher { get; }
 
@@ -80,7 +86,9 @@ internal sealed class TestService : IAsyncDisposable
         await app.StartAsync();
         // The start-up check of TermService/UmRdpService runs in the background; let it finish before tests change the fake.
         await app.Services.GetRequiredService<RequiredServicesStarter>().Completion;
+        service.Token = app.Services.GetRequiredService<Api.AuthService>().IssueBearer(TimeSpan.FromHours(1)).Token;
         service.Client = app.GetTestClient();
+        service.Client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", service.Token);
         return service;
     }
 

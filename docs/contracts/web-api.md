@@ -5,15 +5,41 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 
 ## Authentication
 
-- Requests from loopback carrying a valid token pass. The tray app and CLI obtain a token from the service over
-  `\\.\pipe\splitplay\admin` (DACL: Administrators and SYSTEM) and send it as `Authorization: Bearer <token>`.
-- The browser UI logs in with the admin password: `POST /auth/login {"password":"..."}` sets an HttpOnly session cookie;
-  `POST /auth/logout` clears it. State-changing requests from the browser also need the `X-CSRF-Token` header
-  whose value is returned by login and by `GET /auth/session`.
+Desk users are other people signed in on the same PC, so loopback alone proves nothing. Every route except
+`GET /health` and the `/auth/*` routes below needs proof of being the host's administrator, reads included
+(desks, logs, accounts, config export, the WebSocket); without it the answer is 401 `unauthorized`. Proof is one of:
+
+- **A bearer token from the admin pipe** (CLI, scripts): `Authorization: Bearer <token>`, valid 15 minutes, no CSRF
+  token needed. `splitplay auth token` prints one.
+- **A session from the admin pipe** (tray): the tray puts it into its WebView as the `splitplay_session` cookie, so the
+  owner never sees a login. Valid 12 hours; the UI posts `auth` to the tray on a 401 (expired, service restarted) and
+  the tray signs in again. A password change does not end it.
+- **A session from the admin password** (any other browser): `POST /auth/login {"password":"..."}` sets the cookie;
+  `POST /auth/logout` clears it. Valid 12 hours; a password change ends it.
+
+Admin pipe `\\.\pipe\splitplay\admin`: one JSON line each way, `{"kind":"bearer"|"session","client":"cli"}` →
+`{"ok":true,"token":"…","csrfToken":"…","expiresAt":"…"}` or `{"ok":false,"error":{"code":"forbidden","message":"…"}}`.
+Its DACL lets SYSTEM, Administrators and interactive users (IU) connect; the service then reads the caller's token
+(the pipe client is asked for identification-level impersonation only) and hands out a credential to:
+
+- SYSTEM, or an administrator whose token is elevated (an elevated prompt, the installer, SSH), in any session that
+  is not a desk session;
+- an administrator with a UAC-filtered token in the active console session (the owner's tray and CLI).
+
+Everybody else is refused with the reason: a standard user at the console, any RDP session, and always a process in a
+desk session, even a desk user who is an administrator. They can still log in with the admin password (except from a
+desk session, see below). Clients only talk to a pipe owned by SYSTEM, Administrators or themselves (squatting while
+the service is stopped). The first admin password can only be set by the administrator (tray, CLI) in Settings, so a
+desk user cannot set it and take the host over.
+
+Defence in depth: the service maps each loopback connection to the process that opened it (`GetExtendedTcpTable`)
+and its session. A request from a desk session gets 403 `forbidden` on every route but `/health`, token or not
+(this also stops password guessing from a desk).
+
 - Sessions use the HttpOnly, `SameSite=Strict` cookie `splitplay_session`. A request that carries the cookie and
-  changes state (POST, PUT, DELETE) must send `X-CSRF-Token`, otherwise it gets 403 `csrf_failed`.
-- Stage 2 skeleton: the admin token pipe is not implemented yet, so loopback requests are served without a session.
-  The service listens on loopback only until LAN access (HTTPS) is implemented.
+  changes state (POST, PUT, DELETE) must send `X-CSRF-Token` (returned by login, by `GET /auth/session` and by the
+  admin pipe), otherwise it gets 403 `csrf_failed`.
+- The service listens on loopback only until LAN access (HTTPS) is implemented.
 - Browser checks in front of every `/api` route (403 `forbidden`):
   - a POST, PUT or DELETE with `Sec-Fetch-Site: cross-site`, or with an `Origin` that is not the request's own
     scheme://host:port (`Origin: null` included), is refused: another site's page could otherwise post a form here,
@@ -23,10 +49,10 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 
 | Request | Body | Answer |
 |---|---|---|
-| `GET /auth/session` | | `{"setupRequired":false,"authenticated":true,"csrfToken":"…"}` (`csrfToken` only when authenticated) |
-| `POST /auth/login` | `{"password":"…"}` | `{"csrfToken":"…"}`; wrong password → 401 `invalid_password` |
+| `GET /auth/session` | | `{"setupRequired":false,"authenticated":true,"csrfToken":"…"}`: `setupRequired` no admin password is set; `authenticated` the request carries admin proof; `csrfToken` only with a session cookie |
+| `POST /auth/login` | `{"password":"…"}` | `{"csrfToken":"…"}`; wrong password → 401 `invalid_password`; no password set → 409 `invalid_state` |
 | `POST /auth/logout` | | 204 |
-| `POST /auth/password` | `{"newPassword":"…","currentPassword":"…"}` (`currentPassword` omitted for the first password; at least 8 characters) | `{"csrfToken":"…"}`, and the browser is logged in |
+| `POST /auth/password` | `{"newPassword":"…","currentPassword":"…"}` (`currentPassword` omitted for the first password; at least 8 characters) | `{"csrfToken":"…"}`, and the browser is logged in. The first password needs admin proof (401 `unauthorized` otherwise); a change needs the right `currentPassword` |
 
 ## Endpoints
 
@@ -166,9 +192,9 @@ The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}`
 |---|---|---|
 | `bad_request` | 400 | malformed JSON or parameters |
 | `validation_failed` | 400 | the body breaks a rule of config.md |
-| `unauthorized` | 401 | no valid session |
+| `unauthorized` | 401 | no admin proof (session or bearer token) |
 | `invalid_password` | 401 | wrong admin password |
-| `csrf_failed`, `forbidden` | 403 | missing or wrong `X-CSRF-Token`; not allowed (non-loopback caller, cross-origin state change, unexpected `Host`) |
+| `csrf_failed`, `forbidden` | 403 | missing or wrong `X-CSRF-Token`; not allowed (non-loopback caller, cross-origin state change, unexpected `Host`, a desk session) |
 | `not_found` | 404 | unknown desk or client |
 | `already_exists` | 409 | desk id, user or base port taken |
 | `console_user` | 409 | the desk's user is the one signed in at the console |

@@ -280,6 +280,57 @@ public sealed class HostTuningTests : IDisposable
     }
 
     [Fact]
+    public void Preparing_again_keeps_a_plan_the_owner_picked_after_the_first_prepare()
+    {
+        PowerTuner().Prepare(PowerOptions());
+        _power.Active = Balanced; // the owner switched back; then an upgrade runs prepare again
+
+        var again = PowerTuner().Prepare(PowerOptions());
+        Assert.Equal(Balanced, _power.Active);
+        Assert.Contains(again.Notes, n => n.Contains("left as the owner set it", StringComparison.Ordinal));
+        Assert.DoesNotContain(again.Changes, c => c.StartsWith("power plan", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_revert_that_failed_for_power_is_retried_by_the_next_revert()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(WorkerExe)!);
+        File.WriteAllText(WorkerExe, "fake");
+        PowerTuner().Prepare(PowerOptions());
+
+        _power.FailSet = true;
+        _power.FailThrottling = true;
+        var first = PowerTuner().Revert();
+        Assert.Equal(HostTuner.HighPerformanceScheme, _power.Active);
+        Assert.Contains(first.Notes, n => n.Contains("could not restore the power plan", StringComparison.Ordinal));
+        Assert.Contains(first.Notes, n => n.Contains("could not reset power throttling", StringComparison.Ordinal));
+        Assert.False(PowerTuner().Status(PowerOptions()).Prepared);
+
+        _power.FailSet = false;
+        _power.FailThrottling = false;
+        var second = PowerTuner().Revert();
+        Assert.Equal(Balanced, _power.Active);
+        Assert.Equal((WorkerExe, false), _power.Throttling[^1]);
+        Assert.Equal(2, second.Changes.Count);
+        Assert.Contains("nothing to revert", Assert.Single(PowerTuner().Revert().Notes), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_exemption_the_owner_set_before_prepare_is_left_on_revert()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(WorkerExe)!);
+        File.WriteAllText(WorkerExe, "fake");
+        _power.OwnerExempt.Add(WorkerExe);
+
+        var result = PowerTuner().Prepare(PowerOptions());
+        Assert.Contains(result.Notes, n => n.Contains("already off", StringComparison.Ordinal));
+        Assert.Contains(PowerTuner().Status(PowerOptions()).Items, i => i is { Id: "PowerThrottling", State: HostItemStatus.Ok });
+
+        PowerTuner().Revert();
+        Assert.Empty(_power.Throttling); // never disabled, never reset
+    }
+
+    [Fact]
     public void Tuners_without_power_access_leave_power_alone()
     {
         Tuner().Prepare(PowerOptions());
@@ -317,7 +368,22 @@ public sealed class HostTuningTests : IDisposable
 
         public string? SchemeName(Guid scheme) => Names.TryGetValue(scheme, out var name) ? name : null;
 
-        public void SetPowerThrottling(string executable, bool exempt) => Throttling.Add((executable, exempt));
+        public HashSet<string> OwnerExempt { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public bool FailThrottling { get; set; }
+
+        public void SetPowerThrottling(string executable, bool exempt)
+        {
+            if (FailThrottling)
+            {
+                throw new InvalidOperationException("powercfg /powerthrottling exited with 1");
+            }
+
+            Throttling.Add((executable, exempt));
+        }
+
+        public bool? IsPowerThrottlingDisabled(string executable) =>
+            OwnerExempt.Contains(executable) || Throttling.LastOrDefault(t => t.Path == executable) is { Exempt: true };
     }
 
     private sealed class FakeRegistry : IHostRegistry

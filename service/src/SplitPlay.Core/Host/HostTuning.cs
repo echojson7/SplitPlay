@@ -296,6 +296,14 @@ public sealed class HostTuner
         var state = LoadState();
         if (state is not { State: HostTuningState.PreparedState })
         {
+            if (state is not null && _power is not null && (state.PowerPlan is not null || state.PowerThrottlingExempt.Count > 0))
+            {
+                // A previous revert could not undo these; try again.
+                (state.PowerPlan, state.PowerThrottlingExempt) = RevertPower(state, changes, notes);
+                SaveState(state);
+                return new HostTuningResult(changes, IsRebootRequired(state), notes);
+            }
+
             notes.Add("the host was not prepared by SplitPlay; nothing to revert");
             return new HostTuningResult(changes, state is not null && IsRebootRequired(state), notes);
         }
@@ -465,6 +473,11 @@ public sealed class HostTuner
             {
                 notes.Add("the active power plan cannot be read; it is left as it is");
             }
+            else if (state.PowerPlan is { } recorded && active != recorded.Desired)
+            {
+                // Prepare runs again on every install, upgrade and repair: a plan picked after the first one is the owner's.
+                notes.Add($"the power plan was changed since the first prepare ({Describe(active.Value)}); it is left as the owner set it");
+            }
             else
             {
                 state.PowerPlan ??= new PowerPlanRecord { Previous = active.Value };
@@ -495,6 +508,13 @@ public sealed class HostTuner
         {
             try
             {
+                if (_power.IsPowerThrottlingDisabled(worker) == true)
+                {
+                    // The owner's own setting: not recorded, so revert leaves it.
+                    notes.Add($"power throttling is already off for {worker}; it is left as the owner set it");
+                    return;
+                }
+
                 _power.SetPowerThrottling(worker, exempt: true);
                 state.PowerThrottlingExempt.Add(worker);
                 changes.Add($"power throttling: off for {worker}");
@@ -598,7 +618,7 @@ public sealed class HostTuner
         var worker = options.WorkerExecutable is { Length: > 0 } w ? Path.GetFullPath(w) : null;
         foreach (var path in recorded.Union(worker is null || !File.Exists(worker) ? [] : [worker], StringComparer.OrdinalIgnoreCase))
         {
-            var exempt = recorded.Contains(path, StringComparer.OrdinalIgnoreCase);
+            var exempt = recorded.Contains(path, StringComparer.OrdinalIgnoreCase) || _power.IsPowerThrottlingDisabled(path) == true;
             items.Add(new HostItemStatus("PowerThrottling", "powercfg /powerthrottling", path,
                 new RegValue(RegKind.String, exempt ? "disabled" : "Windows decides"), new RegValue(RegKind.String, "disabled"),
                 exempt ? HostItemStatus.Ok : HostItemStatus.Differs, Optional: true));

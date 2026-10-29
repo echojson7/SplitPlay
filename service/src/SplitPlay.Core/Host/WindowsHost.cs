@@ -177,6 +177,30 @@ public sealed class WindowsHostPower : IHostPower
 
     public void SetPowerThrottling(string executable, bool exempt)
     {
+        var verb = exempt ? "disable" : "reset";
+        var (exitCode, text) = Powercfg("/powerthrottling", verb, "/path", executable);
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException($"powercfg /powerthrottling {verb} exited with {exitCode}: {text}");
+        }
+    }
+
+    public bool? IsPowerThrottlingDisabled(string executable)
+    {
+        try
+        {
+            // The listed paths are not localised; the words around them are.
+            var (exitCode, text) = Powercfg("/powerthrottling", "list");
+            return exitCode == 0 ? text.Contains(executable, StringComparison.OrdinalIgnoreCase) : null;
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or TimeoutException)
+        {
+            return null;
+        }
+    }
+
+    private static (int ExitCode, string Output) Powercfg(params string[] args)
+    {
         var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "powercfg.exe"))
         {
             UseShellExecute = false,
@@ -184,7 +208,7 @@ public sealed class WindowsHostPower : IHostPower
             RedirectStandardOutput = true,
             RedirectStandardError = true,
         };
-        foreach (var arg in new[] { "/powerthrottling", exempt ? "disable" : "reset", "/path", executable })
+        foreach (var arg in args)
         {
             start.ArgumentList.Add(arg);
         }
@@ -195,14 +219,10 @@ public sealed class WindowsHostPower : IHostPower
         if (!process.WaitForExit(15_000))
         {
             process.Kill();
-            throw new TimeoutException("powercfg /powerthrottling did not finish within 15 s");
+            throw new TimeoutException($"powercfg {string.Join(' ', args)} did not finish within 15 s");
         }
 
-        if (process.ExitCode != 0)
-        {
-            var text = (errors.Result + " " + output.Result).Trim();
-            throw new InvalidOperationException($"powercfg /powerthrottling {(exempt ? "disable" : "reset")} exited with {process.ExitCode}: {text}");
-        }
+        return (process.ExitCode, (output.Result + " " + errors.Result).Trim());
     }
 
     [DllImport("powrprof.dll")]

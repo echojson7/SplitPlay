@@ -78,6 +78,11 @@ public interface IHostPower
     /// executable is never power throttled, or Windows decides again. Failures are reported as exceptions.
     /// </summary>
     void SetPowerThrottling(string executable, bool exempt);
+
+    /// <summary>
+    /// Whether <c>powercfg /powerthrottling list</c> lists the executable (as exempt); null when that cannot be told.
+    /// </summary>
+    bool? IsPowerThrottlingDisabled(string executable);
 }
 
 /// <summary>A preparation step could not be done (missing TermWrap files, access denied, …).</summary>

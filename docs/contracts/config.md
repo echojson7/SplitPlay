@@ -77,8 +77,10 @@ Rules:
 - Stream settings the worker applies (ipc.md, *Profile object*); a running desk takes a change at once except
   `dpbFrames` (next stream). Left out, the service sends its defaults: `fecPercent` 0–100, default 20;
   `minFps` 1–`fps`, default 20 (capped at `fps`: an unchanged desktop is encoded 20 times a second instead of at half
-  the stream rate); `dpbFrames` 1–16, default 16 (a loss of up to 15 frames is repaired with reference frame
-  invalidation instead of an IDR frame); `pacingMbps` 1–100000, default 800 (Sunshine's fixed value; lower it when a
+  the stream rate); `dpbFrames` 1–16, not set by default (the service sends 0, the codec default of 5 or 8 for AV1;
+  a larger DPB repairs longer losses with reference frame invalidation instead of an IDR frame, but more references
+  than the codec level allows make NVENC signal a higher level that a client decoder may refuse, and each costs VRAM,
+  about 200 MB per desk at 4K with 16, so it is opt-in and not in the web UI); `pacingMbps` 1–100000, default 800 (Sunshine's fixed value; lower it when a
   Wi-Fi client loses frames on large frames, raise it on 2.5 GbE and faster). In the web UI: Дополнительно → FEC,
   Минимальный FPS, Скорость отправки.
 - `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz).

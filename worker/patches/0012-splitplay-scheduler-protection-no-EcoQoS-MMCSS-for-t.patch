@@ -30,20 +30,25 @@ New module src/splitplay/scheduling.{h,cpp}:
   start-up must not queue behind other desks' games. REALTIME is never
   used.
 - mmcss_t: AvSetMmThreadCharacteristicsW("Games") +
-  AvSetMmThreadPriority(AVRT_PRIORITY_HIGH) for the lifetime of the
-  object. "Games" rather than "Pro Audio": its default scheduling
-  category Medium (16-22) is above every normal-class game thread, but
-  below the High category (23-26) of "Audio"/"Pro Audio", which the
-  session's audio engine and Sunshine's own audio capture (audio.cpp) use,
-  so video never takes the CPU from audio. MMCSS keeps its reserve for
-  other threads (SystemResponsiveness, 20 % by default), so a busy worker
-  cannot starve the PC.
+  AvSetMmThreadPriority(AVRT_PRIORITY_NORMAL) for the lifetime of the
+  object. The default task definitions put "Games" (task priority 2) and
+  "Audio" (task priority 6) in scheduling category Medium, which runs in
+  the real-time range 16-22, above every normal-class game thread (at most
+  15), and "Pro Audio" (Sunshine's audio capture) in High. "Games" at its
+  normal priority is the most modest registration that lifts the threads
+  above the games; it asks for nothing above the audio engine's "Audio".
+  MMCSS keeps its reserve for other threads (SystemResponsiveness, 20 % by
+  default): a thread that overruns its share drops to the Exhausted
+  category (1-7) until the next period, so a busy worker cannot starve the
+  PC (whether a worker thread is ever demoted with several desks streaming
+  is a lab item).
   Registered: video::capture, the encode thread (capture_async),
   video::capture_sync (encoders without parallel encoding),
-  stream::videoBroadcast, stream::controlBroadcast (receives and decrypts
-  input) and, on its first input message, the task-pool thread that
-  injects input (join_mmcss_for_this_thread, reverted when the thread
-  ends).
+  stream::videoBroadcast and stream::controlBroadcast (receives and
+  decrypts input). The task-pool thread that injects input also runs every
+  other pool task, so it is not registered: it runs at the process class
+  (HIGH while streaming, base 13, above normal-class game threads except
+  TIME_CRITICAL ones). A dedicated input thread under MMCSS is a follow-up.
 
 High-resolution timers: the two pacing sleeps (capture slots in
 display_base.cpp, send pacing in stream.cpp) already use upstream's
@@ -73,28 +78,6 @@ index 771944411160eb00c2120d40165239aab7259e1b..e6769d7700503bc43ef227f54fce2fa2
          "${CMAKE_SOURCE_DIR}/src/splitplay/self_test.cpp"
          "${CMAKE_SOURCE_DIR}/src/splitplay/self_test.h"
          ${PLATFORM_TARGET_FILES})
-diff --git a/src/input.cpp b/src/input.cpp
-index 270409a3be2ef476e3b3192eb87e0c1eed3bfe0f..5f34db4edb04e04a1062402815dfeb2d6340cd93 100644
---- a/src/input.cpp
-+++ b/src/input.cpp
-@@ -25,6 +25,7 @@ extern "C" {
- #include "input.h"
- #include "logging.h"
- #include "platform/common.h"
-+#include "splitplay/scheduling.h"
- #include "thread_pool.h"
- #include "utility.h"
- 
-@@ -1716,6 +1717,9 @@ namespace input {
-    * @param input The input context pointer.
-    */
-   void passthrough_next_message(std::shared_ptr<input_t> input) {
-+    // SplitPlay: the pool thread that injects input runs under MMCSS from its first message on
-+    splitplay::scheduling::join_mmcss_for_this_thread("input injection (TaskPool::worker)");
-+
-     // 'entry' backs the 'payload' pointer, so they must remain in scope together
-     std::vector<uint8_t> entry;
-     PNV_INPUT_HEADER payload;
 diff --git a/src/main.cpp b/src/main.cpp
 index 08a52f8f13062f62469f974c92d4441bc6f8f6a9..e1d1148b01c13a02b98628ec63dbcbab42cb6258 100644
 --- a/src/main.cpp
@@ -144,17 +127,16 @@ index aae501198ac6e997081e0d47413c2c7ad9deb84a..3dfe35123c9413cc74c6d1f14ddb044a
      if (used_nt_set_timer_resolution) {
 diff --git a/src/splitplay/scheduling.cpp b/src/splitplay/scheduling.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..b9ab70f33dc1bfec24654651bb81ce8d7a982b98
+index 0000000000000000000000000000000000000000..7d00d616d23d385d65977b64e1fb1707dbe597ce
 --- /dev/null
 +++ b/src/splitplay/scheduling.cpp
-@@ -0,0 +1,112 @@
+@@ -0,0 +1,103 @@
 +/**
 + * @file src/splitplay/scheduling.cpp
 + * @brief Scheduler protection for the SplitPlay worker (see scheduling.h).
 + */
 +// SPDX-License-Identifier: GPL-3.0-only
 +// standard includes
-+#include <memory>
 +#include <string>
 +
 +// local includes
@@ -177,7 +159,7 @@ index 0000000000000000000000000000000000000000..b9ab70f33dc1bfec24654651bb81ce8d
 +namespace splitplay::scheduling {
 +#ifdef _WIN32
 +  namespace {
-+    /// MMCSS task of the capture, encode, video send and input threads (see scheduling.h for the choice).
++    /// MMCSS task of the capture, encode, video send and control threads (see scheduling.h for the choice).
 +    constexpr const wchar_t *mmcss_task = L"Games";
 +
 +    /**
@@ -212,7 +194,7 @@ index 0000000000000000000000000000000000000000..b9ab70f33dc1bfec24654651bb81ce8d
 +    }
 +
 +    BOOST_LOG(info) << "SplitPlay: scheduling: power throttling "sv << throttling << ", priority class "sv << priority
-+                    << ", MMCSS \"Games\" for the capture, encode, video send and input threads"sv;
++                    << ", MMCSS \"Games\" for the capture, encode, video send and control threads"sv;
 +  }
 +
 +  unsigned long idle_priority_class() {
@@ -226,10 +208,10 @@ index 0000000000000000000000000000000000000000..b9ab70f33dc1bfec24654651bb81ce8d
 +      BOOST_LOG(warning) << "SplitPlay: MMCSS refused "sv << what << " [error "sv << GetLastError() << "], it keeps its normal priority"sv;
 +      return;
 +    }
-+    if (!AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH)) {
++    if (!AvSetMmThreadPriority(handle, AVRT_PRIORITY_NORMAL)) {
 +      BOOST_LOG(warning) << "SplitPlay: MMCSS priority for "sv << what << " not set [error "sv << GetLastError() << ']';
 +    }
-+    BOOST_LOG(info) << "SplitPlay: "sv << what << " runs under MMCSS \"Games\", priority high"sv;
++    BOOST_LOG(info) << "SplitPlay: "sv << what << " runs under MMCSS \"Games\", priority normal"sv;
 +  }
 +
 +  mmcss_t::~mmcss_t() {
@@ -251,21 +233,13 @@ index 0000000000000000000000000000000000000000..b9ab70f33dc1bfec24654651bb81ce8d
 +  mmcss_t::~mmcss_t() {
 +  }
 +#endif
-+
-+  void join_mmcss_for_this_thread(const char *what) {
-+    // Destroyed (and the registration reverted) when the thread ends.
-+    thread_local std::unique_ptr<mmcss_t> registration;
-+    if (!registration) {
-+      registration = std::make_unique<mmcss_t>(what);
-+    }
-+  }
 +}  // namespace splitplay::scheduling
 diff --git a/src/splitplay/scheduling.h b/src/splitplay/scheduling.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..acbba8a2e33bc24c1236ea38946f3a39fbbfe667
+index 0000000000000000000000000000000000000000..c9352e4305b0572a4eded31a3c56b494c0127d28
 --- /dev/null
 +++ b/src/splitplay/scheduling.h
-@@ -0,0 +1,55 @@
+@@ -0,0 +1,53 @@
 +/**
 + * @file src/splitplay/scheduling.h
 + * @brief Scheduler protection for the SplitPlay worker: no EcoQoS, raised priority class, MMCSS for the hot threads.
@@ -291,12 +265,18 @@ index 0000000000000000000000000000000000000000..acbba8a2e33bc24c1236ea38946f3a39
 +  unsigned long idle_priority_class();
 +
 +  /**
-+   * @brief Registers the calling thread with the MMCSS task "Games" at AVRT_PRIORITY_HIGH while the object lives.
++   * @brief Registers the calling thread with the MMCSS task "Games" at AVRT_PRIORITY_NORMAL while the object lives.
 +   *
-+   * "Games" (scheduling category Medium by default, priorities 16-22) runs above every thread of a game in the normal
-+   * priority class (at most 15) and below the High category of "Audio"/"Pro Audio" that the session's audio engine
-+   * and Sunshine's own audio capture use, so a stream never takes the CPU from audio. MMCSS keeps its reserve for
-+   * other threads (SystemResponsiveness, 20 % by default), so a busy worker cannot starve the PC.
++   * The default task definitions (HKLM\...\Multimedia\SystemProfile\Tasks) put "Games" (task priority 2) and
++   * "Audio" (task priority 6) in scheduling category Medium and "Pro Audio" in High. Category Medium runs in the
++   * real-time priority range 16-22, above every thread of a game in the normal priority class (at most 15).
++   * "Games" at its normal priority is the most modest registration that achieves this: it does not compete with
++   * "Pro Audio" (Sunshine's audio capture) and asks for nothing above the audio engine's own "Audio" task.
++   *
++   * MMCSS keeps a share of every scheduling period for other threads (SystemResponsiveness, 20 % by default): a
++   * registered thread that overruns its share is moved to the Exhausted category (priorities 1-7), i.e. below normal
++   * threads, until the next period, so a busy worker cannot starve the PC. The registered threads mostly wait for
++   * frames, the GPU or the network; whether one of them is ever demoted with several desks streaming is a lab item.
 +   */
 +  class mmcss_t {
 +  public:
@@ -312,14 +292,6 @@ index 0000000000000000000000000000000000000000..acbba8a2e33bc24c1236ea38946f3a39
 +  private:
 +    void *handle = nullptr;
 +  };
-+
-+  /**
-+   * @brief Register the calling thread with MMCSS (as mmcss_t) once, until the thread ends.
-+   * For pool threads that run the input path: the registration is made on their first input message.
-+   *
-+   * @param what Thread name for the log.
-+   */
-+  void join_mmcss_for_this_thread(const char *what);
 +}  // namespace splitplay::scheduling
 diff --git a/src/stream.cpp b/src/stream.cpp
 index faa5ae413ef8b87abfb37e506482300e9778ce06..41c80d355754b82d8f4904d15809d0f2f5660b42 100644

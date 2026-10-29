@@ -19,7 +19,7 @@ public sealed class StreamProfileTests
         var p = DeskRuntime.ToIpcProfile(new ProfileConfig { Fps = 120 });
         Assert.Equal(ProfileConfig.DefaultFecPercent, p.FecPercent);
         Assert.Equal(20, p.MinFps);
-        Assert.Equal(16, p.DpbFrames);
+        Assert.Equal(0, p.DpbFrames); // the codec default; a larger DPB is opt-in
         Assert.Equal(800, p.PacingMbps);
 
         // The idle rate never exceeds the desk's frame rate; set values pass through.
@@ -37,7 +37,7 @@ public sealed class StreamProfileTests
         await svc.WaitForStateAsync("desk-1", DeskState.Ready);
 
         var welcome = svc.Launcher.Received.Select(m => m.Message).OfType<WelcomeMessage>().First(w => w.Rdp is null);
-        Assert.Equal((20, 20, 16, 800), (welcome.Profile!.FecPercent, welcome.Profile.MinFps, welcome.Profile.DpbFrames, welcome.Profile.PacingMbps));
+        Assert.Equal((20, 20, 0, 800), (welcome.Profile!.FecPercent, welcome.Profile.MinFps, welcome.Profile.DpbFrames, welcome.Profile.PacingMbps));
 
         var put = await svc.Client.PutAsync("/api/v1/desks/desk-1", JsonBody("""{"profile":{"fps":120,"pacingMbps":400,"minFps":10}}"""));
         Assert.Equal(HttpStatusCode.OK, put.StatusCode);

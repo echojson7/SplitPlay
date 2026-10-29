@@ -78,6 +78,8 @@ internal sealed class TestService : IAsyncDisposable
         var service = new TestService(app, dataRoot, ownsDataRoot);
         setup?.Invoke(service.Launcher);
         await app.StartAsync();
+        // The start-up check of TermService/UmRdpService runs in the background; let it finish before tests change the fake.
+        await app.Services.GetRequiredService<RequiredServicesStarter>().Completion;
         service.Client = app.GetTestClient();
         return service;
     }

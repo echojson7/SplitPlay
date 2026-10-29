@@ -94,15 +94,12 @@ public sealed class RelatedServices(IServiceControl control, ILogger<RelatedServ
 
         var self = string.Equals(entry.Name, BuildInfo.ServiceName, StringComparison.OrdinalIgnoreCase);
         logger.LogWarning("Stopping service {Service} from the web UI", entry.Name);
+        var delay = self ? Task.Delay(SelfStopDelay, time) : Task.CompletedTask;
         _ = Task.Run(async () =>
         {
             try
             {
-                if (self)
-                {
-                    await Task.Delay(SelfStopDelay, time).ConfigureAwait(false);
-                }
-
+                await delay.ConfigureAwait(false);
                 control.Stop(entry.Name);
             }
             catch (ServiceControlException ex)

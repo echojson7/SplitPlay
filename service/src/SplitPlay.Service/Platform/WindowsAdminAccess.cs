@@ -30,14 +30,26 @@ public sealed class WindowsAdminCallerCheck(DeskSupervisor desks, IDeskPlatform 
     {
         ArgumentNullException.ThrowIfNull(pipe);
         var handle = pipe.SafePipeHandle;
-        GetNamedPipeClientProcessId(handle, out var pid);
-        if (!GetNamedPipeClientSessionId(handle, out var session))
+        if (!GetNamedPipeClientProcessId(handle, out var pid))
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "GetNamedPipeClientSessionId");
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, $"GetNamedPipeClientProcessId failed ({error})");
         }
 
-        TokenFacts? facts = null;
-        pipe.RunAsClient(() => facts = TokenFacts.OfCurrentThread());
+        if (!GetNamedPipeClientSessionId(handle, out var session))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, $"GetNamedPipeClientSessionId failed ({error})");
+        }
+
+        // The client process's own token (it is connected, so the pid is still its own). The service runs as SYSTEM and
+        // can open every process that is not protected; impersonation is the fallback.
+        var facts = TokenFacts.OfProcess(pid);
+        if (facts is null)
+        {
+            pipe.RunAsClient(() => facts = TokenFacts.OfCurrentThread());
+        }
+
         var caller = $"{facts!.Name} (pid {pid}, session {session})";
 
         if (desks.IsDeskSession((int)session))
@@ -76,44 +88,79 @@ internal sealed record TokenFacts(string Name, bool IsSystem, bool AdminEnabled,
     private const uint SE_GROUP_ENABLED = 0x4;
     private const uint SE_GROUP_USE_FOR_DENY_ONLY = 0x10;
 
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    /// <summary>The primary token of process <paramref name="pid"/>, or null when it cannot be opened.</summary>
+    public static TokenFacts? OfProcess(uint pid)
+    {
+        var process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (process == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!OpenProcessToken(process, TOKEN_QUERY, out var token))
+            {
+                return null;
+            }
+
+            using (token)
+            {
+                return Read(token);
+            }
+        }
+        finally
+        {
+            CloseHandle(process);
+        }
+    }
+
     /// <summary>The impersonation token of the calling thread (inside <c>RunAsClient</c>).</summary>
     public static TokenFacts OfCurrentThread()
     {
         // openAsSelf: the service opens the token; an identification-level token cannot open itself.
         if (!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, true, out var token))
         {
-            throw new Win32Exception(Marshal.GetLastWin32Error(), "OpenThreadToken");
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, $"OpenThreadToken failed ({error})");
         }
 
         using (token)
         {
-            var user = User(token);
-            var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-            var enabled = false;
-            var filtered = false;
-            foreach (var (sid, attributes) in Groups(token))
-            {
-                if (!sid.Equals(admins))
-                {
-                    continue;
-                }
-
-                enabled |= (attributes & SE_GROUP_ENABLED) != 0 && (attributes & SE_GROUP_USE_FOR_DENY_ONLY) == 0;
-                filtered |= (attributes & SE_GROUP_USE_FOR_DENY_ONLY) != 0;
-            }
-
-            string name;
-            try
-            {
-                name = ((NTAccount)user.Translate(typeof(NTAccount))).Value;
-            }
-            catch (IdentityNotMappedException)
-            {
-                name = user.Value;
-            }
-
-            return new TokenFacts(name, user.IsWellKnown(WellKnownSidType.LocalSystemSid), enabled, filtered);
+            return Read(token);
         }
+    }
+
+    private static TokenFacts Read(SafeAccessTokenHandle token)
+    {
+        var user = User(token);
+        var admins = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
+        var enabled = false;
+        var filtered = false;
+        foreach (var (sid, attributes) in Groups(token))
+        {
+            if (!sid.Equals(admins))
+            {
+                continue;
+            }
+
+            enabled |= (attributes & SE_GROUP_ENABLED) != 0 && (attributes & SE_GROUP_USE_FOR_DENY_ONLY) == 0;
+            filtered |= (attributes & SE_GROUP_USE_FOR_DENY_ONLY) != 0;
+        }
+
+        string name;
+        try
+        {
+            name = ((NTAccount)user.Translate(typeof(NTAccount))).Value;
+        }
+        catch (IdentityNotMappedException)
+        {
+            name = user.Value;
+        }
+
+        return new TokenFacts(name, user.IsWellKnown(WellKnownSidType.LocalSystemSid), enabled, filtered);
     }
 
     private static SecurityIdentifier User(SafeAccessTokenHandle token)
@@ -160,7 +207,7 @@ internal sealed record TokenFacts(string Name, bool IsSystem, bool AdminEnabled,
         {
             var error = Marshal.GetLastWin32Error();
             Marshal.FreeHGlobal(buffer);
-            throw new Win32Exception(error, "GetTokenInformation");
+            throw new Win32Exception(error, $"GetTokenInformation failed ({error})");
         }
 
         return buffer;
@@ -175,6 +222,15 @@ internal sealed record TokenFacts(string Name, bool IsSystem, bool AdminEnabled,
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr GetCurrentThread();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out SafeAccessTokenHandle token);
 
     [DllImport("advapi32.dll", SetLastError = true)]
     private static extern bool OpenThreadToken(IntPtr thread, uint access, bool openAsSelf, out SafeAccessTokenHandle token);

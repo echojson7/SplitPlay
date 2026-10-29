@@ -16,7 +16,7 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { throw "csc.exe not found at $csc" }
 
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
-foreach ($d in 'service\wwwroot', 'tray', 'native', 'worker', 'drivers', 'termwrap') {
+foreach ($d in 'service\wwwroot', 'tray', 'native', 'worker', 'drivers', 'termwrap', 'vigembus') {
     New-Item -ItemType Directory -Force -Path (Join-Path $Stage $d) | Out-Null
 }
 $Stage = (Resolve-Path $Stage).Path
@@ -34,6 +34,9 @@ $exes = @(
     'worker\splitplay-worker.exe'
 )
 foreach ($e in $exes) { Copy-Item $stub (Join-Path $Stage $e) }
+# Stands in for the ViGEmBus setup: setup runs it when no ViGEmBus driver is present, the stub records the call and
+# installs nothing (so setup must not record that it installed ViGEmBus).
+Copy-Item $stub (Join-Path $Stage 'vigembus\ViGEmBus_1.22.0_x64_x86_arm64.exe')
 # Not real DLLs: the installer only copies them. The smoke test installs with /SkipTermWrap=1, so TermService never
 # points at the fake TermWrap.dll.
 Copy-Item $stub (Join-Path $Stage 'native\splitplay-rdsprov.dll')

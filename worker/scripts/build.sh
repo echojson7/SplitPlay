@@ -67,6 +67,12 @@ fi
 # shellcheck disable=SC2206 # CMAKE_EXTRA_ARGS is intentionally word-split
 extra_args=(${CMAKE_EXTRA_ARGS:-})
 
+# ViGEm (patch 0004 keeps the option, default OFF) is on: Moonlight gamepads become ViGEm X360/DS4 pads, the
+# interim path until SplitPlay's per-session pad driver (Stage 4). ViGEm pads are global, every session sees them.
+# Without ViGEmBus the worker logs that it is missing and reports no gamepads; everything else is unchanged.
+# Upstream's packaging step still downloads its own ViGEmBus setup into the CMake tree at configure time; it is not
+# copied to <out> (SplitPlay's installer bundles and installs ViGEmBus itself).
+
 echo "==> configure"
 cmake -S "${SRC_DIR}" -B "${CMAKE_DIR}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
@@ -74,7 +80,7 @@ cmake -S "${SRC_DIR}" -B "${CMAKE_DIR}" -G Ninja \
   -DBUILD_TESTS=OFF \
   -DBUILD_WERROR=OFF \
   -DSUNSHINE_ENABLE_TRAY=OFF \
-  -DSUNSHINE_ENABLE_VIGEM=OFF \
+  -DSUNSHINE_ENABLE_VIGEM=ON \
   -DSUNSHINE_ASSETS_DIR=assets \
   -DSUNSHINE_PUBLISHER_NAME="SplitPlay" \
   -DSUNSHINE_PUBLISHER_WEBSITE="https://github.com/echojson7/SplitPlay" \

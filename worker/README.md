@@ -99,7 +99,7 @@ SplitPlay.Service starts one worker per desk, inside the desk's RDP loopback ses
 splitplay-worker.exe --desk-dir C:\ProgramData\SplitPlay\desks\desk-1 ^
                      --pipe \\.\pipe\splitplay\worker-desk-1 --desk desk-1 port=48089 ^
                      sunshine_name=HOST-desk-1 min_log_level=info ^
-                     nvenc_preset=1 nvenc_twopass=disabled hevc_mode=0 av1_mode=0
+                     nvenc_preset=1 nvenc_twopass=disabled hevc_mode=0 av1_mode=0 gamepad=ds4
 ```
 
 | Option | Meaning |
@@ -134,6 +134,7 @@ upstream options keep working.
 | `nvenc_preset` | `1` | P1, the fastest NVENC preset (also the built-in default) |
 | `nvenc_twopass` | `disabled` | single pass: lowest encode latency (upstream default is `quarter_res`) |
 | `hevc_mode`, `av1_mode` | `0` | advertise HEVC and AV1 when the encoder supports them (RTX 5070: both); Moonlight picks |
+| `gamepad` | `ds4` | XInput gives an emulated Xbox 360 pad's buttons only to the console's foreground window (see *Gamepads*) |
 
 Built in since patch 0009/0008 (passing them again is harmless): `capture=ddx`, `install_steam_audio_drivers=disabled`,
 `origin_web_ui_allowed=pc`, `system_tray=disabled`; `dd_configuration_option` is ignored (patch 0006).
@@ -162,8 +163,8 @@ the worker sees are the session's own.
 - **Gamepads.** Moonlight controllers become ViGEm virtual pads through ViGEmBus. The service sets `gamepad=ds4`:
   XInput hands an Xbox 360 pad's button state only to the console session's foreground window (rumble still arrives),
   so an emulated X360 pad does nothing inside a desk, while a DualShock 4 is a HID device that the desk's games read
-  directly or through Steam Input. A desk can switch back to Xbox 360 in its advanced settings. ViGEm comes, which the SplitPlay installer bundles and installs when it
-  is missing (client Windows only; ViGEmBus 1.22 refuses Windows Server). SplitPlay stays on ViGEm (no own pad driver:
+  directly or through Steam Input. A desk can switch back to Xbox 360 in its advanced settings. The SplitPlay installer bundles ViGEmBus and installs it
+  when it is missing (client Windows only; ViGEmBus 1.22 refuses Windows Server). SplitPlay stays on ViGEm (no own pad driver:
   without an EV certificate it would need Windows test mode). ViGEm pads are global,
   so every session, the console included, sees every desk's pads. Without ViGEmBus the worker logs "ViGEmBus is not
   installed or running" at start-up and reports no gamepads; everything else, the self-test included, is unchanged.

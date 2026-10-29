@@ -93,6 +93,10 @@ repository's `LICENSE` and `NOTICE.md` are added by the script.
    without UI, no restart). If the driver is then present, setup records `ViGEmBusInstalledBySplitPlay=1` and the
    MSI product code (`ViGEmBusProductCode`) in `HKLM\Software\SplitPlay`. A failure is only logged; SplitPlay is
    installed anyway and desks have no gamepads. An existing ViGEmBus is left alone. Exit code 3010 asks for a restart.
+   The setup never blocks SplitPlay's: it runs through a PowerShell wrapper with a timeout (`/ViGEmBusTimeout`,
+   default 120 s); on timeout the wrapper kills the MSI's `nefconw.exe` helper, then the setup's process tree, and
+   nothing is recorded. On Windows Server the step is skipped: the ViGEmBus 1.22.0 MSI has a launch condition that
+   refuses 64-bit Windows Server, and on the windows-2022 runner its setup never returned.
 9. Runs `splitplay.exe service install` (only if the service is not registered yet) and starts the service.
    On upgrade the service is stopped before files are replaced and started again afterwards.
 10. Start menu: `SplitPlay` (tray) and `SplitPlay Web UI` (http://127.0.0.1:38299/). Optional task
@@ -107,7 +111,7 @@ Uninstall stops and removes the service (`splitplay.exe service uninstall`, fall
 `sc delete`; stopping the service stops every desk and logs its session off), runs `splitplay.exe host revert`
 (restores the exact values recorded in `host-tuning.json`, deleting the ones that did not exist before; when it
 reverted a loaded ServiceDll it exits with 3010 and the uninstaller asks for a restart, and `TermWrap.dll` is deleted
-at that restart), removes ViGEmBus with `msiexec /x <ViGEmBusProductCode> /qn /norestart` only if
+at that restart), removes ViGEmBus with `msiexec /x <ViGEmBusProductCode> /qn /norestart` (same timeout) only if
 `HKLM\Software\SplitPlay` records that SplitPlay installed it (a failed removal is logged and keeps the record),
 closes the tray, removes the `SplitPlay Web UI` rule and every per-desk `SplitPlay desk *` rule,
 the shortcuts and autostart entry, and asks whether to keep `%ProgramData%\SplitPlay` (silent uninstall keeps it).
@@ -123,6 +127,8 @@ Standard Inno Setup switches (`/SILENT`, `/VERYSILENT`, `/SUPPRESSMSGBOXES`, `/L
 | setup | `/AllowUnsupportedOS=1` | skip the Windows version and edition checks (CI, testing) |
 | setup | `/SkipWebView2=1` | never download WebView2 |
 | setup | `/SkipViGEmBus=1` | do not install ViGEmBus even if it is missing (desks then have no gamepads) |
+| setup | `/ViGEmBusOnServer=1` | run the ViGEmBus setup on Windows Server too (testing the timeout path; it refuses Server) |
+| setup, unins000.exe | `/ViGEmBusTimeout=<s>` | seconds to wait for the ViGEmBus setup or its removal before killing it (default 120, minimum 5) |
 | setup | `/SkipTermWrap=1` | install the TermWrap files but run `host prepare --skip-termwrap` (TermService untouched; CI) |
 | setup | `/COMPONENTS=core` | do not install TermWrap at all |
 | setup | `/TASKS="!trayautostart"` | do not start the tray at sign-in |
@@ -140,12 +146,15 @@ state, firewall rules (including removal of per-desk rules), ProgramData ACL, sh
 that setup ran `host prepare --skip-termwrap` before starting the service and the uninstaller ran `host revert` (the
 stub records its calls in `%ProgramData%\SplitPlay-ci-stub-calls.log`), that setup ran the (stub) ViGEmBus setup with
 the silent switches without recording it as installed, that the uninstaller removes a recorded ViGEmBus product and
-only then runs msiexec, and that the runner's TermService `ServiceDll` never changes. Every install there uses `/SkipTermWrap=1`. The `installer-preview` artifact is the
-resulting setup built from stub binaries, so it is only good for trying the wizard.
+only then runs msiexec, and that the runner's TermService `ServiceDll` never changes. Every install there uses
+`/SkipTermWrap=1`, and `/ViGEmBusOnServer=1` so that the stub runs on the Windows Server runner. The
+`installer-preview` artifact is the resulting setup built from stub binaries, so it is only good for trying the wizard.
 
-In the integration workflow `Test-Installer.ps1 -RealStage` runs the setup built from the real artifacts, so the real
-ViGEmBus setup runs on the runner: when it installs the driver, the record must match and every uninstall must remove
-it again; when Windows Server refuses the driver, the test only warns.
+In the integration workflow `Test-Installer.ps1 -RealStage` runs the setup built from the real artifacts. Its first
+install passes `/ViGEmBusOnServer=1 /ViGEmBusTimeout=30`, so the real ViGEmBus setup runs on the runner once: setup
+must still exit 0, leave no ViGEmBus setup or `nefconw.exe` process behind and log the outcome (on Windows Server that
+is the timeout); if the driver did install, the record must match and the uninstall must remove it. The later passes
+and `Test-EndToEnd.ps1` take the default Windows Server skip.
 
 [`ci/Test-EndToEnd.ps1`](ci/Test-EndToEnd.ps1) runs in the integration workflow on the setup built from the real
 artifacts (also with `/SkipTermWrap=1`): it checks the installer's host preparation, switches the service to the stub

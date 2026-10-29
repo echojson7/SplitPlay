@@ -160,7 +160,7 @@ the worker sees are the session's own.
   desk user's, e.g. Russian) maps them; text from Moonlight's keyboard uses `KEYEVENTF_UNICODE`.
 - **Gamepads (interim).** Moonlight controllers become ViGEm virtual pads (Xbox 360, or DualShock 4 when `auto`
   picks it for a PlayStation controller) through ViGEmBus, which the SplitPlay installer bundles and installs when it
-  is missing. This is the interim path until SplitPlay's per-session pad driver (Stage 4): ViGEm pads are global,
+  is missing (client Windows only; ViGEmBus 1.22 refuses Windows Server). This is the interim path until SplitPlay's per-session pad driver (Stage 4): ViGEm pads are global,
   so every session, the console included, sees every desk's pads. Without ViGEmBus the worker logs "ViGEmBus is not
   installed or running" at start-up and reports no gamepads; everything else, the self-test included, is unchanged.
 - **Audio.** The session's default render endpoint is "Remote Audio" (the seat announces rdpsnd); the worker captures

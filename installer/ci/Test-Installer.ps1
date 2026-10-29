@@ -189,18 +189,30 @@ function Test-Removed([string] $label, [bool] $dataKept, $vigemRecord = $null) {
 }
 
 $common = '/AllowUnsupportedOS=1 /SkipWebView2=1 /SkipTermWrap=1'
+# Setup skips ViGEmBus on Windows Server (the runners); /ViGEmBusOnServer=1 runs it anyway. With the fake stage that is
+# the stub on every install; with the real stage only the first install runs the real setup, which does not return on
+# Windows Server, so that pass checks the timeout path once (30 s here) and later passes take the default skip.
+$vigemTry = '/ViGEmBusOnServer=1 /ViGEmBusTimeout=30'
+$vigemLater = if ($RealStage) { '' } else { " $vigemTry" }
 $uninstaller = Join-Path $app 'unins000.exe'
 Remove-Item $stubCalls -ErrorAction SilentlyContinue
 $vigemPreinstalled = Test-ViGEmBus
 Write-Host "ViGEmBus present before: $vigemPreinstalled"
 
 # 1. Fresh install.
-Check 'install exit code 0' ((Invoke-Silent $Setup 'install.log' $common) -eq 0)
+$started = Get-Date
+Check 'install exit code 0' ((Invoke-Silent $Setup 'install.log' "$common $vigemTry") -eq 0)
+Write-Host ("  install took {0:N0} s" -f ((Get-Date) - $started).TotalSeconds)
+Check 'no ViGEmBus setup or nefconw process left running' (
+    $null -eq (Get-Process -Name 'ViGEmBus_*', 'nefconw' -ErrorAction SilentlyContinue))
+$outcome = Select-String -Path (Join-Path $LogDir 'install.log') -Pattern 'ViGEmBus (installed by SplitPlay|setup timed out|setup failed|setup reported success|is already present|is present)' |
+    Select-Object -First 1
+Check "setup log states the ViGEmBus outcome ($(if ($outcome) { $outcome.Matches[0].Value }))" ($null -ne $outcome)
 Test-Installed 'after install'
 
 # 2. Upgrade in place: the running service must be stopped, files replaced and the service started again.
 Set-Content -Path (Join-Path $data 'config.json') -Value '{"schemaVersion":1}'
-Check 'reinstall exit code 0' ((Invoke-Silent $Setup 'reinstall.log' $common) -eq 0)
+Check 'reinstall exit code 0' ((Invoke-Silent $Setup 'reinstall.log' "$common$vigemLater") -eq 0)
 Test-Installed 'after reinstall'
 
 # 3. Uninstall, keeping ProgramData (the silent default).
@@ -223,7 +235,7 @@ if (-not $RealStage) {
 Check 'config.json kept' (Test-Path (Join-Path $data 'config.json'))
 
 # 4. Install again over the kept data without the TermWrap component, then uninstall with /PurgeData=1.
-Check 'install over kept data exit code 0' ((Invoke-Silent $Setup 'install2.log' "$common /COMPONENTS=core") -eq 0)
+Check 'install over kept data exit code 0' ((Invoke-Silent $Setup 'install2.log' "$common /COMPONENTS=core$vigemLater") -eq 0)
 Test-Installed 'after install over kept data (core only)' $false
 New-DeskRule
 $vigemRecord = Get-ViGEmRecord

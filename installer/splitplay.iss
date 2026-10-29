@@ -10,10 +10,13 @@
 ;   /AllowUnsupportedOS=1  install on Windows older than 11 22H2 or on Windows Server (CI, testing)
 ;   /SkipWebView2=1        do not download the WebView2 runtime even if it is missing
 ;   /SkipViGEmBus=1        do not install the bundled ViGEmBus driver even if it is missing
+;   /ViGEmBusOnServer=1    run the ViGEmBus setup on Windows Server too (it refuses Server; CI tests the timeout path)
+;   /ViGEmBusTimeout=<s>   seconds to wait for the ViGEmBus setup or removal before killing it (default 120)
 ;   /SkipTermWrap=1        install the TermWrap files but leave TermService's ServiceDll alone
 ;                          ("splitplay host prepare --skip-termwrap"; CI runners must keep their RDP stack)
 ; Uninstaller parameters:
 ;   /PurgeData=1           also delete %ProgramData%\SplitPlay (default: keep it; interactive runs ask)
+;   /ViGEmBusTimeout=<s>   as for setup, for removing a ViGEmBus that SplitPlay installed
 
 #if VER < EncodeVer(6, 3, 0)
   #error Inno Setup 6.3 or newer is required
@@ -232,10 +235,14 @@ const
   ViGEmBusMarkerValue = 'ViGEmBusInstalledBySplitPlay';
   ViGEmBusProductValue = 'ViGEmBusProductCode';
   ViGEmBusServiceKey = 'SYSTEM\CurrentControlSet\Services\ViGEmBus';
-  { ProductCode of the ViGEmBus 1.22.0 MSI (winget manifest ViGEm.ViGEmBus 1.22.0), used only when its Uninstall entry
-    is not found after setup. }
+  { ProductCode of the ViGEmBus 1.22.0 MSI (setup/ViGEmBus.aip at tag v1.22.0, same in the winget manifest), used only
+    when its Uninstall entry is not found. }
   ViGEmBusProductCode = '{9C581C76-2D68-40F8-AA6F-94D3C5215C05}';
   UninstallKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall';
+  { The ViGEmBus MSI runs nefconw.exe (deferred custom actions) to create the device node and install the driver. }
+  ViGEmBusHelperImage = 'nefconw';
+  DefaultViGEmBusTimeoutSec = 120;
+  ExitTimedOut = 1460; { ERROR_TIMEOUT }
 
 var
   DownloadPage: TDownloadWizardPage;
@@ -265,6 +272,57 @@ end;
 function SysTool(const Name: String): String;
 begin
   Result := ExpandConstant('{sys}\' + Name);
+end;
+
+function PsQuote(const S: String): String;
+begin
+  Result := S;
+  StringChangeEx(Result, '''', '''''', True);
+  Result := '''' + Result + '''';
+end;
+
+{ Like RunHidden, but never waits longer than TimeoutSec (Exec alone waits forever). On timeout it kills every
+  HelperImage process (a helper the program waits for, e.g. a custom action of an MSI it runs), gives the program
+  15 s to finish, then kills its whole process tree, and returns ExitTimedOut. Runs through Windows PowerShell;
+  returns -1 or PowerShell's error code if that cannot run. }
+function RunHiddenWithTimeout(const FileName, Params: String; TimeoutSec: Integer; const HelperImage: String): Integer;
+var
+  Script: String;
+  Lines: TArrayOfString;
+begin
+  Script := ExpandConstant('{tmp}\splitplay-run-with-timeout.ps1');
+  SetArrayLength(Lines, 8);
+  Lines[0] := '$ErrorActionPreference = ''Stop''';
+  Lines[1] := '$p = Start-Process -FilePath ' + PsQuote(FileName) + ' -ArgumentList ' + PsQuote(Params) +
+    ' -PassThru -WindowStyle Hidden';
+  Lines[2] := '$null = $p.Handle';
+  Lines[3] := 'if ($p.WaitForExit(' + IntToStr(TimeoutSec * 1000) + ')) { exit $p.ExitCode }';
+  Lines[4] := 'Get-Process -Name ' + PsQuote(HelperImage) +
+    ' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue';
+  Lines[5] := 'if (-not $p.WaitForExit(15000)) { & taskkill.exe /F /T /PID $p.Id | Out-Null }';
+  Lines[6] := 'Get-Process -Name ' + PsQuote(HelperImage) +
+    ' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue';
+  Lines[7] := 'exit ' + IntToStr(ExitTimedOut);
+  Log(Format('Running with a %d s timeout: "%s" %s', [TimeoutSec, FileName, Params]));
+  if not SaveStringsToUTF8File(Script, Lines, False) then
+  begin
+    Log('  could not write ' + Script);
+    Result := -1;
+    Exit;
+  end;
+  Result := RunHidden(SysTool('WindowsPowerShell\v1.0\powershell.exe'),
+    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + AddQuotes(Script));
+  if Result = ExitTimedOut then
+    Log(Format('  timed out after %d s; killed %s.exe and the process tree', [TimeoutSec, HelperImage]));
+  DeleteFile(Script);
+end;
+
+function ViGEmBusTimeoutSec: Integer;
+begin
+  Result := StrToIntDef(ExpandConstant('{param:ViGEmBusTimeout|' + IntToStr(DefaultViGEmBusTimeoutSec) + '}'),
+    DefaultViGEmBusTimeoutSec);
+  if Result < 5 then
+    Result := 5;
 end;
 
 function ServiceExists: Boolean;
@@ -486,10 +544,19 @@ procedure InstallViGEmBus;
 var
   Code: Integer;
   Product: String;
+  V: TWindowsVersion;
 begin
   if ParamIsSet('SkipViGEmBus') then
   begin
     Log('/SkipViGEmBus=1: ViGEmBus is not installed');
+    Exit;
+  end;
+  { The ViGEmBus 1.22.0 MSI has a launch condition that refuses 64-bit Windows Server ("can not be installed on ...
+    Windows Server x64"); its setup does not return there (seen on the windows-2022 CI runner). }
+  GetWindowsVersionEx(V);
+  if (V.ProductType <> VER_NT_WORKSTATION) and not ParamIsSet('ViGEmBusOnServer') then
+  begin
+    Log('ViGEmBus: not installed on Windows Server (its setup supports client Windows only); desks have no gamepads');
     Exit;
   end;
   if ViGEmBusPresent then
@@ -508,11 +575,14 @@ begin
     Exit;
   end;
   { Advanced Installer bootstrapper: /exenoui = no bootstrapper UI, /qn /norestart go to msiexec, /exelog = its log. }
-  Code := RunHidden(ExpandConstant('{tmp}\{#ViGEmBusSetup}'),
-    '/exenoui /qn /norestart /exelog ' + AddQuotes(DataDir + '\logs\vigembus-setup.log'));
+  Code := RunHiddenWithTimeout(ExpandConstant('{tmp}\{#ViGEmBusSetup}'),
+    '/exenoui /qn /norestart /exelog ' + AddQuotes(DataDir + '\logs\vigembus-setup.log'),
+    ViGEmBusTimeoutSec, ViGEmBusHelperImage);
   if (Code = 3010) or (Code = 1641) then
     ViGEmBusRebootRequired := True;
-  if (Code <> 0) and (Code <> 3010) and (Code <> 1641) then
+  if Code = ExitTimedOut then
+    Log('ViGEmBus setup timed out and was stopped; continuing without gamepads (not recorded as installed)')
+  else if (Code <> 0) and (Code <> 3010) and (Code <> 1641) then
     Log(Format('ViGEmBus setup failed (exit code %d); continuing without gamepads, see %s', [Code,
       DataDir + '\logs\vigembus-setup.log']))
   else if not ViGEmBusPresent then
@@ -544,8 +614,8 @@ begin
   end;
   if not RegQueryStringValue(HKLM, SplitPlayKey, ViGEmBusProductValue, Product) or (Product = '') then
     Product := ViGEmBusProductCode;
-  Code := RunHidden(SysTool('msiexec.exe'), '/x ' + Product + ' /qn /norestart /l*v ' +
-    AddQuotes(DataDir + '\logs\vigembus-uninstall.log'));
+  Code := RunHiddenWithTimeout(SysTool('msiexec.exe'), '/x ' + Product + ' /qn /norestart /l*v ' +
+    AddQuotes(DataDir + '\logs\vigembus-uninstall.log'), ViGEmBusTimeoutSec, ViGEmBusHelperImage);
   if (Code = 0) or (Code = 3010) or (Code = 1641) or (Code = 1605) then
   begin
     if Code = 1605 then

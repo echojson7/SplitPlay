@@ -8,7 +8,8 @@ namespace SplitPlay.Tray;
 /// Tray app: an icon with "Open dashboard" and "Quit", and a window hosting WebView2 on the service's web UI.
 /// <c>SplitPlay.Tray.exe [--url URL] [--autostart|--minimized] [--smoke-test RESULT_FILE]</c>.
 /// Started by hand (Start menu, installer) it opens the dashboard; with <c>--autostart</c> (the HKLM Run entry) it
-/// stays an icon. One instance per user session: a second start brings the running instance's window to the front.
+/// stays an icon, and exits at once in a remote (RDP) session such as a desk. One instance per user session: a second
+/// start brings the running instance's window to the front.
 /// </summary>
 internal static class Program
 {
@@ -25,6 +26,7 @@ internal static class Program
         var url = DefaultUrl;
         string? smokeFile = null;
         var minimized = false;
+        var autostart = false;
         for (var i = 0; i < args.Length; i++)
         {
             if (args[i] == "--url" && i + 1 < args.Length)
@@ -34,6 +36,7 @@ internal static class Program
             else if (args[i] is "--autostart" or "--minimized")
             {
                 minimized = true;
+                autostart |= args[i] == "--autostart";
             }
             else if (args[i] == "--smoke-test" && i + 1 < args.Length)
             {
@@ -44,6 +47,13 @@ internal static class Program
         if (smokeFile is not null)
         {
             return SmokeTest(smokeFile);
+        }
+
+        // The HKLM Run entry also fires for desk users, whose sessions are RDP sessions: no tray there (it would only
+        // hold files open in a session the installer's Restart Manager cannot reach).
+        if (autostart && SystemInformation.TerminalServerSession)
+        {
+            return 0;
         }
 
         using var mutex = new Mutex(initiallyOwned: true, MutexName, out var first);

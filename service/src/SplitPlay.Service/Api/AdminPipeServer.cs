@@ -17,25 +17,46 @@ namespace SplitPlay.Service.Api;
 /// Administrators and interactive users connect; <see cref="IAdminCallerCheck"/> then decides from the caller's token
 /// (an elevated administrator anywhere, a UAC-filtered administrator at the console; never a desk session).
 /// </summary>
+/// <remarks>
+/// Nobody can hold the pipe: there is no instance limit; a caller from a desk session or one that is clearly not the
+/// admin is dropped right after it connects (<see cref="IAdminCallerCheck.Screen"/>); at most
+/// <see cref="MaxConnectionsPerSession"/> connections per session run at once and at most
+/// <see cref="MaxRequestsPerSession"/> are accepted per session within <see cref="RateWindow"/>; every connection ends
+/// after <see cref="RequestTimeout"/>. Stopping the service cancels and disposes every connection.
+/// </remarks>
 public sealed class AdminPipeServer(
     AuthService auth,
     IAdminCallerCheck check,
     IOptions<SupervisorOptions> supervisor,
     IOptions<AuthOptions> options,
-    ILogger<AdminPipeServer> logger) : BackgroundService
+    ILogger<AdminPipeServer> logger,
+    TimeProvider time) : BackgroundService
 {
-    /// <summary>Concurrent connections (a client that never writes is dropped after <see cref="RequestTimeout"/>).</summary>
-    private const int MaxInstances = 4;
+    public const int MaxConnectionsPerSession = 4;
 
-    private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(5);
+    public const int MaxRequestsPerSession = 30;
+
+    public static readonly TimeSpan RateWindow = TimeSpan.FromMinutes(1);
+
+    /// <summary>Time a client has from connecting to having read the answer.</summary>
+    public static TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(3);
+
+    private static readonly TimeSpan MaxCreateRetry = TimeSpan.FromSeconds(30);
 
     private readonly TaskCompletionSource _listening = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly object _gate = new();
+    private readonly Dictionary<int, int> _active = [];
+    private readonly Dictionary<int, Queue<DateTimeOffset>> _recent = [];
+    private readonly HashSet<NamedPipeServerStream> _open = [];
 
     /// <summary>The pipe name for .NET pipe streams.</summary>
     public string LocalName => AdminPipe.LocalName(supervisor.Value.PipeNamespace);
 
-    /// <summary>Completes once the first instance listens (tests).</summary>
+    /// <summary>Completes once the first instance listens, or creating it failed once (tests).</summary>
     public Task Listening => _listening.Task;
+
+    /// <summary>Connections dropped right after connecting (tests).</summary>
+    public int Dropped { get; private set; }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -46,94 +67,229 @@ public sealed class AdminPipeServer(
         }
 
         var handlers = new List<Task>();
-        while (!stoppingToken.IsCancellationRequested)
+        var retry = TimeSpan.FromSeconds(1);
+        try
         {
-            NamedPipeServerStream listening;
-            try
+            while (!stoppingToken.IsCancellationRequested)
             {
-                // The first instance must be ours: a pipe someone created earlier under this name is refused.
-                listening = Create(first: true);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                logger.LogError("Cannot create the admin pipe {Pipe}: {Message}; retrying in 10 s", LocalName, ex.Message);
-                _listening.TrySetResult();
-                await Task.Delay(TimeSpan.FromSeconds(10), stoppingToken).ConfigureAwait(false);
-                continue;
-            }
-
-            _listening.TrySetResult();
-            try
-            {
-                while (true)
+                NamedPipeServerStream listening;
+                try
                 {
-                    await listening.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
-                    var connected = listening;
-                    // Create the next instance while this one still exists, so that the name is never free for a squatter.
-                    listening = await NextInstanceAsync(stoppingToken).ConfigureAwait(false);
-                    handlers.RemoveAll(t => t.IsCompleted);
-                    handlers.Add(HandleAsync(connected, stoppingToken));
+                    // The first instance must be ours (FILE_FLAG_FIRST_PIPE_INSTANCE): a pipe someone created earlier under
+                    // this name is refused, and nobody gets the tray's or the CLI's requests.
+                    listening = Create(first: true);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    logger.LogError("Cannot create the admin pipe {Pipe}: {Message}. Another process may hold this name; the tray and the CLI " +
+                                    "cannot sign in until it is gone. Retrying in {Delay} s", LocalName, ex.Message, (int)retry.TotalSeconds);
+                    _listening.TrySetResult();
+                    await Task.Delay(retry, time, stoppingToken).ConfigureAwait(false);
+                    retry = retry * 2 > MaxCreateRetry ? MaxCreateRetry : retry * 2;
+                    continue;
+                }
+
+                retry = TimeSpan.FromSeconds(1);
+                Track(listening, add: true);
+                _listening.TrySetResult();
+                try
+                {
+                    while (true)
+                    {
+                        await listening.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
+                        var connected = listening;
+                        // Create the next instance while this one still exists, so that the name is never free for a squatter.
+                        listening = Create(first: false);
+                        Track(listening, add: true);
+                        handlers.RemoveAll(t => t.IsCompleted);
+                        handlers.Add(HandleAsync(connected, stoppingToken));
+                    }
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+                {
+                    logger.LogWarning("Admin pipe failed: {Message}; recreating it", ex.Message);
+                    await Task.Delay(TimeSpan.FromSeconds(1), time, stoppingToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    Track(listening, add: false);
+                    await listening.DisposeAsync().ConfigureAwait(false);
                 }
             }
-            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-            {
-                await listening.DisposeAsync().ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
-            {
-                logger.LogWarning("Admin pipe failed: {Message}; recreating it", ex.Message);
-                await listening.DisposeAsync().ConfigureAwait(false);
-                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken).ConfigureAwait(false);
-            }
         }
-
-        await Task.WhenAll(handlers).ConfigureAwait(false);
-    }
-
-    private async Task<NamedPipeServerStream> NextInstanceAsync(CancellationToken stoppingToken)
-    {
-        while (true)
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
+        }
+        finally
+        {
+            // Every handler is bounded by RequestTimeout and cancelled with stoppingToken; disposing the open pipes ends
+            // any I/O that ignores cancellation.
+            List<NamedPipeServerStream> open;
+            lock (_gate)
+            {
+                open = [.. _open];
+                _open.Clear();
+            }
+
+            foreach (var pipe in open)
+            {
+                await pipe.DisposeAsync().ConfigureAwait(false);
+            }
+
             try
             {
-                return Create(first: false);
+                await Task.WhenAll(handlers).WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None).ConfigureAwait(false);
             }
-            catch (IOException)
+            catch (TimeoutException)
             {
-                // All instances busy: wait for a handler to finish (each one is bounded by RequestTimeout).
-                await Task.Delay(TimeSpan.FromMilliseconds(100), stoppingToken).ConfigureAwait(false);
+                logger.LogWarning("Admin pipe connections did not end within 2 s of stopping");
+            }
+        }
+    }
+
+    private void Track(NamedPipeServerStream pipe, bool add)
+    {
+        lock (_gate)
+        {
+            if (add)
+            {
+                _open.Add(pipe);
+            }
+            else
+            {
+                _open.Remove(pipe);
+            }
+        }
+    }
+
+    /// <summary>Admits a connection from <paramref name="session"/>, or returns why not.</summary>
+    private string? Admit(int session)
+    {
+        var now = time.GetUtcNow();
+        lock (_gate)
+        {
+            if (!_recent.TryGetValue(session, out var recent))
+            {
+                recent = new Queue<DateTimeOffset>();
+                _recent[session] = recent;
+            }
+
+            while (recent.Count > 0 && now - recent.Peek() > RateWindow)
+            {
+                recent.Dequeue();
+            }
+
+            if (recent.Count >= MaxRequestsPerSession)
+            {
+                return "too many requests from this session";
+            }
+
+            if (_active.GetValueOrDefault(session) >= MaxConnectionsPerSession)
+            {
+                return "too many open connections from this session";
+            }
+
+            recent.Enqueue(now);
+            _active[session] = _active.GetValueOrDefault(session) + 1;
+            return null;
+        }
+    }
+
+    private void Release(int session)
+    {
+        lock (_gate)
+        {
+            if (_active.TryGetValue(session, out var n))
+            {
+                if (n <= 1)
+                {
+                    _active.Remove(session);
+                }
+                else
+                {
+                    _active[session] = n - 1;
+                }
             }
         }
     }
 
     private async Task HandleAsync(NamedPipeServerStream pipe, CancellationToken stoppingToken)
     {
-        await using (pipe.ConfigureAwait(false))
+        int? admitted = null;
+        try
         {
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             cts.CancelAfter(RequestTimeout);
+
+            // Before reading anything: a desk session or a caller that is clearly not the admin is dropped at once.
+            AdminCallerDecision screen;
             try
             {
-                var line = await AdminPipe.ReadLineAsync(pipe, cts.Token).ConfigureAwait(false);
-                if (line is null)
-                {
-                    return;
-                }
-
-                var response = Answer(pipe, line);
-                var bytes = JsonSerializer.SerializeToUtf8Bytes(response, AdminPipeJsonContext.Default.AdminTokenResponse);
-                await pipe.WriteAsync(bytes, cts.Token).ConfigureAwait(false);
-                await pipe.WriteAsync("\n"u8.ToArray(), cts.Token).ConfigureAwait(false);
-                await pipe.FlushAsync(cts.Token).ConfigureAwait(false);
-                if (OperatingSystem.IsWindows())
-                {
-                    pipe.WaitForPipeDrain();
-                }
+                screen = check.Screen(pipe);
             }
-            catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception
+                                           or InvalidOperationException)
             {
-                logger.LogDebug("Admin pipe client dropped: {Message}", ex.Message);
+                screen = new AdminCallerDecision(false, "unknown caller", $"could not identify the caller: {ex.Message}");
             }
+
+            var session = screen.Session ?? -1;
+            var refusal = screen.Allowed ? Admit(session) : screen.Reason;
+            if (refusal is not null)
+            {
+                Dropped++;
+                logger.LogWarning("Admin pipe: dropped {Caller} at connect: {Reason}", screen.Caller, refusal);
+                await TryAnswerAsync(pipe, Refused(ApiErrorCodes.Forbidden, refusal), cts.Token).ConfigureAwait(false);
+                return;
+            }
+
+            admitted = session;
+            var line = await AdminPipe.ReadLineAsync(pipe, cts.Token).ConfigureAwait(false);
+            if (line is null)
+            {
+                return;
+            }
+
+            await TryAnswerAsync(pipe, Answer(pipe, line), cts.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+        {
+            logger.LogDebug("Admin pipe client dropped: {Message}", ex.Message);
+        }
+        finally
+        {
+            if (admitted is int s)
+            {
+                Release(s);
+            }
+
+            Track(pipe, add: false);
+            await pipe.DisposeAsync().ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Writes the answer line and waits (bounded by <paramref name="ct"/>) for the client to close its end, so that the
+    /// answer is read before the pipe goes away. No unbounded WaitForPipeDrain.
+    /// </summary>
+    private static async Task TryAnswerAsync(NamedPipeServerStream pipe, AdminTokenResponse response, CancellationToken ct)
+    {
+        try
+        {
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(response, AdminPipeJsonContext.Default.AdminTokenResponse);
+            await pipe.WriteAsync(bytes, ct).ConfigureAwait(false);
+            await pipe.WriteAsync("\n"u8.ToArray(), ct).ConfigureAwait(false);
+            await pipe.FlushAsync(ct).ConfigureAwait(false);
+            var sink = new byte[64];
+            while (await pipe.ReadAsync(sink, ct).ConfigureAwait(false) > 0)
+            {
+            }
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+        {
         }
     }
 
@@ -186,7 +342,7 @@ public sealed class AdminPipeServer(
             return CreateWindows(first);
         }
 
-        return new NamedPipeServerStream(LocalName, PipeDirection.InOut, MaxInstances, PipeTransmissionMode.Byte,
+        return new NamedPipeServerStream(LocalName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances, PipeTransmissionMode.Byte,
             PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
     }
 
@@ -211,6 +367,7 @@ public sealed class AdminPipeServer(
         }
 
         var flags = PipeOptions.Asynchronous | (first ? PipeOptions.FirstPipeInstance : PipeOptions.None);
-        return NamedPipeServerStreamAcl.Create(LocalName, PipeDirection.InOut, MaxInstances, PipeTransmissionMode.Byte, flags, 0, 0, security);
+        return NamedPipeServerStreamAcl.Create(LocalName, PipeDirection.InOut, NamedPipeServerStream.MaxAllowedServerInstances,
+            PipeTransmissionMode.Byte, flags, 0, 0, security);
     }
 }

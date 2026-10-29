@@ -60,6 +60,9 @@ public sealed class AuthService
     /// <param name="FromPipe">Handed out over the admin pipe: a password change does not end it.</param>
     public sealed record Session(string Id, string CsrfToken, DateTimeOffset Expires, bool FromPipe = false);
 
+    /// <summary>True when the request carries a credential only the admin pipe hands out (a bearer token, the tray's session).</summary>
+    public bool HasPipeCredential(HttpContext context) => HasValidBearer(context) || Current(context)?.FromPipe == true;
+
     /// <summary>True when the request carries a valid session cookie or bearer token: it comes from the host's admin.</summary>
     public bool IsAdmin(HttpContext context) => HasValidBearer(context) || Current(context) is not null;
 

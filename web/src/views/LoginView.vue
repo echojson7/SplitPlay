@@ -30,7 +30,12 @@ async function submit(): Promise<void> {
     await store.refreshSession()
     await router.replace(target())
   } catch (e) {
-    error.value = e instanceof ApiError && e.status === 401 ? t('login.wrong') : errorText(e)
+    error.value =
+      e instanceof ApiError && e.status === 401
+        ? t('login.wrong')
+        : e instanceof ApiError && e.status === 429
+          ? t('login.tooMany')
+          : errorText(e)
   } finally {
     busy.value = false
   }

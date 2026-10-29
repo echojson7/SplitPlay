@@ -31,6 +31,7 @@ public static class ApiErrorCodes
     public const string Unauthorized = "unauthorized";
     public const string InvalidPassword = "invalid_password";
     public const string CsrfFailed = "csrf_failed";
+    public const string TooManyAttempts = "too_many_attempts";
     public const string NotImplemented = "not_implemented";
     public const string ChildUnavailable = "child_unavailable";
 

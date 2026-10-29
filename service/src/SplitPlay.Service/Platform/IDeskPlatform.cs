@@ -121,6 +121,10 @@ public interface IDeskPlatform
     /// <summary>The sessions on this PC (WTSEnumerateSessions).</summary>
     IReadOnlyList<HostSession> Sessions();
 
+    /// <summary>The local account signed in to <paramref name="sessionId"/>, or null (nobody, or a domain account).</summary>
+    /// <exception cref="System.ComponentModel.Win32Exception">The session cannot be queried.</exception>
+    string? SessionUser(int sessionId);
+
     /// <summary>Logs session <paramref name="sessionId"/> off without waiting for it (WTSLogoffSession).</summary>
     void LogoffSession(int sessionId);
 }

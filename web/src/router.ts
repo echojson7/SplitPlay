@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 import { createRouter, createWebHashHistory, type RouteRecordRaw, type Router } from 'vue-router'
 import { api } from './api/client'
-import { trayHost } from './host'
+import { requestTraySignIn } from './host'
 import { store } from './store'
 
 declare module 'vue-router' {
@@ -53,6 +53,9 @@ export function createAppRouter(): Router {
       }
     }
     const s = store.state.session!
+    // In the tray an unauthenticated page means its pipe sign-in failed or expired: ask it again (throttled), so that
+    // the console owner is never left on the login page.
+    if (!s.authenticated) requestTraySignIn()
     if (!s.authenticated && !to.meta.public) return { name: 'login', query: { redirect: to.fullPath } }
     if (s.authenticated && to.meta.public) return { name: 'library' }
     return true
@@ -60,7 +63,7 @@ export function createAppRouter(): Router {
 
   api.onUnauthorized = () => {
     // In the tray: its session expired or the service restarted; the tray signs in again and reloads the page.
-    trayHost()?.postMessage('auth')
+    requestTraySignIn()
     if (store.state.session) store.state.session = { ...store.state.session, authenticated: false }
     const current = router.currentRoute.value
     if (!current.meta.public) void router.push({ name: 'login', query: { redirect: current.fullPath } })

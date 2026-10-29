@@ -159,9 +159,10 @@ public sealed class DeskSupervisor : IHostedService
         var started = _time.GetTimestamp();
         try
         {
-            await Task.Run(CleanUpLeftoverSessions).WaitAsync(limit, _time).ConfigureAwait(false);
+            using var cts = new CancellationTokenSource(limit, _time);
+            await Task.Run(() => CleanUpLeftoverSessions(cts.Token)).WaitAsync(limit, _time).ConfigureAwait(false);
         }
-        catch (TimeoutException)
+        catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
         {
             _logger.LogWarning("The check for desk sessions left over from before the service started did not finish within {Limit} s (Windows is not answering session queries); skipping it",
                 (int)limit.TotalSeconds);
@@ -191,7 +192,7 @@ public sealed class DeskSupervisor : IHostedService
     /// automatically reconnects to its session (games keep running); other sessions of accounts SplitPlay created are
     /// logged off. Sessions of accounts SplitPlay did not create are never touched.
     /// </summary>
-    private void CleanUpLeftoverSessions()
+    private void CleanUpLeftoverSessions(CancellationToken ct)
     {
         var leftovers = _platform.Sessions().Where(s => s.Disconnected && s.User is not null).ToList();
         if (leftovers.Count == 0)
@@ -220,6 +221,20 @@ public sealed class DeskSupervisor : IHostedService
             }
             else
             {
+                // Desks may start once the start-up wait is over: then nothing more is logged off. Each session is
+                // checked again right before, so that a session that changed hands in between is left alone.
+                if (ct.IsCancellationRequested)
+                {
+                    _logger.LogWarning("Stopped logging off leftover sessions: the start-up wait is over");
+                    return;
+                }
+
+                var again = _platform.Sessions().FirstOrDefault(s => s.Id == session.Id);
+                if (again is not { Disconnected: true } || !string.Equals(again.User, user, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
                 try
                 {
                     _platform.LogoffSession(session.Id);
@@ -299,9 +314,11 @@ public sealed class DeskSupervisor : IHostedService
     public DeskDto Get(string id) => Find(id).ToDto();
 
     /// <summary>
-    /// True when <paramref name="sessionId"/> is the RDP session a seat opened for a desk (its desk user's session).
-    /// A worker started in some other session without a seat (<c>Supervisor:Seat=none</c>, tests) does not make that
-    /// session a desk.
+    /// True when <paramref name="sessionId"/> belongs to a desk user: a session a seat opened, or any session signed in
+    /// with a configured desk user or an account SplitPlay created (also a desk that is stopped, or a leftover session).
+    /// The console session and session 0 never are; a session whose user cannot be read counts as a desk (deny).
+    /// A worker started in another session without a seat (<c>Supervisor:Seat=none</c>, tests) does not make that session
+    /// a desk.
     /// </summary>
     public bool IsDeskSession(int sessionId)
     {
@@ -322,8 +339,28 @@ public sealed class DeskSupervisor : IHostedService
             }
         }
 
-        return false;
+        string? user;
+        try
+        {
+            if (_platform.ConsoleSessionId() == sessionId)
+            {
+                return false;
+            }
+
+            user = _platform.SessionUser(sessionId);
+            return user is not null && IsDeskUser(user);
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or UnauthorizedAccessException)
+        {
+            _logger.LogWarning("Cannot tell who is signed in to session {Session} ({Message}); treating it as a desk session", sessionId, ex.Message);
+            return true;
+        }
     }
+
+    /// <summary>A configured desk user, or an account SplitPlay created.</summary>
+    public bool IsDeskUser(string user) =>
+        _config.Snapshot().Desks.Any(d => string.Equals(d.User, user, StringComparison.OrdinalIgnoreCase))
+        || _platform.FindAccount(user)?.CreatedBySplitPlay == true;
 
     public MetricsDto Metrics()
     {
@@ -441,6 +478,13 @@ public sealed class DeskSupervisor : IHostedService
             }
 
             desk.UserManaged = userChanged || password is not null ? CheckUser(desk.User!, password) : current.UserManaged;
+            if (userChanged && desk.UserManaged == false && desk.HideFromLogon == true)
+            {
+                // A client that sends back the old desk's effective value must not hide an account SplitPlay did not
+                // create: that takes a request of its own once the user is set.
+                _logger.LogInformation("Desk {Desk}: hideFromLogon ignored while switching to {User}, an account SplitPlay did not create", id, desk.User);
+                desk.HideFromLogon = null;
+            }
 
             if (!idle && (desk.Name != current.Name || !string.Equals(desk.User, current.User, StringComparison.OrdinalIgnoreCase)
                           || desk.BasePort != current.BasePort || desk.Autostart != current.Autostart || desk.Gpu != current.Gpu
@@ -1197,7 +1241,11 @@ public sealed class DeskSupervisor : IHostedService
         };
         foreach (var (name, value) in config.WorkerSettings ?? [])
         {
-            settings[name] = value;
+            // A hand-edited config.json is not validated by the API: never pass these to a worker running as SYSTEM.
+            if (!ConfigValidator.IsForbiddenWorkerSetting(name) && !ConfigValidator.ReservedWorkerSettings.Contains(name))
+            {
+                settings[name] = value;
+            }
         }
 
         return settings;

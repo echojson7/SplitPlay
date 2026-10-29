@@ -63,6 +63,7 @@ internal sealed class DashboardForm : Form
     private long? _uptime;
     private bool _restarted;
     private DateTime _lastAuthReload = DateTime.MinValue;
+    private int _signInRetries;
 
     public DashboardForm(Uri url)
     {
@@ -153,8 +154,34 @@ internal sealed class DashboardForm : Form
         _retry.Stop();
         _misses = 0;
         _monitor.Start();
-        await SignInAsync();
+        var signedIn = await SignInAsync();
         _webView.CoreWebView2.Navigate(_url.ToString());
+        if (!signedIn)
+        {
+            // The service may still be starting its pipe: keep trying for a minute so that the console owner does not
+            // stay on the password page (the page also asks again through the "auth" message).
+            var run = ++_signInRetries;
+            _ = SafeAsync(() => RetrySignInAsync(run));
+        }
+    }
+
+    private async Task RetrySignInAsync(int run)
+    {
+        for (var attempt = 0; attempt < 12 && run == _signInRetries && !_fallback && !IsDisposed; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5));
+            if (run != _signInRetries || _fallback || IsDisposed)
+            {
+                return;
+            }
+
+            if (await SignInAsync())
+            {
+                _lastAuthReload = DateTime.UtcNow;
+                _webView.CoreWebView2.Reload();
+                return;
+            }
+        }
     }
 
     /// <summary>

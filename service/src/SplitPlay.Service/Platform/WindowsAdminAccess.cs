@@ -14,21 +14,54 @@ using SplitPlay.Service.Supervision;
 namespace SplitPlay.Service.Platform;
 
 /// <summary>
-/// Who may get a credential from the admin pipe, decided from the client's token:
-/// <list type="bullet">
-/// <item>never a process in a desk session (desk users are other people, even when their account is an administrator);</item>
-/// <item>SYSTEM, and an administrator whose token is elevated (an elevated prompt, the installer, SSH);</item>
-/// <item>an administrator with a UAC-filtered token in the active console session (the owner's tray and CLI).</item>
-/// </list>
-/// Everybody else (a standard user at the console, any RDP session) is refused and can still sign in with the admin
-/// password.
+/// <see cref="AdminCallerRules"/> on Windows: the caller's session from the pipe, its token from impersonation (or, when
+/// that fails, its process), and the desk sessions from <see cref="DeskSupervisor.IsDeskSession"/>.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class WindowsAdminCallerCheck(DeskSupervisor desks, IDeskPlatform platform) : IAdminCallerCheck
 {
+    public AdminCallerDecision Screen(NamedPipeServerStream pipe)
+    {
+        ArgumentNullException.ThrowIfNull(pipe);
+        var (pid, session) = Client(pipe);
+        if (desks.IsDeskSession(session))
+        {
+            return new AdminCallerDecision(false, $"pid {pid} (session {session})", "callers in a desk session cannot manage SplitPlay", session);
+        }
+
+        // The process token is good enough to drop obvious non-admins early; the final decision uses impersonation.
+        return TokenFacts.OfProcess(pid) is { } facts
+            ? AdminCallerRules.Decide(Facts(facts, session, deskSession: false))
+            : new AdminCallerDecision(true, $"pid {pid} (session {session})", Session: session);
+    }
+
     public AdminCallerDecision Check(NamedPipeServerStream pipe)
     {
         ArgumentNullException.ThrowIfNull(pipe);
+        var (pid, session) = Client(pipe);
+
+        // The token the client connected with (impersonation, identification level); the client's process token only when
+        // impersonation is not possible.
+        TokenFacts? facts = null;
+        try
+        {
+            pipe.RunAsClient(() => facts = TokenFacts.OfCurrentThread());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or Win32Exception or InvalidOperationException)
+        {
+            facts = TokenFacts.OfProcess(pid) ?? throw new Win32Exception($"cannot read the caller's token ({ex.Message})");
+        }
+
+        var decision = AdminCallerRules.Decide(Facts(facts!, session, desks.IsDeskSession(session)));
+        return decision with { Caller = $"{decision.Caller}, pid {pid}" };
+    }
+
+    private AdminCallerFacts Facts(TokenFacts facts, int session, bool deskSession) =>
+        new(facts.Name, facts.IsSystem, facts.AdminEnabled, facts.AdminFiltered, facts.IntegrityRid, session, platform.ConsoleSessionId(),
+            deskSession);
+
+    private static (uint Pid, int Session) Client(NamedPipeServerStream pipe)
+    {
         var handle = pipe.SafePipeHandle;
         if (!GetNamedPipeClientProcessId(handle, out var pid))
         {
@@ -42,33 +75,7 @@ public sealed class WindowsAdminCallerCheck(DeskSupervisor desks, IDeskPlatform 
             throw new Win32Exception(error, $"GetNamedPipeClientSessionId failed ({error})");
         }
 
-        // The client process's own token (it is connected, so the pid is still its own). The service runs as SYSTEM and
-        // can open every process that is not protected; impersonation is the fallback.
-        var facts = TokenFacts.OfProcess(pid);
-        if (facts is null)
-        {
-            pipe.RunAsClient(() => facts = TokenFacts.OfCurrentThread());
-        }
-
-        var caller = $"{facts!.Name} (pid {pid}, session {session})";
-
-        if (desks.IsDeskSession((int)session))
-        {
-            return new AdminCallerDecision(false, caller, "callers in a desk session cannot manage SplitPlay");
-        }
-
-        if (facts.IsSystem || facts.AdminEnabled)
-        {
-            return new AdminCallerDecision(true, caller);
-        }
-
-        if (facts.AdminFiltered && platform.ConsoleSessionId() == (int)session)
-        {
-            return new AdminCallerDecision(true, caller);
-        }
-
-        return new AdminCallerDecision(false, caller,
-            "only an administrator signed in at this PC (or an elevated prompt) can manage SplitPlay; sign in with the admin password instead");
+        return (pid, (int)session);
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -80,11 +87,12 @@ public sealed class WindowsAdminCallerCheck(DeskSupervisor desks, IDeskPlatform 
 
 /// <summary>What the admin check needs from a token.</summary>
 [SupportedOSPlatform("windows")]
-internal sealed record TokenFacts(string Name, bool IsSystem, bool AdminEnabled, bool AdminFiltered)
+internal sealed record TokenFacts(string Name, bool IsSystem, bool AdminEnabled, bool AdminFiltered, int IntegrityRid)
 {
     private const uint TOKEN_QUERY = 0x0008;
     private const int TokenUser = 1;
     private const int TokenGroups = 2;
+    private const int TokenIntegrityLevel = 25;
     private const uint SE_GROUP_ENABLED = 0x4;
     private const uint SE_GROUP_USE_FOR_DENY_ONLY = 0x10;
 
@@ -160,7 +168,32 @@ internal sealed record TokenFacts(string Name, bool IsSystem, bool AdminEnabled,
             name = user.Value;
         }
 
-        return new TokenFacts(name, user.IsWellKnown(WellKnownSidType.LocalSystemSid), enabled, filtered);
+        return new TokenFacts(name, user.IsWellKnown(WellKnownSidType.LocalSystemSid), enabled, filtered, Integrity(token));
+    }
+
+    /// <summary>The RID of the token's mandatory label (S-1-16-RID), or -1.</summary>
+    private static int Integrity(SafeAccessTokenHandle token)
+    {
+        IntPtr buffer;
+        try
+        {
+            buffer = Query(token, TokenIntegrityLevel);
+        }
+        catch (Win32Exception)
+        {
+            return -1;
+        }
+
+        try
+        {
+            // TOKEN_MANDATORY_LABEL: SID_AND_ATTRIBUTES Label.
+            var sid = new SecurityIdentifier(Marshal.ReadIntPtr(buffer)).Value;
+            return int.TryParse(sid[(sid.LastIndexOf('-') + 1)..], out var rid) ? rid : -1;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(buffer);
+        }
     }
 
     private static SecurityIdentifier User(SafeAccessTokenHandle token)
@@ -241,7 +274,7 @@ internal sealed record TokenFacts(string Name, bool IsSystem, bool AdminEnabled,
 
 /// <summary>
 /// Maps a loopback Web API connection to the session of the process that opened it (GetExtendedTcpTable, then
-/// ProcessIdToSessionId), once per connection.
+/// ProcessIdToSessionId), once per connection. A loopback peer that cannot be found is <see cref="PeerLookupKind.Failed"/>.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class WindowsPeerInspector : IPeerInspector
@@ -251,68 +284,43 @@ public sealed class WindowsPeerInspector : IPeerInspector
     private const int AF_INET6 = 23;
     private const int TCP_TABLE_OWNER_PID_CONNECTIONS = 4;
 
-    public int? PeerSession(HttpContext context)
+    public PeerLookup PeerSession(HttpContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
         var items = context.Features.Get<IConnectionItemsFeature>()?.Items;
-        if (items is not null && items.TryGetValue(ItemKey, out var cached))
+        if (items is not null && items.TryGetValue(ItemKey, out var cached) && cached is PeerLookup known)
         {
-            return cached as int?;
+            return known;
         }
 
-        var session = Lookup(context.Connection.RemoteIpAddress, context.Connection.RemotePort, context.Connection.LocalPort);
+        var result = Lookup(context.Connection.RemoteIpAddress, context.Connection.RemotePort, context.Connection.LocalPort);
         if (items is not null)
         {
-            items[ItemKey] = session;
+            items[ItemKey] = result;
         }
 
-        return session;
+        return result;
     }
 
-    private static int? Lookup(IPAddress? remote, int remotePort, int localPort)
+    private static PeerLookup Lookup(IPAddress? remote, int remotePort, int localPort)
     {
         if (remote is null || !IPAddress.IsLoopback(remote))
         {
-            return null;
+            return PeerLookup.NotApplicable;
         }
 
-        if (remote.IsIPv4MappedToIPv6)
+        var v6 = remote.AddressFamily == AddressFamily.InterNetworkV6 && !remote.IsIPv4MappedToIPv6;
+        var table = Table(v6 ? AF_INET6 : AF_INET);
+        if (table is null || TcpOwnerTable.FindOwner(table, remote, remotePort, localPort) is not uint pid)
         {
-            remote = remote.MapToIPv4();
+            return PeerLookup.Failed;
         }
 
-        var pid = remote.AddressFamily == AddressFamily.InterNetwork
-            ? OwnerV4(remote, remotePort, localPort)
-            : OwnerV6(remote, remotePort, localPort);
-        return pid is uint p && ProcessIdToSessionId(p, out var session) ? (int)session : null;
+        return ProcessIdToSessionId(pid, out var session) ? PeerLookup.Found((int)session) : PeerLookup.Failed;
     }
 
-    /// <summary>The client's end of the connection: local = its address and port, remote port = ours.</summary>
-    private static uint? OwnerV4(IPAddress client, int clientPort, int serverPort)
-    {
-        var address = BitConverter.ToUInt32(client.GetAddressBytes(), 0);
-        return Scan(AF_INET, Marshal.SizeOf<MIB_TCPROW_OWNER_PID>(), row =>
-        {
-            var r = Marshal.PtrToStructure<MIB_TCPROW_OWNER_PID>(row);
-            return r.LocalAddr == address && Port(r.LocalPort) == clientPort && Port(r.RemotePort) == serverPort ? r.OwningPid : null;
-        });
-    }
-
-    private static uint? OwnerV6(IPAddress client, int clientPort, int serverPort)
-    {
-        var bytes = client.GetAddressBytes();
-        return Scan(AF_INET6, Marshal.SizeOf<MIB_TCP6ROW_OWNER_PID>(), row =>
-        {
-            var r = Marshal.PtrToStructure<MIB_TCP6ROW_OWNER_PID>(row);
-            return r.LocalAddr.AsSpan().SequenceEqual(bytes) && Port(r.LocalPort) == clientPort && Port(r.RemotePort) == serverPort
-                ? r.OwningPid
-                : null;
-        });
-    }
-
-    private static int Port(uint networkOrder) => ((int)(networkOrder & 0xFF) << 8) | (int)((networkOrder >> 8) & 0xFF);
-
-    private static uint? Scan(int family, int rowSize, Func<IntPtr, uint?> match)
+    /// <summary>The raw table, or null.</summary>
+    private static byte[]? Table(int family)
     {
         var size = 0;
         GetExtendedTcpTable(IntPtr.Zero, ref size, false, family, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
@@ -333,17 +341,9 @@ public sealed class WindowsPeerInspector : IPeerInspector
                     return null;
                 }
 
-                var count = Marshal.ReadInt32(buffer);
-                // The rows follow dwNumEntries, aligned to 4 bytes.
-                for (var i = 0; i < count; i++)
-                {
-                    if (match(buffer + 4 + (i * rowSize)) is uint pid)
-                    {
-                        return pid;
-                    }
-                }
-
-                return null;
+                var bytes = new byte[size];
+                Marshal.Copy(buffer, bytes, 0, size);
+                return bytes;
             }
             finally
             {
@@ -352,32 +352,6 @@ public sealed class WindowsPeerInspector : IPeerInspector
         }
 
         return null;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MIB_TCPROW_OWNER_PID
-    {
-        public uint State;
-        public uint LocalAddr;
-        public uint LocalPort;
-        public uint RemoteAddr;
-        public uint RemotePort;
-        public uint OwningPid;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MIB_TCP6ROW_OWNER_PID
-    {
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
-        public byte[] LocalAddr;
-        public uint LocalScopeId;
-        public uint LocalPort;
-        [MarshalAs(UnmanagedType.ByValArray, SizeConst = 16)]
-        public byte[] RemoteAddr;
-        public uint RemoteScopeId;
-        public uint RemotePort;
-        public uint State;
-        public uint OwningPid;
     }
 
     [DllImport("iphlpapi.dll")]

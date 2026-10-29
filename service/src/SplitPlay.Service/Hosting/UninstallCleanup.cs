@@ -73,6 +73,13 @@ public static class UninstallCleanup
                 accounts.Add(desk.User!);
             }
 
+            // An account a desk uses as the owner's own (userManaged=false) is never logged off or deleted, whatever its
+            // comment says.
+            foreach (var desk in desks.Values.Where(d => d.UserManaged == false && d.User is not null))
+            {
+                accounts.Remove(desk.User!);
+            }
+
             LogOff(platform, accounts, logger);
         }
 

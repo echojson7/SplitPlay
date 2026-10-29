@@ -38,6 +38,28 @@ public static partial class ConfigValidator
     /// <summary>Worker settings the service sets itself (from other desk fields); they cannot be overridden.</summary>
     public static readonly IReadOnlySet<string> ReservedWorkerSettings = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "port" };
 
+    /// <summary>
+    /// Sunshine settings that run commands or name files: the worker runs as SYSTEM, so a caller able to set them could
+    /// run anything as SYSTEM or make the worker read or write any file. They are refused in the API and dropped at launch.
+    /// </summary>
+    public static readonly IReadOnlySet<string> ForbiddenWorkerSettings = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "global_prep_cmd", "prep_cmd", "server_cmd", "do", "undo", "detached", "cmd",
+        "file_apps", "file_state", "credentials_file", "pkey", "cert", "log_path", "config_file", "apps",
+        "origin_web_ui_allowed", "origin_pin_allowed",
+    };
+
+    /// <summary>True for a worker setting that runs a command or names a file (see <see cref="ForbiddenWorkerSettings"/>).</summary>
+    public static bool IsForbiddenWorkerSetting(string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        var n = name.ToLowerInvariant();
+        return ForbiddenWorkerSettings.Contains(n)
+               || n.EndsWith("cmd", StringComparison.Ordinal) || n.EndsWith("_command", StringComparison.Ordinal)
+               || n.EndsWith("_file", StringComparison.Ordinal) || n.EndsWith("_path", StringComparison.Ordinal)
+               || n.EndsWith("_dir", StringComparison.Ordinal) || n.StartsWith("file_", StringComparison.Ordinal);
+    }
+
     /// <summary>True if <paramref name="id"/> is a valid desk id (<c>[a-z0-9-]{1,32}</c>).</summary>
     public static bool IsValidDeskId(string? id) => id is not null && DeskIdRegex().IsMatch(id);
 
@@ -217,6 +239,10 @@ public static partial class ConfigValidator
                 else if (ReservedWorkerSettings.Contains(name!))
                 {
                     errors.Add(new($"{path}.workerSettings.{name}", "is set by the service (from basePort) and cannot be overridden"));
+                }
+                else if (IsForbiddenWorkerSetting(name!))
+                {
+                    errors.Add(new($"{path}.workerSettings.{name}", "runs a command or names a file, which the worker (SYSTEM) must not do"));
                 }
 
                 if (value is null || value.Length > 1024 || value.Any(char.IsControl))

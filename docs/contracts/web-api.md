@@ -26,15 +26,25 @@ Its DACL lets SYSTEM, Administrators and interactive users (IU) connect; the ser
   is not a desk session;
 - an administrator with a UAC-filtered token in the active console session (the owner's tray and CLI).
 
-Everybody else is refused with the reason: a standard user at the console, any RDP session, and always a process in a
-desk session, even a desk user who is an administrator. They can still log in with the admin password (except from a
+Everybody else is refused with the reason: a standard user at the console, any RDP session, a process below medium
+integrity, and always a process in a desk session, even a desk user who is an administrator. Desk sessions and callers
+that are clearly not the admin are dropped right after connecting, before anything is read; the pipe has no instance
+limit, a session may keep at most 4 connections open and make 30 requests a minute, and every connection ends after
+3 s. They can still log in with the admin password (except from a
 desk session, see below). Clients only talk to a pipe owned by SYSTEM, Administrators or themselves (squatting while
 the service is stopped). The first admin password can only be set by the administrator (tray, CLI) in Settings, so a
 desk user cannot set it and take the host over.
 
 Defence in depth: the service maps each loopback connection to the process that opened it (`GetExtendedTcpTable`)
 and its session. A request from a desk session gets 403 `forbidden` on every route but `/health`, token or not
-(this also stops password guessing from a desk).
+(this also stops password guessing from a desk). A desk session is one a seat opened, or any session signed in with a
+configured desk user or an account SplitPlay created; a session whose user cannot be read counts as one, the console
+session never does. A loopback peer whose process cannot be found gets 403 too, unless it carries a credential only the
+admin pipe hands out (the tray's session, a bearer token).
+
+Password checks (`/auth/login`, `/auth/password`) run one at a time. After 5 wrong passwords from one caller each
+further one locks it out for 1, 2, 4 … s up to 15 minutes, and more than 20 wrong passwords within a minute from
+everybody lock everybody out the same way: 429 `too_many_attempts` with `Retry-After`.
 
 - Sessions use the HttpOnly, `SameSite=Strict` cookie `splitplay_session`. A request that carries the cookie and
   changes state (POST, PUT, DELETE) must send `X-CSRF-Token` (returned by login, by `GET /auth/session` and by the
@@ -197,6 +207,7 @@ The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}`
 | `validation_failed` | 400 | the body breaks a rule of config.md |
 | `unauthorized` | 401 | no admin proof (session or bearer token) |
 | `invalid_password` | 401 | wrong admin password |
+| `too_many_attempts` | 429 | too many wrong passwords; `Retry-After` says when to try again |
 | `csrf_failed`, `forbidden` | 403 | missing or wrong `X-CSRF-Token`; not allowed (non-loopback caller, cross-origin state change, unexpected `Host`, a desk session) |
 | `not_found` | 404 | unknown desk or client |
 | `already_exists` | 409 | desk id, user or base port taken |

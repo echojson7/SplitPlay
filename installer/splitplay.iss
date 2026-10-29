@@ -157,6 +157,8 @@ en.UninstallOptions=Uninstall SplitPlay
 ru.UninstallOptions=Удаление SplitPlay
 en.DeleteDeskAccounts=Also delete the desk accounts SplitPlay created
 ru.DeleteDeskAccounts=Удалить и учётные записи столов, созданные SplitPlay
+en.CleanupFailed=Some desk settings could not be undone (code %1). Their records are kept in %2: install SplitPlay again and uninstall it to retry.
+ru.CleanupFailed=Часть настроек столов не удалось отменить (код %1). Их записи сохранены в %2: установите SplitPlay снова и удалите, чтобы повторить.
 en.StatusAcl=Securing the data folder...
 ru.StatusAcl=Настройка прав на папку данных...
 en.StatusFirewall=Adding firewall rules...
@@ -269,6 +271,7 @@ var
   ViGEmBusRebootRequired: Boolean;
   UninstallRebootRequired: Boolean;
   DeleteDeskAccounts: Boolean;
+  CleanupFailed: Boolean;
 
 { Runs a program hidden and waits; returns its exit code, or -1 if it could not start. }
 function RunHidden(const FileName, Params: String): Integer;
@@ -770,6 +773,27 @@ begin
   end;
 end;
 
+{ Deletes the data folder except desks\ (the per-desk records a later cleanup needs). }
+procedure PurgeDataExceptDesks;
+var
+  F: TFindRec;
+begin
+  if FindFirst(DataDir + '\*', F) then
+  try
+    repeat
+      if (F.Name <> '.') and (F.Name <> '..') and (CompareText(F.Name, 'desks') <> 0) then
+      begin
+        if (F.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+          DelTree(DataDir + '\' + F.Name, True, True, True)
+        else
+          DeleteFile(DataDir + '\' + F.Name);
+      end;
+    until not FindNext(F);
+  finally
+    FindClose(F);
+  end;
+end;
+
 { The uninstall options: one check box, off by default. False when the owner cancels. }
 function AskUninstallOptions: Boolean;
 var
@@ -861,7 +885,15 @@ begin
     Params := 'cleanup';
     if DeleteDeskAccounts then
       Params := Params + ' --delete-accounts';
-    RunHiddenWithTimeout(ExpandConstant('{app}\service\SplitPlay.Service.exe'), Params, 180, 'SplitPlay.Service');
+    Code := RunHiddenWithTimeout(ExpandConstant('{app}\service\SplitPlay.Service.exe'), Params, 180, 'SplitPlay.Service');
+    if Code <> 0 then
+    begin
+      { The desk records (logon-hidden.json, the Steam state) are what a later cleanup needs: they are never purged now. }
+      CleanupFailed := True;
+      Log(Format('Desk cleanup failed or timed out (code %d); keeping %s\desks', [Code, DataDir]));
+      if not UninstallSilent then
+        MsgBox(FmtMessage(CustomMessage('CleanupFailed'), [IntToStr(Code), DataDir + '\desks']), mbError, MB_OK);
+    end;
     { Restore the exact Remote Desktop settings recorded by "host prepare" (TermService's ServiceDll included). }
     Code := RunHidden(ExpandConstant('{app}\service\splitplay.exe'), 'host revert');
     if Code = ExitRebootRequired then
@@ -880,7 +912,12 @@ begin
       Purge := ParamIsSet('PurgeData');
       if not Purge and not UninstallSilent then
         Purge := MsgBox(FmtMessage(CustomMessage('KeepDataQuestion'), [DataDir]), mbConfirmation, MB_YESNO) = IDNO;
-      if Purge then
+      if Purge and CleanupFailed then
+      begin
+        Log('Deleting ' + DataDir + ' except desks (the desk cleanup failed)');
+        PurgeDataExceptDesks;
+      end
+      else if Purge then
       begin
         Log('Deleting ' + DataDir);
         DelTree(DataDir, True, True, True);

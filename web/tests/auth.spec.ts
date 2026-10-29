@@ -4,6 +4,7 @@ import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App.vue'
 import { api } from '../src/api/client'
+import { resetTraySignIn } from '../src/host'
 import { createAppRouter } from '../src/router'
 import { store } from '../src/store'
 import { MockBackend, mockFetch } from '../mock/backend'
@@ -20,6 +21,25 @@ describe('sign-in', () => {
     store.stopLive()
     store.state.session = null
     vi.unstubAllGlobals()
+    resetTraySignIn()
+  })
+
+  it('asks the tray to sign in when its page is not signed in, at most every 10 s', async () => {
+    vi.stubGlobal('fetch', mockFetch(new MockBackend({ stepMs: 10, trusted: false })))
+    vi.stubGlobal('WebSocket', undefined)
+    const postMessage = vi.fn()
+    vi.stubGlobal('chrome', { webview: { postMessage } })
+    const router = createAppRouter()
+    const w = mount(App, { global: { plugins: [router] }, attachTo: document.body })
+    await router.push('/settings')
+    await settle()
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(postMessage).toHaveBeenCalledWith('auth')
+    const calls = postMessage.mock.calls.length
+    await router.push('/diagnostics/logs')
+    await settle()
+    expect(postMessage.mock.calls.length).toBe(calls)
+    w.unmount()
   })
 
   it('sends a browser without a password to the tray', async () => {

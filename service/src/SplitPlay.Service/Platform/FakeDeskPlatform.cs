@@ -382,6 +382,13 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         return [.. _sessions.Values.OrderBy(s => s.Id)];
     }
 
+    /// <summary>When set, <see cref="SessionUser"/> fails (a WTS query that does not work).</summary>
+    public bool SessionQueryFails { get; set; }
+
+    public string? SessionUser(int sessionId) =>
+        SessionQueryFails ? throw new System.ComponentModel.Win32Exception("simulated WTS failure")
+        : _sessions.TryGetValue(sessionId, out var s) ? s.User : null;
+
     public void LogoffSession(int sessionId)
     {
         _sessions.TryRemove(sessionId, out _);

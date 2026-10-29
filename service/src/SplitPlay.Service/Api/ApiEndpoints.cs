@@ -68,16 +68,15 @@ public static partial class ApiEndpoints
 
         // Desk users are other people: a process in a desk session gets nothing but /health, token or not.
         var isHealth = IsRoute(context, "GET", "/health");
-        if (!isHealth && PeerInDeskSession(context))
+        var auth = context.RequestServices.GetRequiredService<AuthService>();
+        if (!isHealth && PeerProblem(context, auth) is { } peerProblem)
         {
-            await WriteErrorAsync(context, StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden,
-                "requests from a desk session are not accepted").ConfigureAwait(false);
+            await WriteErrorAsync(context, StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden, peerProblem).ConfigureAwait(false);
             return;
         }
 
         // Everything but health and the sign-in endpoints needs the admin: a session (password login, or the tray's
         // from the admin pipe) or a bearer token from the admin pipe (CLI).
-        var auth = context.RequestServices.GetRequiredService<AuthService>();
         if (!isHealth && !IsAuthRoute(context) && !auth.IsAdmin(context))
         {
             await WriteErrorAsync(context, StatusCodes.Status401Unauthorized, ApiErrorCodes.Unauthorized,
@@ -129,16 +128,57 @@ public static partial class ApiEndpoints
         IsRoute(context, "GET", "/auth/session") || IsRoute(context, "POST", "/auth/login")
         || IsRoute(context, "POST", "/auth/logout") || IsRoute(context, "POST", "/auth/password");
 
-    /// <summary>True when the TCP peer is a process in a desk session (Auth:PeerCheck).</summary>
-    private static bool PeerInDeskSession(HttpContext context)
+    /// <summary>
+    /// Why the TCP peer is refused (Auth:PeerCheck), or null: a process in a desk session; or a loopback peer whose
+    /// process cannot be found, unless the request carries a credential only the admin pipe hands out (the tray, the CLI).
+    /// </summary>
+    private static string? PeerProblem(HttpContext context, AuthService auth)
     {
         if (!context.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuthOptions>>().Value.PeerCheck)
         {
-            return false;
+            return null;
         }
 
-        return context.RequestServices.GetRequiredService<IPeerInspector>().PeerSession(context) is int session
-               && context.RequestServices.GetRequiredService<DeskSupervisor>().IsDeskSession(session);
+        var peer = context.RequestServices.GetRequiredService<IPeerInspector>().PeerSession(context);
+        return peer.Kind switch
+        {
+            PeerLookupKind.Found when context.RequestServices.GetRequiredService<DeskSupervisor>().IsDeskSession(peer.Session) =>
+                "requests from a desk session are not accepted",
+            PeerLookupKind.Failed when !auth.HasPipeCredential(context) => "the calling process could not be identified",
+            _ => null,
+        };
+    }
+
+    /// <summary>The key login attempts are counted under: the caller's session when known, else its address.</summary>
+    private static string PeerKey(HttpContext context)
+    {
+        var peer = context.RequestServices.GetRequiredService<IPeerInspector>().PeerSession(context);
+        return peer.Kind == PeerLookupKind.Found ? $"session:{peer.Session}" : $"ip:{context.Connection.RemoteIpAddress}";
+    }
+
+    /// <summary>Checks a password through <see cref="LoginThrottle"/>: 429 while locked out, counts the outcome.</summary>
+    private static async Task<bool> VerifyThrottledAsync(HttpContext context, AuthService auth, LoginThrottle throttle, string? password)
+    {
+        var key = PeerKey(context);
+        if (throttle.RetryAfter(key) is { } wait)
+        {
+            var seconds = (int)Math.Ceiling(wait.TotalSeconds);
+            context.Response.Headers.RetryAfter = seconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            throw new ApiException(StatusCodes.Status429TooManyRequests, ApiErrorCodes.TooManyAttempts,
+                $"too many wrong passwords; try again in {seconds} s");
+        }
+
+        var ok = await throttle.VerifyAsync(() => auth.Verify(password), context.RequestAborted).ConfigureAwait(false);
+        if (ok)
+        {
+            throttle.Succeeded(key);
+        }
+        else
+        {
+            throttle.Failed(key);
+        }
+
+        return ok;
     }
 
     /// <summary>
@@ -204,7 +244,7 @@ public static partial class ApiEndpoints
             return Results.Json(new AuthSessionDto(!auth.HasPassword, auth.IsAdmin(context), session?.CsrfToken), Ctx.AuthSessionDto);
         });
 
-        api.MapPost("/auth/login", async (HttpContext context, AuthService auth) =>
+        api.MapPost("/auth/login", async (HttpContext context, AuthService auth, LoginThrottle throttle) =>
         {
             var body = await ReadBodyAsync(context.Request, Ctx.LoginRequest).ConfigureAwait(false);
             if (!auth.HasPassword)
@@ -212,7 +252,7 @@ public static partial class ApiEndpoints
                 throw ApiException.Conflict(ApiErrorCodes.InvalidState, "no admin password is set yet; use POST /auth/password");
             }
 
-            if (!auth.Verify(body.Password))
+            if (!await VerifyThrottledAsync(context, auth, throttle, body.Password).ConfigureAwait(false))
             {
                 throw new ApiException(StatusCodes.Status401Unauthorized, ApiErrorCodes.InvalidPassword, "wrong password");
             }
@@ -226,7 +266,7 @@ public static partial class ApiEndpoints
             return Results.NoContent();
         });
 
-        api.MapPost("/auth/password", async (HttpContext context, AuthService auth) =>
+        api.MapPost("/auth/password", async (HttpContext context, AuthService auth, LoginThrottle throttle) =>
         {
             var body = await ReadBodyAsync(context.Request, Ctx.PasswordRequest).ConfigureAwait(false);
             if (body.NewPassword is null || body.NewPassword.Length < AuthService.MinPasswordLength)
@@ -241,7 +281,7 @@ public static partial class ApiEndpoints
                     "the first admin password can only be set from the tray, the CLI or an elevated prompt");
             }
 
-            if (auth.HasPassword && !auth.Verify(body.CurrentPassword))
+            if (auth.HasPassword && !await VerifyThrottledAsync(context, auth, throttle, body.CurrentPassword).ConfigureAwait(false))
             {
                 throw new ApiException(StatusCodes.Status401Unauthorized, ApiErrorCodes.InvalidPassword, "currentPassword is wrong");
             }

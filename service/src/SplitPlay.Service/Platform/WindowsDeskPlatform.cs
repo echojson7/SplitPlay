@@ -616,6 +616,15 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
             })
             .ToList();
 
+    public string? SessionUser(int sessionId)
+    {
+        var user = Wts.QueryString(sessionId, Wts.WTSUserName) ?? throw new Win32Exception($"WTSQuerySessionInformation({sessionId}) failed");
+        var domain = Wts.QueryString(sessionId, Wts.WTSDomainName);
+        return user.Length > 0 && (string.IsNullOrEmpty(domain) || string.Equals(domain, Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+            ? user
+            : null;
+    }
+
     public void LogoffSession(int sessionId)
     {
         if (!Wts.Logoff(sessionId))

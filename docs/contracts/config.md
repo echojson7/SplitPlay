@@ -76,7 +76,10 @@ Rules:
   `"<InstallPath>\steam.exe" -master_ipc_name_override SplitPlay_<id> -gamepadui` (an owner's own "Steam" entry
   without the flag is kept). Changing the option requires a stopped desk.
 - `workerSettings`: extra Sunshine `name=value` settings passed to the worker after the service defaults (ipc.md);
-  names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters; `port` is reserved.
+  names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters; `port` is reserved. Settings that run commands or
+  name files are refused, because the worker runs as SYSTEM (`global_prep_cmd`, any `*cmd`, `file_apps`, `file_state`,
+  `credentials_file`, `pkey`, `cert`, `log_path`, any `*_file`, `*_path`, `*_dir`, `origin_web_ui_allowed`, …): the API answers 400,
+  a `config.json` with them is invalid like any other, and the worker launch drops them in any case.
 - `basePort` unique; if omitted the service picks `basePortStart + stride * k` with the lowest free `k ≥ 0`. A desk occupies `basePort-5 … basePort+21`.
 - `gpu`: `"auto"` or an adapter LUID string `"0x…"`.
 - `profile` may also carry `gpuLuid` and `cpuSet` (array of logical CPU indices), passed to the worker as in ipc.md.

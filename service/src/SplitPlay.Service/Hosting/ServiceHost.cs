@@ -110,6 +110,7 @@ public static class ServiceHost
         builder.Services.AddHostedService(sp => sp.GetRequiredService<SleepGuard>());
         builder.Services.AddSingleton<EventHub>();
         builder.Services.AddSingleton<AuthService>();
+        builder.Services.AddSingleton<LoginThrottle>();
         builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.Section));
         builder.Services.AddSingleton<FakeAdminCallerCheck>();
         builder.Services.AddSingleton<IAdminCallerCheck>(sp =>

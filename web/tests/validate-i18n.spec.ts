@@ -27,7 +27,7 @@ describe('validateDeskConfig', () => {
         name: ' ',
         user: 'bad/user',
         basePort: 80,
-        profile: { fps: 501, width: 100, height: 100, bitrateKbps: 10, codec: 'h264', fecPercent: 150, minFps: 600 },
+        profile: { fps: 501, width: 100, height: 100, bitrateKbps: 10, codec: 'h264', fecPercent: 150, minFps: 600, pacingMbps: 0 },
       },
       [],
     )
@@ -41,6 +41,7 @@ describe('validateDeskConfig', () => {
       bitrate: 'form.err.bitrate',
       fecPercent: 'form.err.fec',
       minFps: 'form.err.minFps',
+      pacingMbps: 'form.err.pacing',
     })
   })
 

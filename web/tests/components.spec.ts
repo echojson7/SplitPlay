@@ -121,6 +121,19 @@ describe('DeskSettings', () => {
     expect(cfg.profile.bitrateKbps).toBe(20000)
   })
 
+  it('changes the send rate on a running desk and clears it back to the default', async () => {
+    const w = mount(DeskSettings, { props: { desk: { ...desk, profile: { ...desk.profile, pacingMbps: 400 } }, running: true } })
+    const input = w.find('input[name="pacingMbps"]')
+    expect((input.element as HTMLInputElement).value).toBe('400')
+    expect(input.attributes('disabled')).toBeUndefined()
+    await input.setValue('300')
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![0]![0] as DeskConfig).profile.pacingMbps).toBe(300)
+    await input.setValue('')
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![1]![0] as DeskConfig).profile).not.toHaveProperty('pacingMbps')
+  })
+
   it('shows errors and does not save an invalid config', async () => {
     const w = mount(DeskSettings, { props: { desk } })
     await w.find('input[name="bitrate"]').setValue('0')

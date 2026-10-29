@@ -1,0 +1,580 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 13:01:00 +0000
+Subject: [PATCH] splitplay: apply the desk profile's stream settings (welcome,
+ set_profile)
+
+The Profile object (docs/contracts/ipc.md) carries fec_percent, min_fps,
+dpb_frames and pacing_mbps, but the worker only logged the initial
+profile and answered set_profile with "unsupported". Upstream has a
+config option for two of them (fec_percentage, minimum_fps_target), reads
+both once per stream, and hardcodes the other two: send pacing is 80 % of
+1 Gbit/s in videoBroadcastThread (stream.cpp, ratecontrol_packets_in_1ms)
+and the NVENC DPB is 5 frames for H.264/HEVC and 8 for AV1
+(nvenc_base.cpp, configure_reference_frames).
+
+New module src/splitplay/profile.{h,cpp}: one atomic per setting, unset
+meaning upstream's behaviour, no JSON (the NVENC object libraries include
+it). The streaming code reads it where upstream reads its value:
+
+| Field       | Where                                   | Takes effect |
+|-------------|-----------------------------------------|--------------|
+| fec_percent | videoBroadcastThread, every frame       | next frame   |
+|             | RTSP launch: bitrate allowance for FEC  | next stream  |
+| min_fps     | encode_run, every frame (max_frametime) | next frame   |
+| pacing_mbps | videoBroadcastThread, every frame       | next frame   |
+| dpb_frames  | NVENC configure_reference_frames        | next stream  |
+
+- min_fps is capped at the stream's frame rate; unset keeps upstream's
+  rule (minimum_fps_target, otherwise half the frame rate, so an idle
+  500 Hz desk re-encodes 250 frames per second). A change is logged by
+  the encode loop.
+- pacing_mbps: at least one packet per millisecond.
+- dpb_frames applies only when the client leaves the reference frame
+  count to the host: Moonlight sends maxNumReferenceFrames=0 for decoders
+  that support reference frame invalidation and 1 for the others, so the
+  others keep a single reference. Capped at 16 (H.264, HEVC) and 8 (AV1).
+  This reuses upstream's RFI path unchanged: with a larger DPB a lost
+  range of up to dpb_frames-1 frames is answered with
+  nvEncInvalidateRefFrames instead of an IDR frame (16 frames = 133 ms at
+  120 fps, 32 ms at 500 fps; 5 frames were 10 ms at 500 fps). Each
+  reference costs one reconstructed surface of VRAM. If NVENC refuses to
+  initialise with the profile's DPB, create_encoder logs a warning and
+  retries once with the codec default, so the stream never fails over
+  it. The encoder banner now shows "dpb=N".
+
+Control client: welcome and set_profile apply the four fields, all or
+nothing. Absent keeps the current value, null restores the default; a
+value of the wrong type or out of range (fec 0-255, min_fps 1-1000,
+dpb 1-16, pacing 1-100000) rejects set_profile with "bad_request"
+(welcome: a warning, nothing applied). set_profile answers ok with
+{"applied":[...],"next_stream":["dpb_frames"],"not_applied":[...]};
+fps, size, bitrate and codec stay Moonlight's choice, and gpu_priority,
+gpu_luid and cpu_set are not applied yet.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index e6769d7700503bc43ef227f54fce2fa26d06ab45..89758ee7546078f115551f33028a0924be96b530 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -179,6 +179,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.h"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/profile.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/profile.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/scheduling.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/scheduling.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/self_test.cpp"
+diff --git a/src/nvenc/nvenc_base.cpp b/src/nvenc/nvenc_base.cpp
+index f6f5b6fe34dae18500ea94f26ee0df3e1decfc9d..03a2a3a6a82644956b6e7448c029bb0a0e1a0a34 100644
+--- a/src/nvenc/nvenc_base.cpp
++++ b/src/nvenc/nvenc_base.cpp
+@@ -19,12 +19,18 @@
+ #include "nvenc_utils.h"
+ #include "src/config.h"
+ #include "src/logging.h"
++#include "src/splitplay/profile.h"
+ #include "src/utility.h"
+ 
+ namespace {
+ 
+   using namespace NVENC_NAMESPACE;
+ 
++  /// SplitPlay: the encoder being created uses the desk profile's dpb_frames instead of the codec default.
++  thread_local bool splitplay_profile_dpb_used = false;
++  /// SplitPlay: set while create_encoder() retries with the codec default after the profile's DPB was refused.
++  thread_local bool splitplay_default_dpb_only = false;
++
+   /**
+    * @brief Determine whether an NVENC buffer format stores 10-bit samples.
+    *
+@@ -287,10 +293,16 @@ namespace NVENC_NAMESPACE {
+     std::uint32_t &ref_frames_option,
+     NV_ENC_NUM_REF_FRAMES &list0_option,
+     std::uint32_t default_count,
++    std::uint32_t max_count,
+     int requested_count,
+     const GUID &encode_guid
+   ) {
+-    ref_frames_option = requested_count > 0 ? static_cast<std::uint32_t>(requested_count) : default_count;
++    // SplitPlay: when the client leaves the count to the host (Moonlight sends 0 for decoders that support reference
++    // frame invalidation, 1 for the others), the desk profile's dpb_frames replaces the default. A larger DPB lets
++    // the encoder answer the loss of more frames with RFI instead of an IDR frame.
++    const std::uint32_t host_count = splitplay_default_dpb_only ? default_count : splitplay::profile::dpb_frames(default_count, max_count);
++    splitplay_profile_dpb_used = requested_count <= 0 && host_count != default_count;
++    ref_frames_option = requested_count > 0 ? static_cast<std::uint32_t>(requested_count) : host_count;
+     if (ref_frames_option > 0U && !get_encoder_cap(encode_guid, NV_ENC_CAPS_SUPPORT_MULTIPLE_REF_FRAMES)) {
+       ref_frames_option = 1;
+       encoder_params.rfi = false;
+@@ -371,7 +383,7 @@ namespace NVENC_NAMESPACE {
+     format_config.entropyCodingMode = config.h264_cavlc || !get_encoder_cap(encode_guid, NV_ENC_CAPS_SUPPORT_CABAC) ?
+                                         NV_ENC_H264_ENTROPY_CODING_MODE_CAVLC :
+                                         NV_ENC_H264_ENTROPY_CODING_MODE_CABAC;
+-    configure_reference_frames(format_config.maxNumRefFrames, format_config.numRefL0, 5, client_config.numRefFrames, encode_guid);
++    configure_reference_frames(format_config.maxNumRefFrames, format_config.numRefL0, 5, 16, client_config.numRefFrames, encode_guid);
+ 
+     if (config.enable_min_qp) {
+       enc_config.rcParams.enableMinQP = 1;
+@@ -407,7 +419,7 @@ namespace NVENC_NAMESPACE {
+       format_config.pixelBitDepthMinus8 = 2;
+ #endif
+     }
+-    configure_reference_frames(format_config.maxNumRefFramesInDPB, format_config.numRefL0, 5, client_config.numRefFrames, encode_guid);
++    configure_reference_frames(format_config.maxNumRefFramesInDPB, format_config.numRefL0, 5, 16, client_config.numRefFrames, encode_guid);
+ 
+     if (config.enable_min_qp) {
+       enc_config.rcParams.enableMinQP = 1;
+@@ -448,7 +460,7 @@ namespace NVENC_NAMESPACE {
+     format_config.matrixCoefficients = colorspace.matrix;
+     format_config.colorRange = colorspace.full_range;
+     format_config.chromaSamplePosition = buffer_is_yuv444(buffer_format) ? 0 : 1;
+-    configure_reference_frames(format_config.maxNumRefFramesInDPB, format_config.numFwdRefs, 8, client_config.numRefFrames, encode_guid);
++    configure_reference_frames(format_config.maxNumRefFramesInDPB, format_config.numFwdRefs, 8, 8, client_config.numRefFrames, encode_guid);
+ 
+     if (config.enable_min_qp) {
+       enc_config.rcParams.enableMinQP = 1;
+@@ -535,6 +547,7 @@ namespace NVENC_NAMESPACE {
+     if (encoder_params.rfi) {
+       extra += " rfi";
+     }
++    extra += std::format(" dpb={}", encoder_params.ref_frames_in_dpb);  // SplitPlay
+     if (init_params.enableWeightedPrediction) {
+       extra += " weighted-prediction";
+     }
+@@ -664,6 +677,17 @@ namespace NVENC_NAMESPACE {
+     configure_codec(enc_config, config, client_config, colorspace, buffer_format, init_params.encodeGUID);
+     init_params.encodeConfig = &enc_config;
+     if (!initialize_encoder_resources(init_params)) {
++      if (splitplay_profile_dpb_used) {
++        // SplitPlay: never lose the stream over the desk profile's DPB size; retry once with the codec default.
++        BOOST_LOG(warning) << "SplitPlay: NvEnc refused a DPB of " << encoder_params.ref_frames_in_dpb << " frames, retrying with the default";
++        fail_guard.disable();
++        destroy_encoder();
++        splitplay_default_dpb_only = true;
++        auto reset = util::fail_guard([] {
++          splitplay_default_dpb_only = false;
++        });
++        return create_encoder(config, client_config, sunshine_colorspace, sunshine_buffer_format);
++      }
+       return false;
+     }
+ 
+diff --git a/src/nvenc/nvenc_base.h b/src/nvenc/nvenc_base.h
+index 8f9c8b01be34bac94c73e3d15253bd32e684c779..d7338bb19d5c0f7498f2c76c5fa5eb099610667e 100644
+--- a/src/nvenc/nvenc_base.h
++++ b/src/nvenc/nvenc_base.h
+@@ -195,6 +195,7 @@ namespace NVENC_NAMESPACE {
+      * @param ref_frames_option Codec-specific reference-frame option.
+      * @param list0_option Codec-specific list-zero option.
+      * @param default_count Default reference-frame count.
++     * @param max_count Largest reference-frame count of the codec (SplitPlay: caps the desk profile's dpb_frames).
+      * @param requested_count Client-requested reference-frame count.
+      * @param encode_guid Selected codec GUID.
+      */
+@@ -202,6 +203,7 @@ namespace NVENC_NAMESPACE {
+       std::uint32_t &ref_frames_option,
+       NV_ENC_NUM_REF_FRAMES &list0_option,
+       std::uint32_t default_count,
++      std::uint32_t max_count,
+       int requested_count,
+       const GUID &encode_guid
+     );
+diff --git a/src/rtsp.cpp b/src/rtsp.cpp
+index 0d775fb7652369dfd00a7d8891cc84e1afe2311f..f413cbe372ac4f80d3c6502e63b5089efa7834d3 100644
+--- a/src/rtsp.cpp
++++ b/src/rtsp.cpp
+@@ -28,6 +28,7 @@ extern "C" {
+ #include "logging.h"
+ #include "network.h"
+ #include "rtsp.h"
++#include "splitplay/profile.h"
+ #include "stream.h"
+ #include "sync.h"
+ #include "video.h"
+@@ -1257,8 +1258,9 @@ namespace rtsp_stream {
+ 
+       // If the FEC percentage isn't too high, adjust the configured bitrate to ensure video
+       // traffic doesn't exceed the user's selected bitrate when the FEC shards are included.
+-      if (config::stream.fec_percentage <= 80) {
+-        configuredBitrateKbps /= 100.f / (100 - config::stream.fec_percentage);
++      // SplitPlay: the desk profile's fec_percent when set
++      if (const auto fec_percentage = splitplay::profile::fec_percentage(); fec_percentage <= 80) {
++        configuredBitrateKbps /= 100.f / (100 - fec_percentage);
+       }
+ 
+       // Adjust the bitrate to account for audio traffic bandwidth usage (capped at 20% reduction).
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index 21e55e6a0950696f0221935dd8bf1cc421952359..7a71a91e21e077c3f39865a82cf269721ba5f7f1 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -8,6 +8,7 @@
+  */
+ // SPDX-License-Identifier: GPL-3.0-only
+ // standard includes
++#include <algorithm>
+ #include <atomic>
+ #include <chrono>
+ #include <condition_variable>
+@@ -30,6 +31,7 @@
+ #include "control_client.h"
+ #include "live_stats.h"
+ #include "options.h"
++#include "profile.h"
+ #include "src/config.h"
+ #include "src/entry_handler.h"
+ #include "src/logging.h"
+@@ -77,6 +79,85 @@ namespace splitplay::control {
+       return session;
+     }
+ 
++    /**
++     * @brief A Profile field (docs/contracts/ipc.md) the worker applies.
++     */
++    struct profile_field_t {
++      const char *name;  ///< Field name on the pipe.
++      int min;  ///< Smallest accepted value.
++      int max;  ///< Largest accepted value.
++      void (*set)(std::optional<int>);  ///< Setter in splitplay::profile; std::nullopt restores the default.
++      bool live;  ///< Applies to running streams (otherwise from the next stream on).
++    };
++
++    constexpr profile_field_t profile_fields[] = {
++      {"fec_percent", 0, 255, &splitplay::profile::set_fec_percent, true},
++      {"min_fps", 1, 1000, &splitplay::profile::set_min_fps, true},
++      {"pacing_mbps", 1, 100000, &splitplay::profile::set_pacing_mbps, true},
++      {"dpb_frames", 1, 16, &splitplay::profile::set_dpb_frames, false},
++    };
++
++    /**
++     * @brief Apply the stream settings of a Profile object, all or nothing.
++     *
++     * A field that is absent keeps its current value, `null` restores the built-in default. Fields the worker does
++     * not apply (the client picks mode, bitrate and codec in Moonlight) are listed in `not_applied`.
++     *
++     * @param profile The Profile object.
++     * @param origin `welcome` or `set_profile`, for the log.
++     * @param error Set when the profile is invalid; nothing is applied then.
++     * @return `{"applied":[...],"next_stream":[...],"not_applied":[...]}`, or nullopt when invalid.
++     */
++    std::optional<json> apply_profile(const json &profile, std::string_view origin, std::string &error) {
++      if (!profile.is_object()) {
++        error = "profile must be an object";
++        return std::nullopt;
++      }
++      for (const auto &field : profile_fields) {
++        const auto it = profile.find(field.name);
++        if (it == profile.end() || it->is_null()) {
++          continue;
++        }
++        if (!it->is_number_integer() || it->get<std::int64_t>() < field.min || it->get<std::int64_t>() > field.max) {
++          error = std::string {field.name} + " must be an integer from " + std::to_string(field.min) + " to " + std::to_string(field.max);
++          return std::nullopt;
++        }
++      }
++
++      json applied = json::array();
++      json next_stream = json::array();
++      json not_applied = json::array();
++      std::string summary;
++      for (const auto &field : profile_fields) {
++        const auto it = profile.find(field.name);
++        if (it == profile.end()) {
++          continue;
++        }
++        const std::optional<int> value = it->is_null() ? std::nullopt : std::optional<int> {it->get<int>()};
++        field.set(value);
++        (field.live ? applied : next_stream).push_back(field.name);
++        summary += ' ';
++        summary += field.name;
++        summary += '=';
++        summary += value ? std::to_string(*value) : std::string {"default"};
++        if (!field.live) {
++          summary += " (next stream)";
++        }
++      }
++      for (const auto &[key, value] : profile.items()) {
++        const bool known = std::any_of(std::begin(profile_fields), std::end(profile_fields), [&key](const profile_field_t &field) {
++          return key == field.name;
++        });
++        if (!known) {
++          not_applied.push_back(key);
++        }
++      }
++
++      BOOST_LOG(info) << "SplitPlay: profile from "sv << origin << ':' << (summary.empty() ? std::string {" no stream settings"} : summary)
++                      << (not_applied.empty() ? std::string {} : ", not applied by the worker: " + not_applied.dump());
++      return json {{"applied", std::move(applied)}, {"next_stream", std::move(next_stream)}, {"not_applied", std::move(not_applied)}};
++    }
++
+     /**
+      * @brief True once something accepts TCP connections on 127.0.0.1:port.
+      */
+@@ -399,9 +480,14 @@ namespace splitplay::control {
+             reply_ok(id);
+             request_exit(0);
+           } else if (type == "set_profile") {
+-            // Live profile changes (ARCHITECTURE.md section 9) are applied from Stage 3 on.
+-            BOOST_LOG(info) << "SplitPlay: set_profile is not supported yet: "sv << msg.value("profile", json::object()).dump();
+-            reply_error(id, "unsupported", "live profile changes are not implemented in this worker version");
++            // Live profile changes (ARCHITECTURE.md section 9): the stream settings, see src/splitplay/profile.h.
++            std::string error;
++            if (auto data = apply_profile(msg.value("profile", json::object()), "set_profile", error)) {
++              reply_ok(id, std::move(*data));
++            } else {
++              BOOST_LOG(warning) << "SplitPlay: set_profile rejected: "sv << error;
++              reply_error(id, "bad_request", error);
++            }
+           } else if (type == "pair") {
+             const auto pin = msg.value("pin", std::string {});
+             const auto name = msg.value("name", std::string {});
+@@ -449,6 +535,10 @@ namespace splitplay::control {
+           welcomed = true;
+           profile = msg.value("profile", json::object());
+           BOOST_LOG(info) << "SplitPlay: welcome received, initial profile "sv << profile.dump();
++          std::string error;
++          if (!apply_profile(profile, "welcome", error)) {
++            BOOST_LOG(warning) << "SplitPlay: initial profile not applied: "sv << error;
++          }
+         }
+         state_cv.notify_all();
+       }
+@@ -465,7 +555,7 @@ namespace splitplay::control {
+       bool welcomed = false;
+       bool failed = false;
+       bool handshake_done = false;
+-      json profile;  ///< Initial profile from welcome; applied from Stage 3 on.
++      json profile;  ///< Initial profile from welcome (its stream settings are applied, see apply_profile).
+ 
+       std::atomic_bool stopping {false};
+       std::atomic_bool exit_requested {false};
+diff --git a/src/splitplay/profile.cpp b/src/splitplay/profile.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..bb4bf4669060226815676421204c9532cd10dfc3
+--- /dev/null
++++ b/src/splitplay/profile.cpp
+@@ -0,0 +1,70 @@
++/**
++ * @file src/splitplay/profile.cpp
++ * @brief The stream settings of the desk profile the worker applies (see profile.h).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++// standard includes
++#include <algorithm>
++#include <atomic>
++
++// local includes
++#include "profile.h"
++#include "src/config.h"
++
++namespace splitplay::profile {
++  namespace {
++    constexpr int unset = -1;
++
++    std::atomic_int fec_percent {unset};
++    std::atomic_int min_fps {unset};
++    std::atomic_int dpb {unset};
++    std::atomic_int pacing_mbps {unset};
++
++    void store(std::atomic_int &target, std::optional<int> value) {
++      target.store(value ? *value : unset, std::memory_order_relaxed);
++    }
++  }  // namespace
++
++  void set_fec_percent(std::optional<int> value) {
++    store(fec_percent, value);
++  }
++
++  void set_min_fps(std::optional<int> value) {
++    store(min_fps, value);
++  }
++
++  void set_dpb_frames(std::optional<int> value) {
++    store(dpb, value);
++  }
++
++  void set_pacing_mbps(std::optional<int> value) {
++    store(pacing_mbps, value);
++  }
++
++  int fec_percentage() {
++    const int value = fec_percent.load(std::memory_order_relaxed);
++    return value == unset ? config::stream.fec_percentage : value;
++  }
++
++  std::uint64_t pacing_bits_per_second() {
++    const int value = pacing_mbps.load(std::memory_order_relaxed);
++    return static_cast<std::uint64_t>(value == unset ? default_pacing_mbps : value) * 1'000'000ULL;
++  }
++
++  double minimum_fps_target(int framerate) {
++    const int value = min_fps.load(std::memory_order_relaxed);
++    if (value != unset) {
++      return static_cast<double>(std::clamp(value, 1, std::max(framerate, 1)));
++    }
++    // Upstream (video.cpp encode_run): the configured target, otherwise half the stream's frame rate.
++    return (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : (framerate / 2);
++  }
++
++  std::uint32_t dpb_frames(std::uint32_t codec_default, std::uint32_t codec_max) {
++    const int value = dpb.load(std::memory_order_relaxed);
++    if (value == unset) {
++      return codec_default;
++    }
++    return std::clamp(static_cast<std::uint32_t>(std::max(value, 1)), 1U, codec_max);
++  }
++}  // namespace splitplay::profile
+diff --git a/src/splitplay/profile.h b/src/splitplay/profile.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..aca365184734b6354c5617c8af765b7730939aef
+--- /dev/null
++++ b/src/splitplay/profile.h
+@@ -0,0 +1,75 @@
++/**
++ * @file src/splitplay/profile.h
++ * @brief The stream settings of the desk profile (docs/contracts/ipc.md, "Profile object") the worker applies.
++ *
++ * The control client sets them from `welcome` and `set_profile`; the streaming code reads them where upstream reads
++ * its fixed values or `sunshine.conf` settings. Every value is an atomic of its own, read once per frame or once per
++ * encoder, so a change needs no lock and no restart. Unset means upstream's behaviour.
++ *
++ * | Field         | Read by                                      | Takes effect                  |
++ * |---------------|----------------------------------------------|-------------------------------|
++ * | `fec_percent` | video send, every frame; RTSP launch         | next frame; bitrate allowance on the next stream |
++ * | `min_fps`     | encode loop, every frame                     | next frame                    |
++ * | `pacing_mbps` | video send, every frame                      | next frame                    |
++ * | `dpb_frames`  | NVENC encoder creation                       | next stream (or encoder reinit) |
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++#pragma once
++
++// standard includes
++#include <cstdint>
++#include <optional>
++
++namespace splitplay::profile {
++  /// Upstream's fixed send pacing: 80 % of 1 Gbit/s per stream.
++  constexpr int default_pacing_mbps = 800;
++
++  /**
++   * @brief Share of FEC parity shards, 0-255 %. std::nullopt: `fec_percentage` from sunshine.conf (default 20).
++   * @param value New value or std::nullopt.
++   */
++  void set_fec_percent(std::optional<int> value);
++
++  /**
++   * @brief Lowest frame rate the encoder keeps up when the desktop does not change, 1-1000.
++   * std::nullopt: `minimum_fps_target` from sunshine.conf, or half the stream's frame rate (upstream).
++   * @param value New value or std::nullopt.
++   */
++  void set_min_fps(std::optional<int> value);
++
++  /**
++   * @brief NVENC reference frames kept for reference frame invalidation, 1-16 (AV1 at most 8).
++   * std::nullopt: upstream's 5 (H.264, HEVC) and 8 (AV1).
++   * @param value New value or std::nullopt.
++   */
++  void set_dpb_frames(std::optional<int> value);
++
++  /**
++   * @brief Send pacing of one stream in Mbit/s, 1-100000. std::nullopt: default_pacing_mbps.
++   * @param value New value or std::nullopt.
++   */
++  void set_pacing_mbps(std::optional<int> value);
++
++  /**
++   * @return FEC percentage for the next frame.
++   */
++  int fec_percentage();
++
++  /**
++   * @return Send pacing in bit/s for the next frame.
++   */
++  std::uint64_t pacing_bits_per_second();
++
++  /**
++   * @param framerate The stream's frame rate.
++   * @return Minimum frame rate the encoder keeps up (the profile's min_fps is capped at `framerate`).
++   */
++  double minimum_fps_target(int framerate);
++
++  /**
++   * @param codec_default Upstream's DPB size for the codec.
++   * @param codec_max Largest DPB size of the codec.
++   * @return DPB size for an encoder the client leaves the reference frame count to.
++   */
++  std::uint32_t dpb_frames(std::uint32_t codec_default, std::uint32_t codec_max);
++}  // namespace splitplay::profile
+diff --git a/src/stream.cpp b/src/stream.cpp
+index 41c80d355754b82d8f4904d15809d0f2f5660b42..f61f97a87fe6691dc8aa16a2906f20ca74ec3b25 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -33,6 +33,7 @@ extern "C" {
+ #include "system_tray.h"
+ #include "thread_safe.h"
+ #include "splitplay/live_stats.h"
++#include "splitplay/profile.h"
+ #include "splitplay/scheduling.h"
+ #include "utility.h"
+ 
+@@ -1557,7 +1558,8 @@ namespace stream {
+         frame_header.frame_processing_latency = 0;
+       }
+ 
+-      auto fecPercentage = config::stream.fec_percentage;
++      // SplitPlay: the desk profile's fec_percent when set (applied live), otherwise fec_percentage
++      auto fecPercentage = splitplay::profile::fec_percentage();
+ 
+       // Insert space for packet headers
+       auto blocksize = session->config.packetsize + MAX_RTP_HEADER_SIZE;
+@@ -1619,8 +1621,10 @@ namespace stream {
+       }
+ 
+       try {
+-        // Use around 80% of 1Gbps          1Gbps            percent    ms     packet      byte
+-        size_t ratecontrol_packets_in_1ms = std::giga::num * 80 / 100 / 1000 / blocksize / 8;
++        // Upstream used around 80% of 1Gbps here (800 Mbit/s, fixed).
++        // SplitPlay: the desk profile's pacing_mbps when set (applied live), at least one packet per ms.
++        //                                                 bit/s                                    ms     packet      byte
++        size_t ratecontrol_packets_in_1ms = std::max<size_t>(1, splitplay::profile::pacing_bits_per_second() / 1000 / blocksize / 8);
+ 
+         // Send less than 64K in a single batch.
+         // On Windows, batches above 64K seem to bypass SO_SNDBUF regardless of its size,
+diff --git a/src/video.cpp b/src/video.cpp
+index d095c498350c338f685fc5947a8b4f0009c24d39..99f7909e0c817692a4e4842dc0013a43e00e71ff 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -32,6 +32,7 @@ extern "C" {
+ #include "logging.h"
+ #include "nvenc/nvenc_encoder.h"
+ #include "platform/common.h"
++#include "splitplay/profile.h"
+ #include "splitplay/scheduling.h"
+ #include "sync.h"
+ #include "video.h"
+@@ -2386,7 +2387,8 @@ namespace video {
+     });
+ 
+     // set max frame time based on client-requested target framerate.
+-    double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : (config.framerate / 2);
++    // SplitPlay: the desk profile's min_fps when set (re-read every frame below), otherwise upstream's rule.
++    double minimum_fps_target = splitplay::profile::minimum_fps_target(config.framerate);
+     std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
+     BOOST_LOG(info) << "Minimum FPS target set to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count() << "ms)"sv;
+ 
+@@ -2426,6 +2428,13 @@ namespace video {
+ 
+       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+ 
++      // SplitPlay: a set_profile with another min_fps applies from the next frame on
++      if (const double target = splitplay::profile::minimum_fps_target(config.framerate); target != minimum_fps_target) {
++        minimum_fps_target = target;
++        max_frametime = std::chrono::duration<double, std::milli> {1000.0 / minimum_fps_target};
++        BOOST_LOG(info) << "Minimum FPS target changed to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count() << "ms)"sv;
++      }
++
+       // Encode at a minimum FPS to avoid image quality issues with static content
+       if (!requested_idr_frame || images->peek()) {
+         if (auto img = images->pop(max_frametime)) {

@@ -1,0 +1,387 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 13:00:00 +0000
+Subject: [PATCH] splitplay: scheduler protection (no EcoQoS, MMCSS for the hot
+ threads)
+
+Several desks share one PC with the games they stream. A worker is a
+windowless process in a non-console RDP session, which Windows 11 treats
+as background work: it may get EcoQoS (efficiency cores, lower clocks)
+and its timer-resolution requests may be ignored. Its streaming threads
+run at priority 13-15 (HIGH class while streaming), which ties with a
+game's TIME_CRITICAL thread (15 in the normal class), so they share
+quanta round-robin with N games.
+
+New module src/splitplay/scheduling.{h,cpp}:
+
+- apply_process_policy(), called from main() right after logging starts:
+  SetProcessInformation(ProcessPowerThrottling) with ControlMask
+  EXECUTION_SPEED | IGNORE_TIMER_RESOLUTION and StateMask 0, i.e. never
+  throttle execution speed and always honour timer-resolution requests
+  (Windows 10, which does not know the second flag, gets the first one
+  alone). Then the priority class ABOVE_NORMAL.
+- Priority class: upstream already switches to HIGH while a stream runs
+  (streaming_will_start) and back to NORMAL after it; streaming_will_stop
+  now returns to ABOVE_NORMAL. HIGH is kept for streaming because the
+  threads that are not under MMCSS (audio send, RTSP, heartbeat) then
+  still run above every normal-class game thread but TIME_CRITICAL;
+  ABOVE_NORMAL when idle, because an idle desk does almost nothing, yet
+  its control pipe heartbeat (3 misses = restart) and the next stream's
+  start-up must not queue behind other desks' games. REALTIME is never
+  used.
+- mmcss_t: AvSetMmThreadCharacteristicsW("Games") +
+  AvSetMmThreadPriority(AVRT_PRIORITY_HIGH) for the lifetime of the
+  object. "Games" rather than "Pro Audio": its default scheduling
+  category Medium (16-22) is above every normal-class game thread, but
+  below the High category (23-26) of "Audio"/"Pro Audio", which the
+  session's audio engine and Sunshine's own audio capture (audio.cpp) use,
+  so video never takes the CPU from audio. MMCSS keeps its reserve for
+  other threads (SystemResponsiveness, 20 % by default), so a busy worker
+  cannot starve the PC.
+  Registered: video::capture, the encode thread (capture_async),
+  video::capture_sync (encoders without parallel encoding),
+  stream::videoBroadcast, stream::controlBroadcast (receives and decrypts
+  input) and, on its first input message, the task-pool thread that
+  injects input (join_mmcss_for_this_thread, reverted when the thread
+  ends).
+
+High-resolution timers: the two pacing sleeps (capture slots in
+display_base.cpp, send pacing in stream.cpp) already use upstream's
+high_precision_timer (CREATE_WAITABLE_TIMER_HIGH_RESOLUTION), and
+streaming_will_start already requests the 0.5 ms timer resolution
+(NtSetTimerResolution, timeBeginPeriod(1) as fallback). Nothing else in
+the hot path sleeps for pacing, so this patch only makes the request
+effective with the IGNORE_TIMER_RESOLUTION opt-out.
+
+Everything applied is logged ("SplitPlay: scheduling: ..." once, and one
+"runs under MMCSS" line per thread); a refusal is a warning and the
+thread keeps its upstream priority.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index 771944411160eb00c2120d40165239aab7259e1b..e6769d7700503bc43ef227f54fce2fa26d06ab45 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -179,6 +179,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.h"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/scheduling.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/scheduling.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/self_test.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/self_test.h"
+         ${PLATFORM_TARGET_FILES})
+diff --git a/src/input.cpp b/src/input.cpp
+index 270409a3be2ef476e3b3192eb87e0c1eed3bfe0f..5f34db4edb04e04a1062402815dfeb2d6340cd93 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -25,6 +25,7 @@ extern "C" {
+ #include "input.h"
+ #include "logging.h"
+ #include "platform/common.h"
++#include "splitplay/scheduling.h"
+ #include "thread_pool.h"
+ #include "utility.h"
+ 
+@@ -1716,6 +1717,9 @@ namespace input {
+    * @param input The input context pointer.
+    */
+   void passthrough_next_message(std::shared_ptr<input_t> input) {
++    // SplitPlay: the pool thread that injects input runs under MMCSS from its first message on
++    splitplay::scheduling::join_mmcss_for_this_thread("input injection (TaskPool::worker)");
++
+     // 'entry' backs the 'payload' pointer, so they must remain in scope together
+     std::vector<uint8_t> entry;
+     PNV_INPUT_HEADER payload;
+diff --git a/src/main.cpp b/src/main.cpp
+index 08a52f8f13062f62469f974c92d4441bc6f8f6a9..e1d1148b01c13a02b98628ec63dbcbab42cb6258 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -28,6 +28,7 @@
+ #include "process.h"
+ #include "splitplay/control_client.h"
+ #include "splitplay/options.h"
++#include "splitplay/scheduling.h"
+ #include "splitplay/self_test.h"
+ #include "system_tray.h"
+ #include "upnp.h"
+@@ -236,6 +237,9 @@ int main(int argc, char *argv[]) {
+   BOOST_LOG(info) << splitplay::version_string();
+   BOOST_LOG(info) << "Desk directory: "sv << platf::appdata().string();
+ 
++  // SplitPlay: no EcoQoS or timer throttling, above-normal priority class (high while streaming)
++  splitplay::scheduling::apply_process_policy();
++
+   // Log publisher metadata
+   log_publisher_data();
+ 
+diff --git a/src/platform/windows/misc.cpp b/src/platform/windows/misc.cpp
+index aae501198ac6e997081e0d47413c2c7ad9deb84a..3dfe35123c9413cc74c6d1f14ddb044ad83cf103 100644
+--- a/src/platform/windows/misc.cpp
++++ b/src/platform/windows/misc.cpp
+@@ -50,6 +50,7 @@
+ #include "src/logging.h"
+ #include "src/platform/common.h"
+ #include "src/splitplay/options.h"
++#include "src/splitplay/scheduling.h"
+ #include "src/utility.h"
+ #include "utf_utils.h"
+ 
+@@ -1279,8 +1280,10 @@ namespace platf {
+   }
+ 
+   void streaming_will_stop() {
+-    // Demote ourselves back to normal priority class
+-    SetPriorityClass(GetCurrentProcess(), NORMAL_PRIORITY_CLASS);
++    // Demote ourselves back to the idle priority class.
++    // SplitPlay: above normal instead of normal, so that an idle desk's control pipe, RTSP and stream start-up
++    // do not queue behind the games of the other desks.
++    SetPriorityClass(GetCurrentProcess(), splitplay::scheduling::idle_priority_class());
+ 
+     // End our 0.5ms timer request
+     if (used_nt_set_timer_resolution) {
+diff --git a/src/splitplay/scheduling.cpp b/src/splitplay/scheduling.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..b9ab70f33dc1bfec24654651bb81ce8d7a982b98
+--- /dev/null
++++ b/src/splitplay/scheduling.cpp
+@@ -0,0 +1,112 @@
++/**
++ * @file src/splitplay/scheduling.cpp
++ * @brief Scheduler protection for the SplitPlay worker (see scheduling.h).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++// standard includes
++#include <memory>
++#include <string>
++
++// local includes
++#include "scheduling.h"
++#include "src/logging.h"
++
++#ifdef _WIN32
++  // platform includes
++  #include <windows.h>
++  #include <avrt.h>
++  #include <processthreadsapi.h>
++
++  #ifndef PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
++    #define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
++  #endif
++#endif
++
++using namespace std::literals;
++
++namespace splitplay::scheduling {
++#ifdef _WIN32
++  namespace {
++    /// MMCSS task of the capture, encode, video send and input threads (see scheduling.h for the choice).
++    constexpr const wchar_t *mmcss_task = L"Games";
++
++    /**
++     * @brief ControlMask set with StateMask clear: "never throttle this", for every flag in `mask`.
++     */
++    bool opt_out_of_power_throttling(ULONG mask) {
++      PROCESS_POWER_THROTTLING_STATE state {};
++      state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
++      state.ControlMask = mask;
++      state.StateMask = 0;
++      return SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state)) != FALSE;
++    }
++  }  // namespace
++
++  void apply_process_policy() {
++    // EXECUTION_SPEED: no EcoQoS (efficiency cores, lowered clocks) for a process Windows considers in the background.
++    // IGNORE_TIMER_RESOLUTION: keep honouring the 0.5-1 ms timer resolution upstream requests while streaming
++    // (Windows 11 may ignore it for processes without a visible window; the worker never has one).
++    std::string throttling;
++    if (opt_out_of_power_throttling(PROCESS_POWER_THROTTLING_EXECUTION_SPEED | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION)) {
++      throttling = "off (execution speed, timer resolution)";
++    } else if (const DWORD err = GetLastError(); opt_out_of_power_throttling(PROCESS_POWER_THROTTLING_EXECUTION_SPEED)) {
++      // Windows 10 does not know the timer-resolution flag.
++      throttling = "off (execution speed; timer resolution flag refused, error " + std::to_string(err) + ")";
++    } else {
++      throttling = "unchanged (SetProcessInformation error " + std::to_string(GetLastError()) + ")";
++    }
++
++    std::string priority = "above normal (high while streaming)";
++    if (!SetPriorityClass(GetCurrentProcess(), idle_priority_class())) {
++      priority = "unchanged (SetPriorityClass error " + std::to_string(GetLastError()) + ")";
++    }
++
++    BOOST_LOG(info) << "SplitPlay: scheduling: power throttling "sv << throttling << ", priority class "sv << priority
++                    << ", MMCSS \"Games\" for the capture, encode, video send and input threads"sv;
++  }
++
++  unsigned long idle_priority_class() {
++    return ABOVE_NORMAL_PRIORITY_CLASS;
++  }
++
++  mmcss_t::mmcss_t(const char *what) {
++    DWORD task_index = 0;
++    handle = AvSetMmThreadCharacteristicsW(mmcss_task, &task_index);
++    if (!handle) {
++      BOOST_LOG(warning) << "SplitPlay: MMCSS refused "sv << what << " [error "sv << GetLastError() << "], it keeps its normal priority"sv;
++      return;
++    }
++    if (!AvSetMmThreadPriority(handle, AVRT_PRIORITY_HIGH)) {
++      BOOST_LOG(warning) << "SplitPlay: MMCSS priority for "sv << what << " not set [error "sv << GetLastError() << ']';
++    }
++    BOOST_LOG(info) << "SplitPlay: "sv << what << " runs under MMCSS \"Games\", priority high"sv;
++  }
++
++  mmcss_t::~mmcss_t() {
++    if (handle) {
++      AvRevertMmThreadCharacteristics(handle);
++    }
++  }
++#else
++  void apply_process_policy() {
++  }
++
++  unsigned long idle_priority_class() {
++    return 0;
++  }
++
++  mmcss_t::mmcss_t(const char *) {
++  }
++
++  mmcss_t::~mmcss_t() {
++  }
++#endif
++
++  void join_mmcss_for_this_thread(const char *what) {
++    // Destroyed (and the registration reverted) when the thread ends.
++    thread_local std::unique_ptr<mmcss_t> registration;
++    if (!registration) {
++      registration = std::make_unique<mmcss_t>(what);
++    }
++  }
++}  // namespace splitplay::scheduling
+diff --git a/src/splitplay/scheduling.h b/src/splitplay/scheduling.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..acbba8a2e33bc24c1236ea38946f3a39fbbfe667
+--- /dev/null
++++ b/src/splitplay/scheduling.h
+@@ -0,0 +1,55 @@
++/**
++ * @file src/splitplay/scheduling.h
++ * @brief Scheduler protection for the SplitPlay worker: no EcoQoS, raised priority class, MMCSS for the hot threads.
++ *
++ * Several desks share one PC with the games they stream. Without these settings a worker in a non-console RDP
++ * session (no window, never "visible") is a candidate for EcoQoS and timer-resolution throttling on Windows 11, and
++ * its streaming threads tie with a game's TIME_CRITICAL thread at priority 15.
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++#pragma once
++
++namespace splitplay::scheduling {
++  /**
++   * @brief Opt the process out of power throttling (EcoQoS and ignored timer-resolution requests) and raise its
++   * priority class to ABOVE_NORMAL. Upstream still switches to HIGH while a stream runs; patched
++   * `streaming_will_stop()` returns to idle_priority_class() instead of NORMAL. Logs what was applied.
++   */
++  void apply_process_policy();
++
++  /**
++   * @brief The priority class of an idle worker (no stream): ABOVE_NORMAL_PRIORITY_CLASS on Windows.
++   */
++  unsigned long idle_priority_class();
++
++  /**
++   * @brief Registers the calling thread with the MMCSS task "Games" at AVRT_PRIORITY_HIGH while the object lives.
++   *
++   * "Games" (scheduling category Medium by default, priorities 16-22) runs above every thread of a game in the normal
++   * priority class (at most 15) and below the High category of "Audio"/"Pro Audio" that the session's audio engine
++   * and Sunshine's own audio capture use, so a stream never takes the CPU from audio. MMCSS keeps its reserve for
++   * other threads (SystemResponsiveness, 20 % by default), so a busy worker cannot starve the PC.
++   */
++  class mmcss_t {
++  public:
++    /**
++     * @param what Thread name for the log.
++     */
++    explicit mmcss_t(const char *what);
++    ~mmcss_t();
++
++    mmcss_t(const mmcss_t &) = delete;
++    mmcss_t &operator=(const mmcss_t &) = delete;
++
++  private:
++    void *handle = nullptr;
++  };
++
++  /**
++   * @brief Register the calling thread with MMCSS (as mmcss_t) once, until the thread ends.
++   * For pool threads that run the input path: the registration is made on their first input message.
++   *
++   * @param what Thread name for the log.
++   */
++  void join_mmcss_for_this_thread(const char *what);
++}  // namespace splitplay::scheduling
+diff --git a/src/stream.cpp b/src/stream.cpp
+index faa5ae413ef8b87abfb37e506482300e9778ce06..41c80d355754b82d8f4904d15809d0f2f5660b42 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -33,6 +33,7 @@ extern "C" {
+ #include "system_tray.h"
+ #include "thread_safe.h"
+ #include "splitplay/live_stats.h"
++#include "splitplay/scheduling.h"
+ #include "utility.h"
+ 
+ constexpr int IDX_START_A = 0;  ///< Control-stream message index for the first stream-start packet.
+@@ -1259,6 +1260,7 @@ namespace stream {
+     // This thread handles latency-sensitive control messages
+     platf::set_thread_name("stream::controlBroadcast");
+     platf::adjust_thread_priority(platf::thread_priority_e::critical);
++    splitplay::scheduling::mmcss_t mmcss {"stream::controlBroadcast (input receive)"};  // SplitPlay
+ 
+     // Check for both the full shutdown event and the shutdown event for this
+     // broadcast to ensure we can inform connected clients of our graceful
+@@ -1485,6 +1487,7 @@ namespace stream {
+     // Video traffic is sent on this thread
+     platf::set_thread_name("stream::videoBroadcast");
+     platf::adjust_thread_priority(platf::thread_priority_e::high);
++    splitplay::scheduling::mmcss_t mmcss {"stream::videoBroadcast"};  // SplitPlay: above the games of every desk
+ 
+     logging::min_max_avg_periodic_logger<double> frame_processing_latency_logger(debug, "Frame processing latency", "ms");
+ 
+diff --git a/src/video.cpp b/src/video.cpp
+index 114d8ac89db294b2ff9ad1ceb035df7a067c028c..d095c498350c338f685fc5947a8b4f0009c24d39 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -32,6 +32,7 @@ extern "C" {
+ #include "logging.h"
+ #include "nvenc/nvenc_encoder.h"
+ #include "platform/common.h"
++#include "splitplay/scheduling.h"
+ #include "sync.h"
+ #include "video.h"
+ 
+@@ -1650,6 +1651,7 @@ namespace video {
+     // Capture takes place on this thread
+     platf::set_thread_name("video::capture");
+     platf::adjust_thread_priority(platf::thread_priority_e::critical);
++    splitplay::scheduling::mmcss_t mmcss {"video::capture"};  // SplitPlay: above the games of every desk
+ 
+     while (capture_ctx_queue->running()) {
+       bool artificial_reinit = false;
+@@ -2810,6 +2812,7 @@ namespace video {
+     // Encoding and capture takes place on this thread
+     platf::set_thread_name("video::capture_sync");
+     platf::adjust_thread_priority(platf::thread_priority_e::high);
++    splitplay::scheduling::mmcss_t mmcss {"video::capture_sync"};  // SplitPlay: above the games of every desk
+ 
+     std::vector<std::string> display_names;
+     int display_p = -1;
+@@ -2854,6 +2857,7 @@ namespace video {
+ 
+     // Encoding takes place on this thread
+     platf::adjust_thread_priority(platf::thread_priority_e::high);
++    splitplay::scheduling::mmcss_t mmcss {"video encode"};  // SplitPlay: above the games of every desk
+ 
+     while (!shutdown_event->peek() && images->running()) {
+       // Wait for the main capture event when the display is being reinitialized

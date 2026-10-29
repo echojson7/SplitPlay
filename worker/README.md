@@ -38,6 +38,9 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0009` desk defaults | `apps.json` offers only "Desktop"; `capture=ddx`, `origin_web_ui_allowed=pc`, `system_tray=disabled` by default |
 | `0010` self-test | `--self-test <seconds>`: captures the session's display, moves the mouse with SendInput and reads the default endpoint via WASAPI loopback, writes `<desk-dir>/self-test.json` |
 | `0011` live stats | heartbeats carry real stream numbers (`fps`, `bitrate_kbps`, `encode_ms_p50/p99`, `loss_pct`, `rtt_ms`) and a `sessions` list (client name and uuid, address, mode, codec, requested bitrate, HDR); `event client_connected`/`client_disconnected` when a stream is up (its client connected the control stream) and when it ends. Streaming threads only bump counters and RTSP/control threads only queue the events; the heartbeat thread does the rest and all the pipe writes |
+| `0012` scheduler protection | the process opts out of power throttling (EcoQoS and ignored timer-resolution requests, `SetProcessInformation(ProcessPowerThrottling)`) and runs ABOVE_NORMAL when idle (upstream's HIGH while streaming is kept); capture, encode, video send, control receive and input injection threads run under MMCSS "Games" at high priority. See *Scheduling* below |
+| `0013` stream profile | `welcome` and `set_profile` apply the Profile's `fec_percent`, `min_fps`, `pacing_mbps` (live) and `dpb_frames` (next stream); pacing replaces upstream's fixed 800 Mbit/s, the DPB upstream's 5 (H.264/HEVC) or 8 (AV1) reference frames. See *Stream profile* below |
+| `0014` instant feedback | rumble, LED and motion requests and HDR metadata are sent as soon as they are queued: the producers ring a loopback "doorbell" datagram that the control thread's ENet intercept turns into a wake-up, instead of waiting up to ~100 ms for the next control loop cycle |
 
 ### Changing a patch or adding one
 
@@ -204,7 +207,8 @@ Logs (worker, FreeRDP) are uploaded as `worker-session-test-logs`.
 Control IPC behaviour (protocol 1):
 
 - `hello` is sent right after start-up (before encoder probing), then the worker waits up to 10 s for `welcome`.
-  The initial profile is logged; it is not applied yet.
+  The initial profile is logged and its stream settings are applied (*Stream profile* below), so the encoder probe
+  already uses its DPB size.
 - `heartbeat` every 1000 ms from `welcome` on, with `state` `starting` until `ready`, then `idle` or `streaming`.
   `metrics.clients` is the number of active streams; `metrics` has the live numbers of the last second and
   `sessions` lists the streams (definitions and sources in ipc.md).
@@ -214,15 +218,60 @@ Control IPC behaviour (protocol 1):
 - `ready` (with `ports.base`) once the HTTP base port accepts connections on loopback.
 - `event mode_requested` on a Moonlight launch, see above.
 - `shutdown` is answered and the worker exits with code 0. `pair`, `list_clients` and `unpair` are served;
-  `set_profile` and `send_sas` answer `unsupported`; other requests answer `unknown_type`.
+  `set_profile` applies the stream settings and answers which apply now, from the next stream and not at all;
+  `send_sas` answers `unsupported`; other requests answer `unknown_type`.
 - Exit codes: 0 after `shutdown`, 2 for an invalid command line, 3 when the handshake fails or the pipe breaks.
+
+### Stream profile (patch 0013)
+
+The worker applies four fields of the Profile object ([`ipc.md`](../docs/contracts/ipc.md)) from `welcome` and every
+`set_profile`, all or nothing: an absent field keeps its value, `null` restores the default, a value of the wrong
+type or out of range rejects `set_profile` with `bad_request`.
+
+| Field | Range | Replaces upstream's | Takes effect |
+|---|---|---|---|
+| `fec_percent` | 0-255 | `fec_percentage` (default 20) | next frame; the encoder's bitrate allowance for FEC on the next stream |
+| `min_fps` | 1-1000, capped at the stream's fps | `minimum_fps_target` (default half the stream's fps) | next frame |
+| `pacing_mbps` | 1-100000 | fixed 80 % of 1 Gbit/s (`ratecontrol_packets_in_1ms`, stream.cpp) | next frame |
+| `dpb_frames` | 1-16 (AV1 at most 8) | 5 (H.264, HEVC) and 8 (AV1) reference frames | next stream (or encoder reinit) |
+
+`dpb_frames` only applies when the client leaves the reference frame count to the host, which Moonlight does for
+decoders that support reference frame invalidation (`maxNumReferenceFrames=0`); other decoders keep one reference.
+Upstream's RFI path is unchanged: a loss of fewer frames than the DPB holds is answered with
+`nvEncInvalidateRefFrames`, a larger one with an IDR frame, so 16 frames cover 133 ms at 120 fps (5 covered 42 ms).
+If NVENC refuses the DPB size the encoder is created again with the codec default (warning in the log); the encoder
+line in the log shows `dpb=N`. The profile wins over `fec_percentage` and `minimum_fps_target` passed as
+`name=value`. `fps`, size, bitrate and codec stay Moonlight's choice; `gpu_priority`, `gpu_luid` and `cpu_set` are
+not applied yet.
+
+### Scheduling (patch 0012)
+
+At start-up the worker logs one line, for example `SplitPlay: scheduling: power throttling off (execution speed,
+timer resolution), priority class above normal (high while streaming), MMCSS "Games" for ...`, and one
+`... runs under MMCSS "Games", priority high` line for each streaming thread.
+
+- **Power throttling.** `SetProcessInformation(ProcessPowerThrottling)` with `EXECUTION_SPEED` and
+  `IGNORE_TIMER_RESOLUTION` in the control mask and nothing in the state mask: no EcoQoS, and the 0.5 ms timer
+  resolution upstream requests while streaming (`NtSetTimerResolution`, `timeBeginPeriod(1)` as fallback) is honoured
+  although the worker never has a visible window. The pacing sleeps (capture slots, send pacing) already use
+  upstream's `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` timer.
+- **Priority class.** HIGH while streaming (upstream), ABOVE_NORMAL instead of NORMAL when idle: an idle desk does
+  almost nothing, but its heartbeats and the next stream's start-up must not queue behind other desks' games.
+  HIGH keeps the threads that are not under MMCSS (audio send, RTSP) above every normal-class game thread except
+  TIME_CRITICAL. REALTIME is never used.
+- **MMCSS.** `video::capture`, the encode thread, `video::capture_sync`, `stream::videoBroadcast`,
+  `stream::controlBroadcast` (receives input) and the pool thread that injects input join the task "Games" with
+  `AVRT_PRIORITY_HIGH`. "Games" (category Medium, priorities 16-22) is above every normal-class game thread (at most
+  15) and below "Audio"/"Pro Audio" (High, 23-26), which the audio engine and Sunshine's audio capture use, so video
+  never takes the CPU from audio; MMCSS keeps its 20 % reserve for everything else (`SystemResponsiveness`).
 
 ## Not done yet
 
-- Live profile changes (`set_profile`), frame tracing, the IDD capture ring and the input ring
-  (the contract headers are already on the include path).
+- Frame tracing, the IDD capture ring and the input ring (the contract headers are already on the include path);
+  the profile's `gpu_priority`, `gpu_luid` and `cpu_set`.
 - Per-session gamepads: ViGEm pads are visible to every session; SplitPlay's isolated pad driver comes in Stage 4.
 - Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile; with several workers they
-  should move to the service.
+  should move to the service. Their "prefer maximum performance" application profile is bound to `sunshine.exe`, so
+  `splitplay-worker.exe` does not get it yet.
 - mDNS: every worker publishes itself; Moonlight's automatic discovery is not tested with several desks yet
   (adding `HOST:port` by hand always works).

@@ -139,6 +139,9 @@ public sealed class DeskDto
     /// <summary>See <see cref="DeskConfig.SteamIsolation"/>; always set in responses.</summary>
     public bool SteamIsolation { get; set; } = true;
 
+    /// <summary>See <see cref="DeskConfig.HideFromLogon"/>; the effective value, always set in responses.</summary>
+    public bool HideFromLogon { get; set; }
+
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, string>? WorkerSettings { get; set; }
 

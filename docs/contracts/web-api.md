@@ -123,6 +123,7 @@ and its session. A request from a desk session gets 403 `forbidden` on every rou
   "hasPassword": true,
   "resolutionPendingRestart": false,
   "steamIsolation": true,
+  "hideFromLogon": true,
   "state": "Stopped",
   "sessionId": null,
   "basePort": 48089,
@@ -165,6 +166,8 @@ nothing streams.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.
 `steamIsolation` (config.md) is always present in responses; POST/PUT accept it, and a PUT without it keeps the current
 value. Changing it on a running desk is `409 invalid_state`.
+`hideFromLogon` (config.md) is always present in responses as the effective value; POST/PUT accept it, a PUT without it
+keeps the current value unless `user` changes, and it may change while the desk runs (it applies at once).
 
 `state` is one of the lifecycle states in ARCHITECTURE.md §4:
 `Defined, Provisioning, Connecting, SessionReady, DisplayReady, Ready, Streaming, Recovering, Faulted, Stopping, Stopped`.

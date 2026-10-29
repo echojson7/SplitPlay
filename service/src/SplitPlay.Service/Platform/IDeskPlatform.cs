@@ -52,7 +52,10 @@ public interface IDeskPlatform
     /// <summary>Removes the desk's firewall rules (desk deleted).</summary>
     void RemoveFirewallRules(string deskId);
 
-    /// <summary>Removes the stored password and, with <paramref name="deleteUser"/>, the Windows account and its profile.</summary>
+    /// <summary>
+    /// Removes the stored password, shows the account on the sign-in screen again if the desk hid it and, with
+    /// <paramref name="deleteUser"/>, deletes the Windows account and its profile.
+    /// </summary>
     void DeleteDesk(DeskConfig desk, bool deleteUser);
 
     /// <summary>
@@ -67,6 +70,13 @@ public interface IDeskPlatform
     /// to: recorded previous values are restored. No-op when nothing is recorded. Best effort: failures are logged.
     /// </summary>
     void RevertSteamIsolation(string deskId);
+
+    /// <summary>
+    /// Hides the desk's account from the sign-in screen, or shows it again, as <see cref="DeskConfig.HidesFromLogon"/>
+    /// says (an account SplitPlay did not create only when the desk asks for it). A user hidden earlier for this desk
+    /// that is no longer its user is shown again. Best effort: failures are logged.
+    /// </summary>
+    void UpdateLogonListing(DeskConfig desk);
 
     /// <summary>The machine's <c>steam.exe</c> (from <c>HKLM\SOFTWARE\WOW6432Node\Valve\Steam\InstallPath</c>), or null.</summary>
     string? SteamExecutable();

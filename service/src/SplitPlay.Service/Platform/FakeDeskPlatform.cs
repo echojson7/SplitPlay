@@ -47,6 +47,12 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 
     public DeskSecretStore Secrets { get; }
 
+    /// <summary>The machine's HKLM as far as the sign-in screen list goes.</summary>
+    public MemoryUserHive Machine { get; } = new();
+
+    /// <summary>The <c>UserList</c> value of <paramref name="user"/> (0 = hidden), or null.</summary>
+    public string? UserListValue(string user) => Machine.Get(LogonListing.UserListKey, user)?.Data;
+
     /// <summary>Adds a Windows session (e.g. one left over from before a service crash).</summary>
     public void AddSession(int id, string? user, bool disconnected = true) => _sessions[id] = new HostSession(id, user, disconnected);
 
@@ -120,6 +126,7 @@ public sealed class FakeDeskPlatform : IDeskPlatform
             RevertSteamIsolation(desk.Id);
         }
 
+        UpdateLogonListing(desk);
         return credentials;
     }
 
@@ -204,6 +211,7 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         }
 
         RevertSteamIsolation(desk.Id);
+        LogonState(desk.Id).Show(Machine);
         Secrets.Delete(desk.Id);
         if (account is not null)
         {
@@ -283,6 +291,28 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 
         isolation.Revert(Hive(user));
         _actions.Enqueue($"steam- {deskId} {user}");
+    }
+
+    private LogonListing LogonState(string deskId) => new(Path.Combine(_paths.DeskDirectory(deskId), LogonListing.StateFileName));
+
+    public void UpdateLogonListing(DeskConfig desk)
+    {
+        var listing = LogonState(desk.Id);
+        if (desk.User is { } user && _accounts.TryGetValue(user, out var account) && desk.HidesFromLogon(account.CreatedBySplitPlay))
+        {
+            if (listing.Hide(Machine, user))
+            {
+                _actions.Enqueue($"hide {user}");
+            }
+        }
+        else if (listing.RecordedUser() is { } recorded && listing.Show(Machine))
+        {
+            _actions.Enqueue($"show {recorded}");
+        }
+        else
+        {
+            listing.Forget();
+        }
     }
 
     public string? SteamExecutable() => SteamExe;

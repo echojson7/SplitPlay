@@ -72,6 +72,7 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         }
 
         CheckHost();
+        UpdateLogonListing(desk);
         if (desk.SteamIsolationEnabled)
         {
             // Before the session logs on, so that explorer, Steam's autostart and steam:// already see the desk's values.
@@ -196,6 +197,7 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         }
 
         RevertSteamIsolation(desk.Id);
+        ShowOnLogon(desk.Id);
         _secrets.Delete(desk.Id);
         if (account is null || desk.User is null)
         {
@@ -310,6 +312,52 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         }
 
         return copied || steam;
+    }
+
+    // ------------------------------------------------------------------ sign-in screen
+
+    private LogonListing LogonState(string deskId) => new(Path.Combine(_paths.DeskDirectory(deskId), LogonListing.StateFileName));
+
+    public void UpdateLogonListing(DeskConfig desk)
+    {
+        ArgumentNullException.ThrowIfNull(desk);
+        try
+        {
+            var listing = LogonState(desk.Id);
+            var account = desk.User is null ? null : LocalAccounts.Get(desk.User);
+            if (account is not null && desk.HidesFromLogon(account.CreatedBySplitPlay))
+            {
+                if (listing.Hide(new WindowsHostRegistry(), account.Name))
+                {
+                    _logger.LogInformation("Desk {Desk}: {User} is hidden from the sign-in screen", desk.Id, account.Name);
+                }
+            }
+            else
+            {
+                ShowOnLogon(desk.Id);
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException or Win32Exception)
+        {
+            _logger.LogWarning("Desk {Desk}: could not update the sign-in screen entry: {Message}", desk.Id, ex.Message);
+        }
+    }
+
+    private void ShowOnLogon(string deskId)
+    {
+        try
+        {
+            var listing = LogonState(deskId);
+            var user = listing.RecordedUser();
+            if (listing.Show(new WindowsHostRegistry()))
+            {
+                _logger.LogInformation("Desk {Desk}: {User} is shown on the sign-in screen again", deskId, user);
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException)
+        {
+            _logger.LogWarning("Desk {Desk}: could not restore the sign-in screen entry: {Message}", deskId, ex.Message);
+        }
     }
 
     // ------------------------------------------------------------------ Steam isolation

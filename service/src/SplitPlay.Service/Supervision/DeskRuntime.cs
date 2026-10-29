@@ -115,6 +115,7 @@ internal sealed class DeskRuntime
                 Profile = Config.Profile,
                 DisableBluetoothUserService = Config.DisableBluetoothUserService,
                 SteamIsolation = Config.SteamIsolationEnabled,
+                HideFromLogon = Config.HidesFromLogon(Config.UserManaged != false),
                 WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,
                 Stream = Streams.Count > 0 ? ToStreamDto(Streams[0]) : null,

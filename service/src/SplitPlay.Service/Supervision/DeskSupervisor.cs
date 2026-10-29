@@ -435,6 +435,11 @@ public sealed class DeskSupervisor : IHostedService
             desk.Profile ??= new ProfileConfig();
             desk.SteamIsolation ??= current.SteamIsolation ?? true;
             var userChanged = !string.Equals(desk.User, current.User, StringComparison.OrdinalIgnoreCase);
+            if (!userChanged)
+            {
+                desk.HideFromLogon ??= current.HideFromLogon;
+            }
+
             desk.UserManaged = userChanged || password is not null ? CheckUser(desk.User!, password) : current.UserManaged;
 
             if (!idle && (desk.Name != current.Name || !string.Equals(desk.User, current.User, StringComparison.OrdinalIgnoreCase)
@@ -466,6 +471,12 @@ public sealed class DeskSupervisor : IHostedService
             {
                 // The old user's hive gets its previous values back (the desk is idle: its session is logged off).
                 _platform.RevertSteamIsolation(id);
+            }
+
+            if (userChanged || saved.HideFromLogon != current.HideFromLogon)
+            {
+                // A registry value: applies at once, also while the desk runs.
+                _platform.UpdateLogonListing(saved);
             }
 
             IpcConnection? connection;

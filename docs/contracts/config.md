@@ -55,6 +55,13 @@ Rules:
   Desk passwords live DPAPI-protected in `secrets\desks\<id>.bin`, never in this file.
 - `disableBluetoothUserService` (default `true`) stops the per-user `BluetoothUserService_*` instance in the desk
   session so it does not compete with the console user's Bluetooth devices (issue #3).
+- `hideFromLogon` (optional) keeps the desk's account off the Windows sign-in screen: DWORD `<user>` = `0` under
+  `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList`, applied when the desk is
+  provisioned or the setting changes. Left out, it is on for accounts SplitPlay created and off for any other: an
+  account SplitPlay did not create is hidden only when the owner sets `true` for that desk. The value before is
+  recorded in `desks\<id>\logon-hidden.json` and comes back when the setting goes off, the user changes, the desk is
+  deleted or SplitPlay is uninstalled (a value someone changed since is left alone). A request that leaves it out
+  keeps the current value unless the user changes.
 - `steamIsolation` (default `true`; a request that leaves it out keeps the current value) lets the desk user's Steam
   run next to the console user's Steam (Steam isolation research, 2026-10-28). Only the desk user's hive is changed, never the
   console user's and never machine-wide: `HKU\<sid>\Environment\steam_master_ipc_name_override` = `SplitPlay_<id>`

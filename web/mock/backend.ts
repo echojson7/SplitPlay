@@ -417,6 +417,7 @@ export class MockBackend {
       e.desk.state = 'Stopped'
       e.desk.hasPassword = taken.password !== undefined
       e.desk.userManaged = !MOCK_USERS.some((u) => u.name === c.user.toLowerCase() && !u.managed)
+      e.desk.hideFromLogon = c.hideFromLogon ?? e.desk.userManaged
       return ok(clone(e.desk), 201)
     }
 
@@ -441,7 +442,8 @@ export class MockBackend {
           const c = req.body as DeskConfig
           if (c.id !== id) return err(400, 'invalid_config', 'id cannot be changed')
           if (running) {
-            const { profile: _p, ...rest } = c
+            // The sign-in screen entry may change while the desk runs.
+            const { profile: _p, hideFromLogon: _h, ...rest } = c
             const { profile: _q, ...cur } = deskConfigOf(e.desk)
             if (JSON.stringify(rest) !== JSON.stringify(cur))
               return err(409, 'desk_running', 'Only the profile can change while the desk runs')
@@ -452,6 +454,7 @@ export class MockBackend {
           if (taken.password !== undefined) e.desk.hasPassword = true
           else if (userChanged) e.desk.hasPassword = false
           if (userChanged) e.desk.userManaged = !MOCK_USERS.some((u) => u.name === c.user.toLowerCase())
+          if (userChanged && c.hideFromLogon === undefined) e.desk.hideFromLogon = e.desk.userManaged
           // The mock seat cannot resize a running session.
           if (running && resized) e.desk.resolutionPendingRestart = true
           return ok(clone(e.desk))

@@ -81,6 +81,32 @@ public sealed class SupervisorOptions
 
     public int FailureWindowSeconds { get; set; } = 600;
 
+    /// <summary>Failures in a row (without reaching Ready) after which a desk gives up and goes to Faulted.</summary>
+    public int MaxConsecutiveFailures { get; set; } = 10;
+
+    /// <summary>
+    /// Time a provisioning attempt (account, password, host check, firewall) may take. Windows can answer account and
+    /// Remote Desktop calls very slowly right after a reboot or an update; a call that never returns faults the desk.
+    /// </summary>
+    public int ProvisionTimeoutMs { get; set; } = 120_000;
+
+    /// <summary>Attempts for provisioning errors that may be transient (not <c>DeskProvisioningException</c>).</summary>
+    public int ProvisionAttempts { get; set; } = 3;
+
+    /// <summary>Delay before provisioning attempt n+1: n times this value.</summary>
+    public int ProvisionRetryDelayMs { get; set; } = 5_000;
+
+    /// <summary>
+    /// Time a lost RDP session may take to come back (the seat reconnects on its own) before the seat is replaced.
+    /// </summary>
+    public int SessionLostTimeoutMs { get; set; } = 180_000;
+
+    /// <summary>
+    /// At start-up: how long desks wait for the leftover-session clean-up and for Remote Desktop Services (after a
+    /// reboot or an update they can still be starting).
+    /// </summary>
+    public int StartupWaitMs { get; set; } = 60_000;
+
     /// <summary>Start desks flagged <c>autostart</c> when the service starts.</summary>
     public bool Autostart { get; set; } = true;
 
@@ -104,6 +130,7 @@ public sealed class SupervisorOptions
         MaxBackoff = TimeSpan.FromMilliseconds(MaxBackoffMs),
         MaxFailuresInWindow = MaxFailuresInWindow,
         FailureWindow = TimeSpan.FromSeconds(FailureWindowSeconds),
+        MaxConsecutiveFailures = MaxConsecutiveFailures,
     };
 
     /// <summary>The effective launcher kind.</summary>

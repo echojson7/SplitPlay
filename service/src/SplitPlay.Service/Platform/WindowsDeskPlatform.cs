@@ -529,6 +529,28 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
             .ToList();
     }
 
+    public IReadOnlyList<HostSession> Sessions() =>
+        Wts.EnumerateSessions()
+            .Where(s => s.Id != 0)
+            .Select(s =>
+            {
+                var user = Wts.QueryString(s.Id, Wts.WTSUserName);
+                var domain = Wts.QueryString(s.Id, Wts.WTSDomainName);
+                var local = !string.IsNullOrEmpty(user)
+                            && (string.IsNullOrEmpty(domain) || string.Equals(domain, Environment.MachineName, StringComparison.OrdinalIgnoreCase));
+                return new HostSession(s.Id, local ? user : null, s.State == Wts.WTSDisconnected);
+            })
+            .ToList();
+
+    public void LogoffSession(int sessionId)
+    {
+        if (!Wts.Logoff(sessionId))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, $"WTSLogoffSession({sessionId}) failed ({error})");
+        }
+    }
+
     [DllImport("kernel32.dll")]
     private static extern uint WTSGetActiveConsoleSessionId();
 
@@ -542,6 +564,51 @@ internal static class Wts
 {
     public const int WTSUserName = 5;
     public const int WTSDomainName = 7;
+    public const int WTSDisconnected = 4;
+
+    /// <summary>All sessions (id and WTS_CONNECTSTATE_CLASS).</summary>
+    public static IReadOnlyList<(int Id, int State)> EnumerateSessions()
+    {
+        if (!WTSEnumerateSessionsW(IntPtr.Zero, 0, 1, out var buffer, out var count))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, $"WTSEnumerateSessions failed ({error})");
+        }
+
+        try
+        {
+            var size = Marshal.SizeOf<WtsSessionInfo>();
+            var result = new List<(int, int)>(count);
+            for (var i = 0; i < count; i++)
+            {
+                var info = Marshal.PtrToStructure<WtsSessionInfo>(buffer + (i * size));
+                result.Add((info.SessionId, info.State));
+            }
+
+            return result;
+        }
+        finally
+        {
+            WTSFreeMemory(buffer);
+        }
+    }
+
+    /// <summary>WTSLogoffSession without waiting.</summary>
+    public static bool Logoff(int session) => WTSLogoffSession(IntPtr.Zero, session, false);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WtsSessionInfo
+    {
+        public int SessionId;
+        public IntPtr WinStationName;
+        public int State;
+    }
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    private static extern bool WTSEnumerateSessionsW(IntPtr server, int reserved, int version, out IntPtr sessions, out int count);
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    private static extern bool WTSLogoffSession(IntPtr server, int sessionId, bool wait);
 
     public static string? QueryString(int session, int infoClass)
     {

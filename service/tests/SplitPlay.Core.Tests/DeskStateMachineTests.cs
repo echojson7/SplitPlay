@@ -154,6 +154,46 @@ public sealed class DeskStateMachineTests
     }
 
     [Fact]
+    public void Slow_failures_in_a_row_fault_the_desk_even_outside_the_window()
+    {
+        // A logon that times out after three minutes never puts six failures into ten minutes.
+        var m = NewMachine(DeskState.Connecting);
+        for (var i = 1; i <= RecoveryPolicy.Default.MaxConsecutiveFailures; i++)
+        {
+            Assert.Equal(DeskState.Recovering, m.Fire(DeskTrigger.Fail, $"logon timed out {i}").To);
+            _time.Advance(TimeSpan.FromMinutes(3));
+            m.Fire(DeskTrigger.RetryDue);
+            Assert.True(m.FailuresInWindow <= 4);
+        }
+
+        var last = m.Fire(DeskTrigger.Fail, "logon timed out again");
+        Assert.Equal(DeskState.Faulted, last.To);
+        Assert.Null(m.RetryAt);
+    }
+
+    [Fact]
+    public void Reaching_ready_restarts_the_count_of_failures_in_a_row()
+    {
+        var m = NewMachine(DeskState.Connecting);
+        for (var round = 0; round < 3; round++)
+        {
+            for (var i = 0; i < RecoveryPolicy.Default.MaxConsecutiveFailures; i++)
+            {
+                m.Fire(DeskTrigger.Fail);
+                _time.Advance(TimeSpan.FromMinutes(3));
+                m.Fire(DeskTrigger.RetryDue);
+            }
+
+            m.Fire(DeskTrigger.SessionReady);
+            m.Fire(DeskTrigger.DisplayReady);
+            m.Fire(DeskTrigger.WorkerReady);
+            Assert.Equal(0, m.ConsecutiveFailures);
+        }
+
+        Assert.Equal(DeskState.Ready, m.State);
+    }
+
+    [Fact]
     public void Failures_older_than_the_window_do_not_count()
     {
         var m = NewMachine(DeskState.Ready);

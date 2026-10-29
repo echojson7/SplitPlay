@@ -18,6 +18,7 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     private readonly ConcurrentQueue<string> _actions = new();
     private readonly ConcurrentDictionary<string, MemoryUserHive> _hives = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _profiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<int, HostSession> _sessions = new();
     private readonly DataPaths _paths;
 
     public FakeDeskPlatform(DataPaths paths)
@@ -46,6 +47,18 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 
     public DeskSecretStore Secrets { get; }
 
+    /// <summary>Adds a Windows session (e.g. one left over from before a service crash).</summary>
+    public void AddSession(int id, string? user, bool disconnected = true) => _sessions[id] = new HostSession(id, user, disconnected);
+
+    /// <summary>When set, <see cref="Sessions"/> blocks this long (a hung WTS call).</summary>
+    public TimeSpan SessionsDelay { get; set; }
+
+    /// <summary>When set, <see cref="Provision"/> blocks this long first (account calls that hang after an update).</summary>
+    public TimeSpan ProvisionDelay { get; set; }
+
+    /// <summary>When greater than zero, the next calls to <see cref="Provision"/> throw a transient error and count it down.</summary>
+    public int TransientProvisionErrors { get; set; }
+
     /// <summary>When set, <see cref="Provision"/> fails with this message (e.g. a host that is not prepared).</summary>
     public string? ProvisionError { get; set; }
 
@@ -62,6 +75,10 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     /// <summary>Accounts and their current state.</summary>
     public IReadOnlyDictionary<string, FakeAccount> Accounts => _accounts;
 
+    /// <summary>Adds an account that SplitPlay created earlier (e.g. before the service restarted).</summary>
+    public void AddManagedAccount(string user, string password = "managed") =>
+        _accounts[user] = new FakeAccount(password, CreatedBySplitPlay: true, PasswordNeverExpires: true, RemoteDesktopUser: true);
+
     /// <summary>Adds an account that SplitPlay did not create (the owner's own user).</summary>
     public void AddExistingAccount(string user, string password, bool passwordNeverExpires = false, bool hasProfile = true)
     {
@@ -72,8 +89,26 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         }
     }
 
+    /// <summary>Calls to <see cref="Provision"/> so far (counted on entry).</summary>
+    public int ProvisionCalls => _provisionCalls;
+
+    private int _provisionCalls;
+
     public DeskCredentials Provision(DeskConfig desk)
     {
+        Interlocked.Increment(ref _provisionCalls);
+        if (ProvisionDelay > TimeSpan.Zero)
+        {
+            Thread.Sleep(ProvisionDelay);
+        }
+
+        if (TransientProvisionErrors > 0)
+        {
+            TransientProvisionErrors--;
+            _actions.Enqueue($"provision-error {desk.Id}");
+            throw new InvalidOperationException("The RPC server is unavailable");
+        }
+
         var credentials = EnsureAccount(desk);
         if (desk.SteamIsolationEnabled)
         {
@@ -279,6 +314,22 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     public void ForgetPassword(string deskId) => Secrets.Delete(deskId);
 
     public bool HasPassword(string deskId) => Secrets.Exists(deskId);
+
+    public IReadOnlyList<HostSession> Sessions()
+    {
+        if (SessionsDelay > TimeSpan.Zero)
+        {
+            Thread.Sleep(SessionsDelay);
+        }
+
+        return [.. _sessions.Values.OrderBy(s => s.Id)];
+    }
+
+    public void LogoffSession(int sessionId)
+    {
+        _sessions.TryRemove(sessionId, out _);
+        _actions.Enqueue($"logoff {sessionId}");
+    }
 
     public IReadOnlyList<HostUserDto> ListUsers() =>
         _accounts.Keys.Concat(ConsoleUser is null ? [] : [ConsoleUser]).Distinct(StringComparer.OrdinalIgnoreCase)

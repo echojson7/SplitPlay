@@ -154,7 +154,8 @@ public sealed class DeskStateMachine
             case DeskTrigger.Fail when Recoverable.Contains(State):
             {
                 Prune(now);
-                var faulted = _failures.Count + 1 > Policy.MaxFailuresInWindow;
+                var faulted = _failures.Count + 1 > Policy.MaxFailuresInWindow
+                              || ConsecutiveFailures + 1 > Policy.MaxConsecutiveFailures;
                 if (commit)
                 {
                     RecordFailure(now, reason);

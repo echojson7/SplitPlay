@@ -53,16 +53,19 @@ public sealed class DeskSupervisor : IHostedService
     private DateTimeOffset _lastCpuAt;
 
     // Power state: _sleep completes when the PC goes to sleep, _wake when it is awake (again).
+    private readonly RequiredServicesStarter _requiredServices;
+    private Task _startup = Task.CompletedTask;
     private readonly object _powerGate = new();
     private TaskCompletionSource _sleep = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource _wake = Completed();
 
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
-        PowerEvents power)
+        PowerEvents power, RequiredServicesStarter requiredServices)
     {
         ArgumentNullException.ThrowIfNull(power);
         power.Changed += OnPowerChange;
+        _requiredServices = requiredServices;
         _gpus = gpus;
         _platform = platform;
         _childLogger = loggerFactory.CreateLogger(Logging.LogStoreLoggerProvider.ChildCategory);
@@ -90,8 +93,12 @@ public sealed class DeskSupervisor : IHostedService
 
     // ------------------------------------------------------------------ hosted service
 
+    /// <summary>Completes when the start-up checks (leftover sessions, Remote Desktop Services) are done; desks wait for it.</summary>
+    public Task Startup => _startup;
+
     public Task StartAsync(CancellationToken cancellationToken)
     {
+        _startup = Task.Run(StartupChecksAsync, CancellationToken.None);
         if (!_options.Value.Autostart)
         {
             return Task.CompletedTask;
@@ -136,6 +143,94 @@ public sealed class DeskSupervisor : IHostedService
         catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
         {
             _logger.LogWarning("Not all desks stopped within {Limit}", limit);
+        }
+    }
+
+    // ------------------------------------------------------------------ start-up checks
+
+    /// <summary>
+    /// Before the first desk starts: deals with desk sessions left over from before the service started (a crash, a
+    /// killed process, an update that restarted the service) and gives Remote Desktop Services time to come up after a
+    /// reboot. Bounded by <see cref="SupervisorOptions.StartupWaitMs"/>; never throws.
+    /// </summary>
+    private async Task StartupChecksAsync()
+    {
+        var limit = TimeSpan.FromMilliseconds(Math.Max(0, _options.Value.StartupWaitMs));
+        var started = _time.GetTimestamp();
+        try
+        {
+            await Task.Run(CleanUpLeftoverSessions).WaitAsync(limit, _time).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning("The check for desk sessions left over from before the service started did not finish within {Limit} s (Windows is not answering session queries); skipping it",
+                (int)limit.TotalSeconds);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Could not check for desk sessions left over from before the service started: {Message}", ex.Message);
+        }
+
+        var remaining = limit - _time.GetElapsedTime(started);
+        try
+        {
+            await _requiredServices.Completion.WaitAsync(remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero, _time).ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            _logger.LogWarning("Remote Desktop Services are still starting; starting the desks anyway");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("The start-up check of Remote Desktop Services failed: {Message}", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Disconnected sessions of desk users that are still there when the service starts. A desk that starts
+    /// automatically reconnects to its session (games keep running); other sessions of accounts SplitPlay created are
+    /// logged off. Sessions of accounts SplitPlay did not create are never touched.
+    /// </summary>
+    private void CleanUpLeftoverSessions()
+    {
+        var leftovers = _platform.Sessions().Where(s => s.Disconnected && s.User is not null).ToList();
+        if (leftovers.Count == 0)
+        {
+            return;
+        }
+
+        var desks = _config.Snapshot().Desks;
+        foreach (var session in leftovers)
+        {
+            var user = session.User!;
+            var desk = desks.FirstOrDefault(d => string.Equals(d.User, user, StringComparison.OrdinalIgnoreCase));
+            var ours = _platform.FindAccount(user)?.CreatedBySplitPlay == true && desk?.UserManaged != false;
+            if (desk is { Autostart: true } && _options.Value.Autostart)
+            {
+                _logger.LogInformation("Desk {Desk}: session {Session} of {User} is still there from before the service started; the desk reconnects to it",
+                    desk.Id, session.Id, user);
+            }
+            else if (!ours)
+            {
+                if (desk is not null)
+                {
+                    _logger.LogInformation("Desk {Desk}: session {Session} of {User} is disconnected; left alone (SplitPlay did not create this account)",
+                        desk.Id, session.Id, user);
+                }
+            }
+            else
+            {
+                try
+                {
+                    _platform.LogoffSession(session.Id);
+                    _logger.LogInformation("Logged off session {Session} of {User}, left over from before the service started ({Desk})",
+                        session.Id, user, desk is null ? "no desk uses this account any more" : $"desk {desk.Id}");
+                }
+                catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+                {
+                    _logger.LogWarning("Could not log off leftover session {Session} of {User}: {Message}", session.Id, user, ex.Message);
+                }
+            }
         }
     }
 
@@ -616,6 +711,11 @@ public sealed class DeskSupervisor : IHostedService
             _logger.LogInformation("Desk {Desk}: {From} -> {To} ({Reason})", rt.Id, t.From, t.To,
                 t.Trigger == DeskTrigger.Pause ? t.Reason : "the PC woke up");
         }
+        else if (t.To == DeskState.Faulted && t.Trigger == DeskTrigger.Fail && t.From != DeskState.Provisioning)
+        {
+            _logger.LogError("Desk {Desk}: giving up after {Failures} failures ({Reason}); it stays Faulted until it is stopped and started again",
+                rt.Id, rt.Machine.ConsecutiveFailures, t.Reason);
+        }
         else if (t.To is DeskState.Recovering or DeskState.Faulted)
         {
             _logger.LogWarning("Desk {Desk}: {From} -> {To} ({Reason})", rt.Id, t.From, t.To, t.Reason);
@@ -703,25 +803,10 @@ public sealed class DeskSupervisor : IHostedService
             }
 
             Directory.CreateDirectory(_paths.DeskDirectory(rt.Id));
-            DeskCredentials? credentials = null;
-            try
+            await _startup.WaitAsync(stop).ConfigureAwait(false);
+            var credentials = await ProvisionAsync(rt, config, stop).ConfigureAwait(false);
+            if (credentials is null)
             {
-                credentials = await Task.Run(() =>
-                {
-                    var c = _platform.Provision(config);
-                    _platform.EnsureFirewallRules(config);
-                    return c;
-                }, stop).ConfigureAwait(false);
-            }
-            catch (DeskProvisioningException ex)
-            {
-                Fire(rt, DeskTrigger.Fail, ex.Message);
-                return;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogError(ex, "Provisioning desk {Desk} failed", rt.Id);
-                Fire(rt, DeskTrigger.Fail, $"provisioning failed: {ex.Message}");
                 return;
             }
 
@@ -807,6 +892,75 @@ public sealed class DeskSupervisor : IHostedService
                 {
                     rt.Machine.Fire(DeskTrigger.Stopped);
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Provisioning with bounds: errors that may be transient (Windows still starting after a reboot or an update) are
+    /// retried <see cref="SupervisorOptions.ProvisionAttempts"/> times with a growing delay; a call that does not return
+    /// within <see cref="SupervisorOptions.ProvisionTimeoutMs"/> faults the desk (it cannot be cancelled, and a second call
+    /// next to it could race on the account's password). Returns null after firing Fail.
+    /// </summary>
+    private async Task<DeskCredentials?> ProvisionAsync(DeskRuntime rt, DeskConfig config, CancellationToken stop)
+    {
+        var o = _options.Value;
+        var attempts = Math.Max(1, o.ProvisionAttempts);
+        var timeout = TimeSpan.FromMilliseconds(Math.Max(1, o.ProvisionTimeoutMs));
+        for (var attempt = 1; ; attempt++)
+        {
+            Task<DeskCredentials>? call = null;
+            lock (rt.Gate)
+            {
+                if (rt.ProvisionCall is not { IsCompleted: false })
+                {
+                    call = Task.Run(() =>
+                    {
+                        var c = _platform.Provision(config);
+                        _platform.EnsureFirewallRules(config);
+                        return c;
+                    }, CancellationToken.None);
+                    rt.ProvisionCall = call;
+                }
+            }
+
+            if (call is null)
+            {
+                _logger.LogError("Desk {Desk}: the previous provisioning call has still not returned", rt.Id);
+                Fire(rt, DeskTrigger.Fail, "the previous provisioning call has still not returned: Windows is not answering account calls (restart the PC)");
+                return null;
+            }
+
+            try
+            {
+                return await call.WaitAsync(timeout, _time, stop).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                _logger.LogError("Desk {Desk}: provisioning did not finish within {Timeout} s; Windows is not answering account or Remote Desktop calls",
+                    rt.Id, (int)timeout.TotalSeconds);
+                Fire(rt, DeskTrigger.Fail,
+                    $"provisioning did not finish within {(int)timeout.TotalSeconds} s: Windows is not answering account or Remote Desktop calls");
+                return null;
+            }
+            catch (DeskProvisioningException ex)
+            {
+                Fire(rt, DeskTrigger.Fail, ex.Message);
+                return null;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                if (attempt >= attempts)
+                {
+                    _logger.LogError(ex, "Provisioning desk {Desk} failed {Attempts} times; giving up", rt.Id, attempt);
+                    Fire(rt, DeskTrigger.Fail, attempts > 1 ? $"provisioning failed {attempt} times: {ex.Message}" : $"provisioning failed: {ex.Message}");
+                    return null;
+                }
+
+                var delay = TimeSpan.FromMilliseconds((long)Math.Max(0, o.ProvisionRetryDelayMs) * attempt);
+                _logger.LogWarning("Desk {Desk}: provisioning attempt {Attempt} of {Attempts} failed ({Message}); retrying in {Delay} s",
+                    rt.Id, attempt, attempts, ex.Message, delay.TotalSeconds);
+                await Task.Delay(delay, _time, stop).ConfigureAwait(false);
             }
         }
     }
@@ -1249,13 +1403,18 @@ public sealed class DeskSupervisor : IHostedService
                 break;
 
             case EventMessage { Name: IpcProtocol.Events.SessionLost } e:
+            {
+                int loss;
                 lock (rt.Gate)
                 {
                     rt.SessionLost = true;
+                    loss = ++rt.SessionLosses;
                 }
 
                 _logger.LogWarning("Desk {Desk}: RDP session lost ({Reason}); the seat is reconnecting", rt.Id, EventString(e, "reason") ?? "unknown");
+                _ = WatchSessionLossAsync(rt, seat, loss);
                 break;
+            }
 
             case EventMessage { Name: IpcProtocol.Events.SessionRestored } e:
             {
@@ -1305,6 +1464,26 @@ public sealed class DeskSupervisor : IHostedService
         }
 
         await Task.CompletedTask.ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The seat reconnects a lost session on its own and gives up after its own attempts; this bounds the case where a
+    /// reconnect hangs (TermService stuck, a logon that never finishes): the seat is replaced.
+    /// </summary>
+    private async Task WatchSessionLossAsync(DeskRuntime rt, ChildChannel seat, int loss)
+    {
+        var timeout = TimeSpan.FromMilliseconds(Math.Max(1, _options.Value.SessionLostTimeoutMs));
+        await Task.WhenAny(Task.Delay(timeout, _time), seat.Completion).ConfigureAwait(false);
+        lock (rt.Gate)
+        {
+            if (!ReferenceEquals(rt.Seat, seat) || !rt.SessionLost || rt.SessionLosses != loss || !seat.IsAlive)
+            {
+                return;
+            }
+        }
+
+        _logger.LogError("Desk {Desk}: the RDP session did not come back within {Timeout} s; replacing the seat", rt.Id, (int)timeout.TotalSeconds);
+        seat.Fail($"the RDP session did not come back within {(int)timeout.TotalSeconds} s");
     }
 
     /// <summary>Stops the per-session janitor and shuts the seat down gracefully (it logs the session off).</summary>

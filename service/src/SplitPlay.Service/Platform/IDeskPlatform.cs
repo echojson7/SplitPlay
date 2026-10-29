@@ -16,6 +16,9 @@ public sealed record DeskCredentials(string User, string Domain, string Password
 /// <summary>An existing local account (<see cref="IDeskPlatform.FindAccount"/>).</summary>
 public sealed record DeskAccount(string Name, bool CreatedBySplitPlay);
 
+/// <summary>A Windows session: its id, the local account signed in (null: nobody, or a domain account) and whether it is disconnected.</summary>
+public sealed record HostSession(int Id, string? User, bool Disconnected);
+
 /// <summary><c>deleteUser=true</c> for an account SplitPlay did not create (API: 409).</summary>
 public sealed class DeskUserNotManagedException(string message) : Exception(message);
 
@@ -97,4 +100,10 @@ public interface IDeskPlatform
 
     /// <summary>Enabled local accounts a desk can use (built-in accounts left out).</summary>
     IReadOnlyList<HostUserDto> ListUsers();
+
+    /// <summary>The sessions on this PC (WTSEnumerateSessions).</summary>
+    IReadOnlyList<HostSession> Sessions();
+
+    /// <summary>Logs session <paramref name="sessionId"/> off without waiting for it (WTSLogoffSession).</summary>
+    void LogoffSession(int sessionId);
 }

@@ -50,7 +50,7 @@ internal sealed class TestService : IAsyncDisposable
     public static string NewDataRoot() => Path.Combine(Path.GetTempPath(), "splitplay-svc-" + Guid.NewGuid().ToString("N")[..12]);
 
     public static async Task<TestService> StartAsync(IEnumerable<string>? extraArgs = null, string? webRoot = null, string? dataRoot = null,
-        Action<FakeChildLauncher>? setup = null)
+        Action<FakeChildLauncher>? setup = null, Action<Platform.FakeDeskPlatform>? platform = null)
     {
         var ownsDataRoot = dataRoot is null;
         dataRoot ??= NewDataRoot();
@@ -83,6 +83,7 @@ internal sealed class TestService : IAsyncDisposable
         var app = ServiceHost.Build(options, b => b.WebHost.UseTestServer());
         var service = new TestService(app, dataRoot, ownsDataRoot);
         setup?.Invoke(service.Launcher);
+        platform?.Invoke(service.Platform);
         await app.StartAsync();
         // The start-up check of TermService/UmRdpService runs in the background; let it finish before tests change the fake.
         await app.Services.GetRequiredService<RequiredServicesStarter>().Completion;

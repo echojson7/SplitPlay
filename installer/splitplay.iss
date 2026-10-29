@@ -11,7 +11,7 @@
 ;   /SkipWebView2=1        do not download the WebView2 runtime even if it is missing
 ;   /SkipViGEmBus=1        do not install the bundled ViGEmBus driver even if it is missing
 ;   /ViGEmBusOnServer=1    run the ViGEmBus setup on Windows Server too (it refuses Server; CI tests the timeout path)
-;   /ViGEmBusTimeout=<s>   seconds to wait for the ViGEmBus setup or removal before killing it (default 120)
+;   /ViGEmBusTimeout=<s>   seconds to wait for the ViGEmBus setup or removal before killing it (default 120, 5 to 3600)
 ;   /SkipTermWrap=1        install the TermWrap files but leave TermService's ServiceDll alone
 ;                          ("splitplay host prepare --skip-termwrap"; CI runners must keep their RDP stack)
 ; Uninstaller parameters:
@@ -235,13 +235,16 @@ const
   ViGEmBusMarkerValue = 'ViGEmBusInstalledBySplitPlay';
   ViGEmBusProductValue = 'ViGEmBusProductCode';
   ViGEmBusServiceKey = 'SYSTEM\CurrentControlSet\Services\ViGEmBus';
-  { ProductCode of the ViGEmBus 1.22.0 MSI (setup/ViGEmBus.aip at tag v1.22.0, same in the winget manifest), used only
-    when its Uninstall entry is not found. }
+  { ProductCode of the ViGEmBus 1.22.0 MSI (setup/ViGEmBus.aip at tag v1.22.0, same in the winget manifest): recorded
+    when its Uninstall entry exists, and also when no ViGEmBus entry that the setup added is found. }
   ViGEmBusProductCode = '{9C581C76-2D68-40F8-AA6F-94D3C5215C05}';
   UninstallKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall';
   { The ViGEmBus MSI runs nefconw.exe (deferred custom actions) to create the device node and install the driver. }
   ViGEmBusHelperImage = 'nefconw';
   DefaultViGEmBusTimeoutSec = 120;
+  MaxViGEmBusTimeoutSec = 3600;
+  { After a timeout: how long to wait for the Windows Installer service to finish (commit or roll back). }
+  MsiIdleWaitSec = 60;
   ExitTimedOut = 1460; { ERROR_TIMEOUT }
 
 var
@@ -274,24 +277,32 @@ begin
   Result := ExpandConstant('{sys}\' + Name);
 end;
 
+{ A PowerShell single-quoted string. PowerShell also ends such a string at the typographic single quotes U+2018 to
+  U+201B, so those are doubled too. }
 function PsQuote(const S: String): String;
 begin
   Result := S;
   StringChangeEx(Result, '''', '''''', True);
+  StringChangeEx(Result, #$2018, #$2018#$2018, True);
+  StringChangeEx(Result, #$2019, #$2019#$2019, True);
+  StringChangeEx(Result, #$201A, #$201A#$201A, True);
+  StringChangeEx(Result, #$201B, #$201B#$201B, True);
   Result := '''' + Result + '''';
 end;
 
 { Like RunHidden, but never waits longer than TimeoutSec (Exec alone waits forever). On timeout it kills every
   HelperImage process (a helper the program waits for, e.g. a custom action of an MSI it runs), gives the program
-  15 s to finish, then kills its whole process tree, and returns ExitTimedOut. Runs through Windows PowerShell;
-  returns -1 or PowerShell's error code if that cannot run. }
+  15 s to finish, then kills its whole process tree, waits up to MsiIdleWaitSec for the Windows Installer service to
+  finish what the program started (it commits or rolls back on its own; killing the helper again could break the
+  rollback), and returns ExitTimedOut. Runs through Windows PowerShell; returns -1 or PowerShell's error code if that
+  cannot run. }
 function RunHiddenWithTimeout(const FileName, Params: String; TimeoutSec: Integer; const HelperImage: String): Integer;
 var
   Script: String;
   Lines: TArrayOfString;
 begin
   Script := ExpandConstant('{tmp}\splitplay-run-with-timeout.ps1');
-  SetArrayLength(Lines, 8);
+  SetArrayLength(Lines, 9);
   Lines[0] := '$ErrorActionPreference = ''Stop''';
   Lines[1] := '$p = Start-Process -FilePath ' + PsQuote(FileName) + ' -ArgumentList ' + PsQuote(Params) +
     ' -PassThru -WindowStyle Hidden';
@@ -300,10 +311,15 @@ begin
   Lines[4] := 'Get-Process -Name ' + PsQuote(HelperImage) +
     ' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue';
   Lines[5] := 'if (-not $p.WaitForExit(15000)) { & taskkill.exe /F /T /PID $p.Id | Out-Null }';
-  Lines[6] := 'Get-Process -Name ' + PsQuote(HelperImage) +
-    ' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue';
-  Lines[7] := 'exit ' + IntToStr(ExitTimedOut);
+  { Global\_MSIExecute exists while the Windows Installer service runs an installation (or its rollback). Any error
+    other than "does not exist" (e.g. access denied) counts as busy. }
+  Lines[6] := '$deadline = (Get-Date).AddSeconds(' + IntToStr(MsiIdleWaitSec) + ')';
+  Lines[7] := 'while ((Get-Date) -lt $deadline) { $m = $null; try { if (-not [System.Threading.Mutex]::TryOpenExisting(' +
+    '''Global\_MSIExecute'', [ref] $m)) { break }; $m.Dispose() } catch { }; Start-Sleep -Milliseconds 500 }';
+  Lines[8] := 'exit ' + IntToStr(ExitTimedOut);
   Log(Format('Running with a %d s timeout: "%s" %s', [TimeoutSec, FileName, Params]));
+  { Inno Setup writes this file as UTF-8 with a BOM (SaveStringsToUTF8FileWithoutBOM is the variant without one),
+    which Windows PowerShell 5.1 needs to read non-ASCII paths (e.g. Cyrillic) correctly. }
   if not SaveStringsToUTF8File(Script, Lines, False) then
   begin
     Log('  could not write ' + Script);
@@ -313,16 +329,20 @@ begin
   Result := RunHidden(SysTool('WindowsPowerShell\v1.0\powershell.exe'),
     '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + AddQuotes(Script));
   if Result = ExitTimedOut then
-    Log(Format('  timed out after %d s; killed %s.exe and the process tree', [TimeoutSec, HelperImage]));
+    Log(Format('  timed out after %d s; killed %s.exe and the process tree, waited up to %d s for Windows Installer',
+      [TimeoutSec, HelperImage, MsiIdleWaitSec]));
   DeleteFile(Script);
 end;
 
+{ 5 to 3600 s (more would overflow the milliseconds passed to WaitForExit). }
 function ViGEmBusTimeoutSec: Integer;
 begin
   Result := StrToIntDef(ExpandConstant('{param:ViGEmBusTimeout|' + IntToStr(DefaultViGEmBusTimeoutSec) + '}'),
     DefaultViGEmBusTimeoutSec);
   if Result < 5 then
-    Result := 5;
+    Result := 5
+  else if Result > MaxViGEmBusTimeoutSec then
+    Result := MaxViGEmBusTimeoutSec;
 end;
 
 function ServiceExists: Boolean;
@@ -510,31 +530,66 @@ begin
   end;
 end;
 
-{ The Windows Installer product code of the installed ViGEmBus (its Uninstall entry), or '' if there is none. }
-function FindViGEmBusProductIn(const RootKey: Integer): String;
-var
-  Keys: TArrayOfString;
-  I: Integer;
-  Name: String;
+{ The Uninstall subkeys of one registry view (empty if there are none). }
+procedure GetUninstallKeys(const RootKey: Integer; var Keys: TArrayOfString);
 begin
-  Result := '';
   if not RegGetSubkeyNames(RootKey, UninstallKey, Keys) then
-    Exit;
-  for I := 0 to GetArrayLength(Keys) - 1 do
-    if (Copy(Keys[I], 1, 1) = '{') and RegQueryStringValue(RootKey, UninstallKey + '\' + Keys[I], 'DisplayName', Name) and
-      ((Pos('VIGEM', Uppercase(Name)) > 0) or (Pos('VIRTUAL GAMEPAD EMULATION', Uppercase(Name)) > 0)) then
+    SetArrayLength(Keys, 0);
+end;
+
+function InList(const S: String; const List: TArrayOfString): Boolean;
+var
+  I: Integer;
+begin
+  Result := False;
+  for I := 0 to GetArrayLength(List) - 1 do
+    if CompareText(List[I], S) = 0 then
     begin
-      Log('ViGEmBus Uninstall entry: ' + Keys[I] + ' (' + Name + ')');
-      Result := Keys[I];
+      Result := True;
       Exit;
     end;
 end;
 
-function FindViGEmBusProduct: String;
+{ A Windows Installer Uninstall entry that is not in Before, names ViGEm and is published by Nefarius, or ''. }
+function FindNewViGEmBusProductIn(const RootKey: Integer; const Before: TArrayOfString): String;
+var
+  Keys: TArrayOfString;
+  I: Integer;
+  Name, Publisher: String;
 begin
-  Result := FindViGEmBusProductIn(HKLM64);
+  Result := '';
+  GetUninstallKeys(RootKey, Keys);
+  for I := 0 to GetArrayLength(Keys) - 1 do
+    if (Copy(Keys[I], 1, 1) = '{') and not InList(Keys[I], Before) then
+    begin
+      Name := '';
+      Publisher := '';
+      RegQueryStringValue(RootKey, UninstallKey + '\' + Keys[I], 'DisplayName', Name);
+      RegQueryStringValue(RootKey, UninstallKey + '\' + Keys[I], 'Publisher', Publisher);
+      if ((Pos('VIGEM', Uppercase(Name)) > 0) or (Pos('VIRTUAL GAMEPAD EMULATION', Uppercase(Name)) > 0)) and
+        (Pos('NEFARIUS', Uppercase(Publisher)) > 0) then
+      begin
+        Log('ViGEmBus Uninstall entry (new): ' + Keys[I] + ' (' + Name + ', ' + Publisher + ')');
+        Result := Keys[I];
+        Exit;
+      end;
+    end;
+end;
+
+{ The Windows Installer product code of the ViGEmBus that the bundled setup installed: the known 1.22.0 code when its
+  Uninstall entry exists, otherwise a matching entry that the setup added (not in the Before lists), or ''. }
+function FindViGEmBusProduct(const Before64, Before32: TArrayOfString): String;
+begin
+  if RegKeyExists(HKLM64, UninstallKey + '\' + ViGEmBusProductCode) or
+    RegKeyExists(HKLM32, UninstallKey + '\' + ViGEmBusProductCode) then
+  begin
+    Log('ViGEmBus Uninstall entry: ' + ViGEmBusProductCode + ' (1.22.0)');
+    Result := ViGEmBusProductCode;
+    Exit;
+  end;
+  Result := FindNewViGEmBusProductIn(HKLM64, Before64);
   if Result = '' then
-    Result := FindViGEmBusProductIn(HKLM32);
+    Result := FindNewViGEmBusProductIn(HKLM32, Before32);
 end;
 
 { Interim gamepads (until the Stage 4 per-session pad driver): the workers emulate Moonlight's gamepads as ViGEm pads,
@@ -545,6 +600,8 @@ var
   Code: Integer;
   Product: String;
   V: TWindowsVersion;
+  Before64, Before32: TArrayOfString;
+  Installed: Boolean;
 begin
   if ParamIsSet('SkipViGEmBus') then
   begin
@@ -574,22 +631,37 @@ begin
     Log('ViGEmBus: could not extract the setup: ' + GetExceptionMessage);
     Exit;
   end;
+  { The Uninstall entries before the setup runs, to tell which one it adds. }
+  GetUninstallKeys(HKLM64, Before64);
+  GetUninstallKeys(HKLM32, Before32);
   { Advanced Installer bootstrapper: /exenoui = no bootstrapper UI, /qn /norestart go to msiexec, /exelog = its log. }
   Code := RunHiddenWithTimeout(ExpandConstant('{tmp}\{#ViGEmBusSetup}'),
     '/exenoui /qn /norestart /exelog ' + AddQuotes(DataDir + '\logs\vigembus-setup.log'),
     ViGEmBusTimeoutSec, ViGEmBusHelperImage);
   if (Code = 3010) or (Code = 1641) then
     ViGEmBusRebootRequired := True;
+  Installed := False;
   if Code = ExitTimedOut then
-    Log('ViGEmBus setup timed out and was stopped; continuing without gamepads (not recorded as installed)')
+  begin
+    { Killing the setup does not stop the Windows Installer service, which may still have committed the install. }
+    if ViGEmBusPresent then
+    begin
+      Log('ViGEmBus setup timed out and was stopped, but Windows Installer finished installing the driver');
+      Installed := True;
+    end
+    else
+      Log('ViGEmBus setup timed out and was stopped; continuing without gamepads (not recorded as installed)');
+  end
   else if (Code <> 0) and (Code <> 3010) and (Code <> 1641) then
     Log(Format('ViGEmBus setup failed (exit code %d); continuing without gamepads, see %s', [Code,
       DataDir + '\logs\vigembus-setup.log']))
   else if not ViGEmBusPresent then
     Log('ViGEmBus setup reported success but no ViGEmBus driver is present; continuing without gamepads')
   else
+    Installed := True;
+  if Installed then
   begin
-    Product := FindViGEmBusProduct;
+    Product := FindViGEmBusProduct(Before64, Before32);
     if Product = '' then
     begin
       Log('ViGEmBus: no Uninstall entry found, recording the 1.22.0 product code');

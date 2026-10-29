@@ -91,10 +91,15 @@ repository's `LICENSE` and `NOTICE.md` are added by the script.
    `ViGEmBus` service), runs the bundled setup silently with `/exenoui /qn /norestart /exelog
    %ProgramData%\SplitPlay\logs\vigembus-setup.log` (Advanced Installer bootstrapper: no bootstrapper UI, msiexec
    without UI, no restart). If the driver is then present, setup records `ViGEmBusInstalledBySplitPlay=1` and the
-   MSI product code (`ViGEmBusProductCode`) in `HKLM\Software\SplitPlay`. A failure is only logged; SplitPlay is
-   installed anyway and desks have no gamepads. An existing ViGEmBus is left alone. Exit code 3010 asks for a restart.
+   MSI product code (`ViGEmBusProductCode`) in `HKLM\Software\SplitPlay`: the known 1.22.0 code
+   `{9C581C76-2D68-40F8-AA6F-94D3C5215C05}` when its Uninstall entry exists, otherwise an Uninstall entry that the
+   setup added, whose DisplayName names ViGEm and whose Publisher is Nefarius (the 1.22.0 code if there is none). A
+   failure is only logged; SplitPlay is installed anyway and desks have no gamepads. An existing ViGEmBus is left
+   alone. Exit code 3010 asks for a restart.
    The setup never blocks SplitPlay's: it runs through a PowerShell wrapper with a timeout (`/ViGEmBusTimeout`,
    default 120 s); on timeout the wrapper kills the MSI's `nefconw.exe` helper, then the setup's process tree, and
+   waits up to 60 s for the Windows Installer service to finish (the `Global\_MSIExecute` mutex), which commits or
+   rolls back on its own. Setup then checks again: if the driver is present it is recorded as above, otherwise
    nothing is recorded. On Windows Server the step is skipped: the ViGEmBus 1.22.0 MSI has a launch condition that
    refuses 64-bit Windows Server, and on the windows-2022 runner its setup never returned.
 9. Runs `splitplay.exe service install` (only if the service is not registered yet) and starts the service.
@@ -128,7 +133,7 @@ Standard Inno Setup switches (`/SILENT`, `/VERYSILENT`, `/SUPPRESSMSGBOXES`, `/L
 | setup | `/SkipWebView2=1` | never download WebView2 |
 | setup | `/SkipViGEmBus=1` | do not install ViGEmBus even if it is missing (desks then have no gamepads) |
 | setup | `/ViGEmBusOnServer=1` | run the ViGEmBus setup on Windows Server too (testing the timeout path; it refuses Server) |
-| setup, unins000.exe | `/ViGEmBusTimeout=<s>` | seconds to wait for the ViGEmBus setup or its removal before killing it (default 120, minimum 5) |
+| setup, unins000.exe | `/ViGEmBusTimeout=<s>` | seconds to wait for the ViGEmBus setup or its removal before killing it (default 120, 5 to 3600) |
 | setup | `/SkipTermWrap=1` | install the TermWrap files but run `host prepare --skip-termwrap` (TermService untouched; CI) |
 | setup | `/COMPONENTS=core` | do not install TermWrap at all |
 | setup | `/TASKS="!trayautostart"` | do not start the tray at sign-in |

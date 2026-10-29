@@ -1,0 +1,772 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 12:00:00 +0000
+Subject: [PATCH] splitplay: live stream stats in heartbeats,
+ client_connected/disconnected
+
+The heartbeat's encoder metrics were always 0. Fill them from the stream
+internals and describe every running stream, so that SplitPlay can show
+which Moonlight device is on a desk and how the stream is doing
+(docs/contracts/ipc.md).
+
+New module src/splitplay/live_stats.{h,cpp}. The streaming threads only
+bump counters; rates, percentiles and JSON are computed by the heartbeat
+thread once per interval:
+
+- fps: video frames handed to the network by videoBroadcastThread (one
+  per packet_t, repeated frames included).
+- bitrate_kbps: video bytes actually put on the wire for those frames:
+  every FEC block's shards x (prefix + block size), i.e. data and parity
+  shards with RTP/NV headers and encryption prefixes.
+- encode_ms_p50/p99: host capture-to-send latency. The DDA/WGC capture
+  timestamp (QPC of the present) to the moment videoBroadcastThread picks
+  the encoded frame up, the same value Sunshine already puts into
+  frame_processing_latency for Moonlight's "host processing latency".
+  Repeated frames carry no capture timestamp and are left out.
+- loss_pct: frames the client reports lost / frames sent in the interval.
+  Current Moonlight never sends IDX_LOSS_STATS to Sunshine (it sends
+  periodic pings and per-frame FEC status instead), so the source is its
+  reference frame invalidation requests (IDX_INVALIDATE_REF_FRAMES,
+  frames first..last, overlaps counted once); a legacy IDX_LOSS_STATS
+  count is added when one arrives. Loss that is recovered by FEC is not
+  loss here, and IDR-only recovery (no RFI) carries no frame range and is
+  not counted.
+- rtt_ms (new): ENetPeer::roundTripTime of the stream's control peer,
+  read by controlBroadcastThread, the thread that services the ENet host.
+
+With several streams on one desk: fps and rtt_ms are the highest of the
+streams, bitrate_kbps their sum, loss and encode percentiles pooled.
+
+The heartbeat gets a "sessions" array with one entry per running stream:
+id (the RTSP launch session id), client and client_uuid (the paired
+client owning the launch's TLS client certificate, looked up in
+make_launch_session; null when unknown), address, width/height/fps_requested, codec (h264, hevc, av1),
+bitrate_kbps_requested (Moonlight's configured bitrate, before the host's
+FEC and audio adjustments), hdr (10-bit stream requested), started_at,
+plus the per-stream fps, bitrate_kbps, encode_ms_p50/p99, loss_pct and
+rtt_ms (null until the control peer connects).
+
+Events: client_connected with the session fields when
+stream::session::start() succeeds, client_disconnected when
+stream::session::join() has stopped the stream's threads.
+
+Heartbeats and these events are built and sent under one mutex, so a
+heartbeat never contradicts an event sent before it (a stream missing
+right after client_connected or back after client_disconnected).
+session_count(), which reaps ended streams, runs before that lock.
+
+Cost on the hot path: per sent frame two relaxed atomic adds and, for
+frames with a capture timestamp, one uncontended lock to store a 16-bit
+sample (at most 1024 per interval). The control thread stores one atomic
+per loop and per loss report.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index 085a64eb2961da545193d98bdec710ee6d56ef15..771944411160eb00c2120d40165239aab7259e1b 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -175,6 +175,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/stat_trackers.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/control_client.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/control_client.h"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/self_test.cpp"
+diff --git a/src/nvhttp.cpp b/src/nvhttp.cpp
+index e260141a7d781e2ca2b0c142b4f8f3630d280c88..9a8d33cedf351ba2a076dc05876bb63e9be934d4 100644
+--- a/src/nvhttp.cpp
++++ b/src/nvhttp.cpp
+@@ -405,6 +405,14 @@ namespace nvhttp {
+     }
+     launch_session->rtsp_url_scheme = launch_session->rtsp_cipher ? "rtspenc://"s : "rtsp://"s;
+     launch_session->client_cert = last_verified_client_cert;
++    // SplitPlay: name the paired client for the live stats (docs/contracts/ipc.md, client_connected).
++    for (const auto &named_cert : client_root.named_devices) {
++      if (named_cert.cert == launch_session->client_cert) {
++        launch_session->client_name = named_cert.name;
++        launch_session->client_uuid = named_cert.uuid;
++        break;
++      }
++    }
+ 
+     // Generate the unique identifiers for this connection that we will send later during RTSP handshake
+     unsigned char raw_payload[8];
+diff --git a/src/rtsp.cpp b/src/rtsp.cpp
+index dd8d4c9dfa17910d5bef8a405462e74fd2f6974f..0d775fb7652369dfd00a7d8891cc84e1afe2311f 100644
+--- a/src/rtsp.cpp
++++ b/src/rtsp.cpp
+@@ -1203,6 +1203,7 @@ namespace rtsp_stream {
+       config.monitor.enableIntraRefresh = (int) util::from_view(args.at("x-ss-video[0].intraRefresh"sv));
+ 
+       configuredBitrateKbps = util::from_view(args.at("x-ml-video.configuredBitrateKbps"sv));
++      config.clientBitrateKbps = configuredBitrateKbps ? (int) configuredBitrateKbps : config.monitor.bitrate;
+     } catch (std::out_of_range &) {
+       respond(sock, session, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
+       return;
+diff --git a/src/rtsp.h b/src/rtsp.h
+index 7857835f0137b48bc3b71bc46e4eda9dfc7ee05a..05463a038a8a5219346313723af1fc77daa25304 100644
+--- a/src/rtsp.h
++++ b/src/rtsp.h
+@@ -43,6 +43,8 @@ namespace rtsp_stream {
+     std::string rtsp_url_scheme;  ///< URL scheme selected by the RTSP SETUP flow.
+     uint32_t rtsp_iv_counter;  ///< Counter value mixed into encrypted RTSP IVs.
+     std::string client_cert;  ///< PEM certificate for the paired Moonlight client.
++    std::string client_name;  ///< SplitPlay: name of the paired client owning client_cert, empty when unknown.
++    std::string client_uuid;  ///< SplitPlay: UUID of the paired client owning client_cert, empty when unknown.
+   };
+ 
+   /**
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index b86eef58f7ab10f95379fb6ef16912970c26660c..1ba8f47a60b1889bdef446604740b2954c982fff 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -28,6 +28,7 @@
+ 
+ // local includes
+ #include "control_client.h"
++#include "live_stats.h"
+ #include "options.h"
+ #include "src/config.h"
+ #include "src/entry_handler.h"
+@@ -299,20 +300,19 @@ namespace splitplay::control {
+         std::condition_variable_any cv;
+         std::uint64_t seq = 0;
+         while (!st.stop_requested() && !stopping) {
++          // session_count() also reaps ended streams (client_disconnected); it must run outside report_heartbeat().
+           const int clients = rtsp_stream::session_count();
+           const char *state = !ready ? "starting" : (clients > 0 ? "streaming" : "idle");
+-          send({
+-            {"type", "heartbeat"},
+-            {"seq", ++seq},
+-            {"state", state},
+-            {"metrics", {
+-                          {"fps", 0},
+-                          {"bitrate_kbps", 0},
+-                          {"encode_ms_p50", 0},
+-                          {"encode_ms_p99", 0},
+-                          {"loss_pct", 0},
+-                          {"clients", clients},
+-                        }},
++          live_stats::report_heartbeat([&](json live) {
++            json metrics = std::move(live["metrics"]);
++            metrics["clients"] = clients;
++            send({
++              {"type", "heartbeat"},
++              {"seq", ++seq},
++              {"state", state},
++              {"metrics", std::move(metrics)},
++              {"sessions", std::move(live["sessions"])},
++            });
+           });
+           std::unique_lock lk {m};
+           cv.wait_for(lk, st, heartbeat_interval, []() {
+@@ -536,6 +536,12 @@ namespace splitplay::control {
+     }
+   }
+ 
++  void send_event(const std::string &name, const nlohmann::json &data) {
++    if (client) {
++      client->send_event(name, data);
++    }
++  }
++
+   void stop() {
+     client.reset();
+   }
+@@ -554,6 +560,9 @@ namespace splitplay::control {
+   void request_mode(int, int, int, std::chrono::milliseconds) {
+   }
+ 
++  void send_event(const std::string &, const nlohmann::json &) {
++  }
++
+   void stop() {
+   }
+ #endif
+diff --git a/src/splitplay/control_client.h b/src/splitplay/control_client.h
+index 69cbb360773281f4a03e097dc84b2177441121cd..cd6035da12562e25485c261d3789493bc591f9ab 100644
+--- a/src/splitplay/control_client.h
++++ b/src/splitplay/control_client.h
+@@ -7,6 +7,10 @@
+ 
+ // standard includes
+ #include <chrono>
++#include <string>
++
++// lib includes
++#include <nlohmann/json.hpp>
+ 
+ namespace splitplay::control {
+   /**
+@@ -39,6 +43,14 @@ namespace splitplay::control {
+    */
+   void request_mode(int width, int height, int fps, std::chrono::milliseconds timeout);
+ 
++  /**
++   * @brief Send `{"type":"event","name":name,"data":data}` to the service. A no-op without a control pipe.
++   *
++   * @param name Event name (docs/contracts/ipc.md).
++   * @param data Event payload.
++   */
++  void send_event(const std::string &name, const nlohmann::json &data);
++
+   /**
+    * @brief Stop the heartbeat and reader threads and close the pipe.
+    */
+diff --git a/src/splitplay/live_stats.cpp b/src/splitplay/live_stats.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..f120c0d48f6dc06f7cb5dc856956705a6c8358b1
+--- /dev/null
++++ b/src/splitplay/live_stats.cpp
+@@ -0,0 +1,285 @@
++/**
++ * @file src/splitplay/live_stats.cpp
++ * @brief Live stream statistics for the SplitPlay heartbeat (docs/contracts/ipc.md).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++// standard includes
++#include <algorithm>
++#include <array>
++#include <atomic>
++#include <cmath>
++#include <cstddef>
++#include <cstdio>
++#include <mutex>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++// local includes
++#include "control_client.h"
++#include "live_stats.h"
++
++using json = nlohmann::json;
++
++namespace splitplay::live_stats {
++  namespace {
++    /// Latency samples kept per heartbeat interval and stream; more than any frame rate Moonlight offers.
++    constexpr std::size_t max_samples = 1024;
++    /// A single loss report never counts more than this many frames (protects against a bogus range).
++    constexpr std::int64_t max_lost_per_report = 1000;
++  }  // namespace
++
++  class session_stats_t {
++  public:
++    explicit session_stats_t(session_info_t i):
++        info {std::move(i)} {
++    }
++
++    session_info_t info;  ///< Written by started() before the stream is published, read-only afterwards.
++
++    std::atomic<std::uint64_t> frames {0};  ///< Video frames sent.
++    std::atomic<std::uint64_t> bytes {0};  ///< Video bytes sent (FEC and headers included).
++    std::atomic<std::uint64_t> lost {0};  ///< Frames the client reported lost.
++    std::atomic<std::int64_t> highest_lost {-1};  ///< Last frame index already counted as lost.
++    std::atomic<std::int64_t> rtt_ms {-1};  ///< ENet round-trip time, -1 until the control peer is connected.
++
++    std::mutex samples_mutex;
++    std::array<std::uint16_t, max_samples> samples {};  ///< Capture-to-send latencies, 0.1 ms units.
++    std::size_t sample_count = 0;
++
++    // Owned by the heartbeat (serialised by report_mutex).
++    std::uint64_t seen_frames = 0;
++    std::uint64_t seen_bytes = 0;
++    std::uint64_t seen_lost = 0;
++    std::chrono::steady_clock::time_point seen_at {};
++
++    bool registered = false;  ///< Guarded by registry_mutex.
++  };
++
++  namespace {
++    /// Orders heartbeats and client events on the pipe; taken before registry_mutex, never under it.
++    std::mutex report_mutex;
++    std::mutex registry_mutex;
++    std::vector<std::shared_ptr<session_stats_t>> registry;  ///< Running streams, in start order.
++
++    double round1(double v) {
++      return std::round(v * 10.0) / 10.0;
++    }
++
++    std::string iso_time(std::chrono::system_clock::time_point tp) {
++      // Calendar arithmetic only (C++20 <chrono>): no gmtime and no platform API.
++      using namespace std::chrono;
++      const auto secs = floor<seconds>(tp);
++      const auto day = floor<days>(secs);
++      const year_month_day ymd {day};
++      const hh_mm_ss hms {secs - day};
++      char buf[32] {};
++      std::snprintf(buf, sizeof(buf), "%04d-%02u-%02uT%02d:%02d:%02dZ", static_cast<int>(ymd.year()), static_cast<unsigned>(ymd.month()), static_cast<unsigned>(ymd.day()), static_cast<int>(hms.hours().count()), static_cast<int>(hms.minutes().count()), static_cast<int>(hms.seconds().count()));
++      return buf;
++    }
++
++    json optional_string(const std::optional<std::string> &v) {
++      return v && !v->empty() ? json(*v) : json(nullptr);
++    }
++
++    json info_json(const session_info_t &info) {
++      return {
++        {"id", info.id},
++        {"client", optional_string(info.client)},
++        {"client_uuid", optional_string(info.client_uuid)},
++        {"address", info.address},
++        {"width", info.width},
++        {"height", info.height},
++        {"fps_requested", info.fps_requested},
++        {"codec", info.codec},
++        {"bitrate_kbps_requested", info.bitrate_kbps_requested},
++        {"hdr", info.hdr},
++        {"started_at", iso_time(info.started_at)},
++      };
++    }
++
++    /**
++     * @brief Nearest-rank percentile of samples in 0.1 ms units, in ms. Sorts `v`.
++     */
++    double percentile_ms(std::vector<std::uint16_t> &v, double q) {
++      if (v.empty()) {
++        return 0;
++      }
++      std::sort(v.begin(), v.end());
++      auto rank = static_cast<std::size_t>(std::ceil(q * static_cast<double>(v.size())));
++      rank = std::clamp<std::size_t>(rank, 1, v.size());
++      return static_cast<double>(v[rank - 1]) / 10.0;
++    }
++  }  // namespace
++
++  std::string codec_name(int video_format) {
++    switch (video_format) {
++      case 1:
++        return "hevc";
++      case 2:
++        return "av1";
++      default:
++        return "h264";
++    }
++  }
++
++  std::shared_ptr<session_stats_t> create(session_info_t info) {
++    return std::make_shared<session_stats_t>(std::move(info));
++  }
++
++  void started(const std::shared_ptr<session_stats_t> &stats, const std::string &address) {
++    if (!stats) {
++      return;
++    }
++    std::lock_guard order {report_mutex};
++    json event;
++    {
++      std::lock_guard lg {registry_mutex};
++      if (stats->registered) {
++        return;
++      }
++      // An IPv4 client on a dual-stack socket shows up as ::ffff:a.b.c.d.
++      constexpr std::string_view v4_mapped {"::ffff:"};
++      const bool mapped = address.size() > v4_mapped.size() && address.compare(0, v4_mapped.size(), v4_mapped) == 0 && address.find('.') != std::string::npos;
++      stats->info.address = mapped ? address.substr(v4_mapped.size()) : address;
++      stats->info.started_at = std::chrono::system_clock::now();
++      stats->seen_at = std::chrono::steady_clock::now();
++      stats->registered = true;
++      registry.push_back(stats);
++      event = info_json(stats->info);
++    }
++    control::send_event("client_connected", event);
++  }
++
++  void ended(const std::shared_ptr<session_stats_t> &stats) {
++    if (!stats) {
++      return;
++    }
++    std::lock_guard order {report_mutex};
++    json event;
++    {
++      std::lock_guard lg {registry_mutex};
++      auto it = std::find(registry.begin(), registry.end(), stats);
++      if (it == registry.end()) {
++        return;
++      }
++      registry.erase(it);
++      event = info_json(stats->info);
++    }
++    control::send_event("client_disconnected", event);
++  }
++
++  void frame_sent(session_stats_t *stats, std::uint64_t wire_bytes, std::optional<std::uint16_t> latency_100us) noexcept {
++    if (!stats) {
++      return;
++    }
++    stats->frames.fetch_add(1, std::memory_order_relaxed);
++    stats->bytes.fetch_add(wire_bytes, std::memory_order_relaxed);
++    if (latency_100us) {
++      std::lock_guard lg {stats->samples_mutex};
++      if (stats->sample_count < max_samples) {
++        stats->samples[stats->sample_count++] = *latency_100us;
++      }
++    }
++  }
++
++  void frames_lost(session_stats_t *stats, std::int64_t first, std::int64_t last) noexcept {
++    if (!stats || last < first) {
++      return;
++    }
++    // Reports come from the control thread only; a later range may overlap an earlier one.
++    const auto highest = stats->highest_lost.load(std::memory_order_relaxed);
++    if (last <= highest) {
++      return;
++    }
++    first = std::max(first, highest + 1);
++    stats->highest_lost.store(last, std::memory_order_relaxed);
++    stats->lost.fetch_add(static_cast<std::uint64_t>(std::min(last - first + 1, max_lost_per_report)), std::memory_order_relaxed);
++  }
++
++  void loss_count(session_stats_t *stats, std::int32_t count) noexcept {
++    if (!stats || count <= 0) {
++      return;
++    }
++    stats->lost.fetch_add(static_cast<std::uint64_t>(std::min<std::int64_t>(count, max_lost_per_report)), std::memory_order_relaxed);
++  }
++
++  void rtt(session_stats_t *stats, std::uint32_t rtt_ms) noexcept {
++    if (stats) {
++      stats->rtt_ms.store(rtt_ms, std::memory_order_relaxed);
++    }
++  }
++
++  void report_heartbeat(const std::function<void(json)> &send) {
++    std::lock_guard order {report_mutex};
++
++    std::vector<std::shared_ptr<session_stats_t>> active;
++    {
++      std::lock_guard lg {registry_mutex};
++      active = registry;
++    }
++
++    const auto now = std::chrono::steady_clock::now();
++    std::vector<std::uint16_t> pooled;
++    double max_fps = 0;
++    std::uint64_t total_kbps = 0;
++    std::uint64_t total_frames = 0;
++    std::uint64_t total_lost = 0;
++    std::int64_t max_rtt = -1;
++    json sessions = json::array();
++
++    for (const auto &s : active) {
++      std::vector<std::uint16_t> mine;
++      {
++        std::lock_guard lg {s->samples_mutex};
++        mine.assign(s->samples.begin(), s->samples.begin() + static_cast<std::ptrdiff_t>(s->sample_count));
++        s->sample_count = 0;
++      }
++
++      const auto frames = s->frames.load(std::memory_order_relaxed);
++      const auto bytes = s->bytes.load(std::memory_order_relaxed);
++      const auto lost = s->lost.load(std::memory_order_relaxed);
++      const auto rtt_ms = s->rtt_ms.load(std::memory_order_relaxed);
++
++      const auto d_frames = frames - s->seen_frames;
++      const auto d_bytes = bytes - s->seen_bytes;
++      const auto d_lost = lost - s->seen_lost;
++      const double seconds = std::chrono::duration<double>(now - s->seen_at).count();
++      s->seen_frames = frames;
++      s->seen_bytes = bytes;
++      s->seen_lost = lost;
++      s->seen_at = now;
++
++      const double fps = seconds > 0.05 ? static_cast<double>(d_frames) / seconds : 0;
++      const auto kbps = seconds > 0.05 ? static_cast<std::uint64_t>(static_cast<double>(d_bytes) * 8 / 1000 / seconds) : 0;
++      const double loss = d_frames > 0 ? std::min(100.0, static_cast<double>(d_lost) * 100.0 / static_cast<double>(d_frames)) : 0;
++
++      json entry = info_json(s->info);
++      entry["fps"] = round1(fps);
++      entry["bitrate_kbps"] = kbps;
++      entry["loss_pct"] = round1(loss);
++      entry["rtt_ms"] = rtt_ms >= 0 ? json(rtt_ms) : json(nullptr);
++      pooled.insert(pooled.end(), mine.begin(), mine.end());
++      entry["encode_ms_p50"] = percentile_ms(mine, 0.50);
++      entry["encode_ms_p99"] = percentile_ms(mine, 0.99);
++      sessions.push_back(std::move(entry));
++
++      max_fps = std::max(max_fps, fps);
++      total_kbps += kbps;
++      total_frames += d_frames;
++      total_lost += d_lost;
++      max_rtt = std::max(max_rtt, rtt_ms);
++    }
++
++    const double loss = total_frames > 0 ? std::min(100.0, static_cast<double>(total_lost) * 100.0 / static_cast<double>(total_frames)) : 0;
++    json metrics {
++      {"fps", round1(max_fps)},
++      {"bitrate_kbps", total_kbps},
++      {"encode_ms_p50", percentile_ms(pooled, 0.50)},
++      {"encode_ms_p99", percentile_ms(pooled, 0.99)},
++      {"loss_pct", round1(loss)},
++      {"rtt_ms", std::max<std::int64_t>(max_rtt, 0)},
++    };
++    send({{"metrics", std::move(metrics)}, {"sessions", std::move(sessions)}});
++  }
++}  // namespace splitplay::live_stats
+diff --git a/src/splitplay/live_stats.h b/src/splitplay/live_stats.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..f0582665eb315ec596f6594ae8c9c649af1b4181
+--- /dev/null
++++ b/src/splitplay/live_stats.h
+@@ -0,0 +1,111 @@
++/**
++ * @file src/splitplay/live_stats.h
++ * @brief Live stream statistics for the SplitPlay heartbeat and the client_connected/client_disconnected events
++ *        (docs/contracts/ipc.md).
++ *
++ * The streaming threads only bump counters: the video broadcast thread adds one sent frame (wire bytes and the
++ * capture-to-send latency it already computes for Moonlight), the control thread stores the ENet round-trip time
++ * and the frames the client reports lost. Everything else (rates, percentiles, JSON) happens on the heartbeat
++ * thread once per second.
++ *
++ * Heartbeats and the client events are built and sent under one mutex, so the service never reads a heartbeat that
++ * contradicts an event sent before it (a stream missing right after client_connected, or back after
++ * client_disconnected).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++#pragma once
++
++// standard includes
++#include <chrono>
++#include <cstdint>
++#include <functional>
++#include <memory>
++#include <optional>
++#include <string>
++
++// lib includes
++#include <nlohmann/json.hpp>
++
++namespace splitplay::live_stats {
++  /**
++   * @brief What the client asked for when the stream was set up. Fixed for the life of the stream.
++   */
++  struct session_info_t {
++    std::uint32_t id = 0;  ///< RTSP launch-session id, unique while the worker runs.
++    std::optional<std::string> client;  ///< Paired client name (empty names are reported as null).
++    std::optional<std::string> client_uuid;  ///< Paired client UUID, as `list_clients` reports it.
++    std::string address;  ///< Client IP address.
++    int width = 0;  ///< Requested width in pixels.
++    int height = 0;  ///< Requested height in pixels.
++    int fps_requested = 0;  ///< Requested frame rate.
++    std::string codec;  ///< `h264`, `hevc` or `av1`.
++    int bitrate_kbps_requested = 0;  ///< Bitrate the client asked for (its configured bitrate when it sends one).
++    bool hdr = false;  ///< The client asked for a 10-bit HDR stream.
++    std::chrono::system_clock::time_point started_at;  ///< Set by started().
++  };
++
++  /**
++   * @brief Counters of one stream. Opaque; owned by the stream session.
++   */
++  class session_stats_t;
++
++  /**
++   * @brief Map Moonlight's `bitStreamFormat` (0, 1, 2) to `h264`, `hevc` or `av1`.
++   */
++  std::string codec_name(int video_format);
++
++  /**
++   * @brief Create the counters for a stream that is being set up. Nothing is reported until started().
++   */
++  std::shared_ptr<session_stats_t> create(session_info_t info);
++
++  /**
++   * @brief The stream is running: report it in heartbeats and send `event client_connected` (through
++   *        splitplay::control::send_event, a no-op without a control pipe).
++   *
++   * @param stats Counters from create(); null is ignored.
++   * @param address Client IP address.
++   */
++  void started(const std::shared_ptr<session_stats_t> &stats, const std::string &address);
++
++  /**
++   * @brief The stream has ended: stop reporting it and send `event client_disconnected`. Safe to call twice.
++   */
++  void ended(const std::shared_ptr<session_stats_t> &stats);
++
++  /**
++   * @brief One video frame was put on the wire (video broadcast thread). Two relaxed atomic adds and, when the frame
++   *        has a capture timestamp, one short uncontended lock to store the latency sample.
++   *
++   * @param stats Counters of the frame's stream; null is ignored.
++   * @param wire_bytes Bytes sent for the frame, FEC parity, headers and encryption prefixes included.
++   * @param latency_100us Capture-to-send latency in units of 0.1 ms, as sent to Moonlight in the frame header;
++   *                      empty for frames without a capture timestamp (repeated frames).
++   */
++  void frame_sent(session_stats_t *stats, std::uint64_t wire_bytes, std::optional<std::uint16_t> latency_100us) noexcept;
++
++  /**
++   * @brief The client reported frames `first`..`last` lost (reference frame invalidation request). Frames that an
++   *        earlier report already covered are not counted again.
++   */
++  void frames_lost(session_stats_t *stats, std::int64_t first, std::int64_t last) noexcept;
++
++  /**
++   * @brief Loss count from a legacy loss-stats message (`IDX_LOSS_STATS`).
++   */
++  void loss_count(session_stats_t *stats, std::int32_t count) noexcept;
++
++  /**
++   * @brief Current round-trip time of the stream's ENet control peer, in milliseconds (control thread).
++   */
++  void rtt(session_stats_t *stats, std::uint32_t rtt_ms) noexcept;
++
++  /**
++   * @brief Measure the desk metrics and running streams since the previous call and hand them to `send` (heartbeat
++   *        thread). `send` runs under the lock that also orders started() and ended() with their events.
++   *
++   * @param send Receives `{"metrics":{"fps","bitrate_kbps","encode_ms_p50","encode_ms_p99","loss_pct","rtt_ms"},
++   *             "sessions":[...]}` and sends the heartbeat.
++   */
++  void report_heartbeat(const std::function<void(nlohmann::json)> &send);
++}  // namespace splitplay::live_stats
+diff --git a/src/stream.cpp b/src/stream.cpp
+index fa0151997bddb89941efd69ed8c4abd612063e50..d77626cfa2db29bd68d3156dcbcfa81aabd19ecf 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -32,6 +32,7 @@ extern "C" {
+ #include "sync.h"
+ #include "system_tray.h"
+ #include "thread_safe.h"
++#include "splitplay/live_stats.h"
+ #include "utility.h"
+ 
+ constexpr int IDX_START_A = 0;  ///< Control-stream message index for the first stream-start packet.
+@@ -537,6 +538,8 @@ namespace stream {
+     std::uint32_t launch_session_id;  ///< RTSP launch-session ID associated with this stream.
+     std::string client_cert;  ///< PEM certificate for the paired client owning the stream.
+ 
++    std::shared_ptr<splitplay::live_stats::session_stats_t> sp_stats;  ///< SplitPlay live stats of this stream.
++
+     safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
+     safe::signal_t controlEnd;  ///< Signal raised when the control channel exits.
+ 
+@@ -1126,6 +1129,8 @@ namespace stream {
+ 
+       auto lastGoodFrame = stats[3];
+ 
++      splitplay::live_stats::loss_count(session->sp_stats.get(), count);
++
+       BOOST_LOG(verbose)
+         << "type [IDX_LOSS_STATS]"sv << std::endl
+         << "---begin stats---" << std::endl
+@@ -1151,6 +1156,8 @@ namespace stream {
+         << "firstFrame [" << firstFrame << ']' << std::endl
+         << "lastFrame [" << lastFrame << ']';
+ 
++      splitplay::live_stats::frames_lost(session->sp_stats.get(), firstFrame, lastFrame);
++
+       session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
+     });
+ 
+@@ -1299,6 +1306,8 @@ namespace stream {
+           if (!session->control.peer) {
+             has_session_awaiting_peer = true;
+           } else {
++            splitplay::live_stats::rtt(session->sp_stats.get(), session->control.peer->roundTripTime);
++
+             auto &feedback_queue = session->control.feedback_queue;
+             while (feedback_queue->peek()) {
+               auto feedback_msg = feedback_queue->pop();
+@@ -1527,6 +1536,7 @@ namespace stream {
+         frame_header.lastPayloadLen = session->config.packetsize - sizeof(NV_VIDEO_PACKET);
+       }
+ 
++      std::optional<std::uint16_t> sp_latency;  // SplitPlay live stats: capture-to-send latency, 0.1 ms units
+       if (packet->frame_timestamp) {
+         auto duration_to_latency = [](const std::chrono::steady_clock::duration &duration) {
+           const auto duration_us = std::chrono::duration_cast<std::chrono::microseconds>(duration).count();
+@@ -1536,6 +1546,7 @@ namespace stream {
+         uint16_t latency = duration_to_latency(std::chrono::steady_clock::now() - *packet->frame_timestamp);
+         frame_header.frame_processing_latency = latency;
+         frame_processing_latency_logger.collect_and_log(latency / 10.);
++        sp_latency = latency;
+       } else {
+         frame_header.frame_processing_latency = 0;
+       }
+@@ -1574,6 +1585,7 @@ namespace stream {
+       }
+ 
+       std::array<std::string_view, MAX_FEC_BLOCKS> fec_blocks;
++      std::uint64_t sp_wire_bytes = 0;  // SplitPlay live stats: bytes put on the wire for this frame
+       auto fec_blocks_begin = std::begin(fec_blocks);
+       auto fec_blocks_end = std::begin(fec_blocks) + fec_blocks_needed;
+ 
+@@ -1773,11 +1785,14 @@ namespace stream {
+                              << (packet->is_idr() ? " Key" : "")
+                              << (packet->after_ref_frame_invalidation ? " RFI" : "");
+ 
++          sp_wire_bytes += shards.size() * (shards.prefixsize + shards.blocksize);
++
+           ++blockIndex;
+           lowseq += shards.size();
+         });
+ 
+         session->video.lowseq = lowseq;
++        splitplay::live_stats::frame_sent(session->sp_stats.get(), sp_wire_bytes, sp_latency);
+       } catch (const std::exception &e) {
+         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
+         std::this_thread::sleep_for(100ms);
+@@ -2181,6 +2196,9 @@ namespace stream {
+       BOOST_LOG(debug) << "Resetting Input..."sv;
+       input::reset(session.input);
+ 
++      // SplitPlay: the stream is over (event client_disconnected, no longer in heartbeats)
++      splitplay::live_stats::ended(session.sp_stats);
++
+       // If this is the last session, invoke the platform callbacks
+       if (--running_sessions == 0) {
+         bool revert_display_config {config::video.dd.config_revert_on_disconnect};
+@@ -2245,6 +2263,9 @@ namespace stream {
+ #endif
+       }
+ 
++      // SplitPlay: report the stream (event client_connected, listed in heartbeats until join())
++      splitplay::live_stats::started(session.sp_stats, addr_string);
++
+       return 0;
+     }
+ 
+@@ -2260,6 +2281,24 @@ namespace stream {
+       session->launch_session_id = launch_session.id;
+       session->client_cert = launch_session.client_cert;
+ 
++      {
++        splitplay::live_stats::session_info_t info;
++        info.id = launch_session.id;
++        if (!launch_session.client_name.empty()) {
++          info.client = launch_session.client_name;
++        }
++        if (!launch_session.client_uuid.empty()) {
++          info.client_uuid = launch_session.client_uuid;
++        }
++        info.width = config.monitor.width;
++        info.height = config.monitor.height;
++        info.fps_requested = config.monitor.framerate;
++        info.codec = splitplay::live_stats::codec_name(config.monitor.videoFormat);
++        info.bitrate_kbps_requested = config.clientBitrateKbps;
++        info.hdr = config.monitor.dynamicRange > 0;
++        session->sp_stats = splitplay::live_stats::create(std::move(info));
++      }
++
+       session->config = config;
+ 
+       session->control.connect_data = launch_session.control_connect_data;
+diff --git a/src/stream.h b/src/stream.h
+index c0b0f9623780ee3784ff81ef8e4627121efcfaf2..639f66b4987f0d77aa110ebfc52e8b4985f3bc5b 100644
+--- a/src/stream.h
++++ b/src/stream.h
+@@ -39,6 +39,8 @@ namespace stream {
+     uint32_t encryptionFlagsEnabled;  ///< Bitmask of GameStream encryption features enabled for the session.
+ 
+     std::optional<int> gcmap;  ///< Optional game-controller mapping override from the launch request.
++
++    int clientBitrateKbps;  ///< SplitPlay: bitrate the client asked for, before the host's FEC and audio adjustments.
+   };
+ 
+   namespace session {

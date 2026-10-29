@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: MIT -->
-<!-- Desk page: status and Play / Stop, the Moonlight address, PIN pairing, devices, display and advanced settings. -->
+<!-- Desk page: status and Play / Stop, the stream right now, the Moonlight address, PIN pairing, devices, display and advanced settings. -->
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
@@ -11,8 +11,19 @@ import DeskSettings from '../components/DeskSettings.vue'
 import PinField from '../components/PinField.vue'
 import StateBadge from '../components/StateBadge.vue'
 import { canStart, copyText, errorText, isRunning, useLive } from '../composables'
-import { deskProgress, FPS_PRESETS, isPresetResolution, moonlightAddress, RESOLUTION_PRESETS, resolutionKey } from '../desk'
-import { fmtDateTime, t } from '../i18n'
+import {
+  deskProgress,
+  deviceName,
+  fmtMs,
+  FPS_PRESETS,
+  isPresetResolution,
+  liveStream,
+  moonlightAddress,
+  RESOLUTION_PRESETS,
+  resolutionKey,
+  streamSummary,
+} from '../desk'
+import { fmtDateTime, fmtNumber, t } from '../i18n'
 import { store } from '../store'
 import { toast } from '../toast'
 
@@ -29,6 +40,22 @@ const clients = ref<PairedClient[]>([])
 const running = computed(() => (desk.value ? isRunning(desk.value) : false))
 const pairable = computed(() => desk.value?.state === 'Ready' || desk.value?.state === 'Streaming')
 const progress = computed(() => (desk.value ? deskProgress(desk.value.state) : null))
+
+// ---- now: the connected device and live numbers (desk events and the 2 s metrics push)
+const stream = computed(() => (desk.value ? liveStream(desk.value) : null))
+const live = computed(() => {
+  const m = desk.value?.metrics
+  if (!m) return null
+  return {
+    fps: fmtNumber(m.fps ?? 0),
+    ping: m.rttMs !== undefined ? fmtMs(m.rttMs, false) : t('common.none'),
+    encode:
+      m.encodeMsP50 !== undefined
+        ? t('live.encodeValue', { p50: fmtNumber(m.encodeMsP50, 1, 1), p99: fmtNumber(m.encodeMsP99 ?? 0, 1, 1) })
+        : fmtMs(m.encodeMsP99 ?? 0),
+    loss: m.lossPct !== undefined ? t('unit.percent', { value: fmtNumber(m.lossPct, 1) }) : t('common.none'),
+  }
+})
 
 async function load(): Promise<void> {
   try {
@@ -258,6 +285,49 @@ async function remove(): Promise<void> {
         </div>
       </div>
 
+      <h2 class="group-title">{{ t('live.title') }}</h2>
+      <div class="rows" data-live>
+        <div v-if="!stream" class="srow compact" data-live-none>
+          <AppIcon name="laptop" :size="16" />
+          <span class="text muted">{{ t('live.none') }}</span>
+        </div>
+        <template v-else>
+          <div class="srow compact">
+            <AppIcon name="laptop" :size="16" />
+            <div class="text"><span class="title">{{ t('live.device') }}</span></div>
+            <div class="ctl val" data-live-device>
+              <span>{{ deviceName(stream) }}</span>
+              <span v-if="stream.client && stream.address" class="muted">{{ stream.address }}</span>
+            </div>
+          </div>
+          <div class="srow compact">
+            <AppIcon name="monitor" :size="16" />
+            <div class="text"><span class="title">{{ t('live.stream') }}</span></div>
+            <div class="ctl val" data-live-stream>{{ streamSummary(stream) }}</div>
+          </div>
+          <div class="srow compact">
+            <AppIcon name="activity" :size="16" />
+            <div class="text"><span class="title">{{ t('live.fps') }}</span></div>
+            <div class="ctl val" data-live-fps>{{ live?.fps }}</div>
+          </div>
+          <div class="srow compact">
+            <span class="row-pad" />
+            <div class="text"><span class="title">{{ t('live.ping') }}</span></div>
+            <div class="ctl val" data-live-ping>{{ live?.ping }}</div>
+          </div>
+          <div class="srow compact">
+            <span class="row-pad" />
+            <div class="text"><span class="title">{{ t('live.encode') }}</span></div>
+            <div class="ctl val" data-live-encode>{{ live?.encode }}</div>
+          </div>
+          <div class="srow compact">
+            <span class="row-pad" />
+            <div class="text"><span class="title">{{ t('live.loss') }}</span></div>
+            <div class="ctl val" data-live-loss>{{ live?.loss }}</div>
+          </div>
+        </template>
+      </div>
+
       <h2 class="group-title">{{ t('desk.connection') }}</h2>
       <div class="rows">
         <div class="srow">
@@ -440,6 +510,13 @@ async function remove(): Promise<void> {
 .addr {
   font-variant-numeric: tabular-nums;
   user-select: all;
+}
+
+.ctl.val {
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+  flex: 0 1 auto;
+  text-align: right;
 }
 
 .row-pad {

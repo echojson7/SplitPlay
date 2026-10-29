@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: MIT
+using System.Buffers;
+using System.Globalization;
 using System.IO.Pipes;
 using System.Text.Json;
 
@@ -49,8 +51,17 @@ public sealed record FakeChildOptions
 
     public FakeChildBehavior Behavior { get; init; } = FakeChildBehavior.Normal;
 
-    /// <summary>Send <c>client_connected</c> right after ready (drives the desk to Streaming).</summary>
+    /// <summary>
+    /// Worker: after ready, a Moonlight client connects: <c>client_connected</c> with the session fields, then heartbeats
+    /// with plausible live metrics and <c>sessions</c> (drives the desk to Streaming).
+    /// </summary>
     public bool SimulateClient { get; init; }
+
+    /// <summary>The simulated client's name (<see cref="SimulateClient"/>).</summary>
+    public string SimulatedClientName { get; init; } = "Laptop";
+
+    /// <summary>With <see cref="SimulateClient"/>: the client disconnects after this long (<c>client_disconnected</c>).</summary>
+    public TimeSpan? SimulatedClientDuration { get; init; }
 
     /// <summary>Worker: send <c>mode_requested</c> with this mode right after ready.</summary>
     public (int Width, int Height, int Fps)? RequestMode { get; init; }
@@ -133,7 +144,8 @@ public static class FakeChild
 
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var maxHeartbeats = options.Behavior == FakeChildBehavior.StopHeartbeats ? 2 : long.MaxValue;
-        var heartbeats = HeartbeatLoopAsync(connection, options.HeartbeatInterval, maxHeartbeats, heartbeatCts.Token);
+        using var stream = new FakeStream(options);
+        var heartbeats = HeartbeatLoopAsync(connection, options.HeartbeatInterval, maxHeartbeats, stream, heartbeatCts.Token);
 
         try
         {
@@ -187,9 +199,21 @@ public static class FakeChild
 
             if (options.SimulateClient)
             {
-                using var data = JsonDocument.Parse("""{"client":"Fake client"}""");
-                await connection.SendAsync(new EventMessage { Name = IpcProtocol.Events.ClientConnected, Data = data.RootElement.Clone() },
-                    cancellationToken).ConfigureAwait(false);
+                await stream.ConnectAsync(connection, cancellationToken).ConfigureAwait(false);
+                if (options.SimulatedClientDuration is { } duration)
+                {
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            await Task.Delay(duration, cancellationToken).ConfigureAwait(false);
+                            await stream.DisconnectAsync(connection, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (ex is OperationCanceledException or IOException or ObjectDisposedException)
+                        {
+                        }
+                    }, CancellationToken.None);
+                }
             }
 
             return await ServeAsync(connection, options, log, cancellationToken).ConfigureAwait(false);
@@ -288,24 +312,14 @@ public static class FakeChild
         await connection.SendAsync(new EventMessage { Name = name, Data = data.RootElement.Clone() }, ct).ConfigureAwait(false);
     }
 
-    private static async Task HeartbeatLoopAsync(IpcConnection connection, TimeSpan interval, long max, CancellationToken ct)
+    private static async Task HeartbeatLoopAsync(IpcConnection connection, TimeSpan interval, long max, FakeStream stream, CancellationToken ct)
     {
         using var timer = new PeriodicTimer(interval);
-        var metrics = new Dictionary<string, JsonElement>
-        {
-            ["fps"] = JsonSerializer.SerializeToElement(0, Json.IpcJsonContext.Default.Int32),
-            ["bitrate_kbps"] = JsonSerializer.SerializeToElement(0, Json.IpcJsonContext.Default.Int32),
-            ["encode_ms_p50"] = JsonSerializer.SerializeToElement(0, Json.IpcJsonContext.Default.Int32),
-            ["encode_ms_p99"] = JsonSerializer.SerializeToElement(0, Json.IpcJsonContext.Default.Int32),
-            ["loss_pct"] = JsonSerializer.SerializeToElement(0, Json.IpcJsonContext.Default.Int32),
-            ["clients"] = JsonSerializer.SerializeToElement(0, Json.IpcJsonContext.Default.Int32),
-        };
-
         for (long seq = 1; seq <= max; seq++)
         {
             try
             {
-                await connection.SendAsync(new HeartbeatMessage { Seq = seq, State = "idle", Metrics = metrics }, ct).ConfigureAwait(false);
+                await stream.SendHeartbeatAsync(connection, seq, ct).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException or ObjectDisposedException)
             {
@@ -320,6 +334,183 @@ public static class FakeChild
 
         // Hang: keep the pipe open without heartbeats until cancelled.
         await Task.Delay(Timeout.Infinite, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The simulated Moonlight stream of a fake worker: a 1920x1080 HEVC stream at 120 fps with the jitter of a good
+    /// wired LAN. Thread-safe: the heartbeat loop and the client task share it. As in the worker, a heartbeat and a
+    /// client event never cross on the pipe: each is built and sent under <see cref="_order"/>, so a heartbeat always
+    /// agrees with the events before it.
+    /// </summary>
+    private sealed class FakeStream(FakeChildOptions options) : IDisposable
+    {
+        private readonly SemaphoreSlim _order = new(1, 1);
+        private readonly Lock _gate = new();
+        private readonly Random _random = new();
+        private readonly long _id = Random.Shared.NextInt64(1, uint.MaxValue);
+        private bool _streaming;
+        private DateTimeOffset _startedAt;
+
+        private readonly record struct Live(double Fps, int BitrateKbps, double EncodeMsP50, double EncodeMsP99, double LossPct, int RttMs);
+
+        public void Dispose() => _order.Dispose();
+
+        /// <summary>The client connects: listed from now on, then <c>client_connected</c>.</summary>
+        public async Task ConnectAsync(IpcConnection connection, CancellationToken ct)
+        {
+            await _order.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                lock (_gate)
+                {
+                    _streaming = true;
+                    _startedAt = DateTimeOffset.UtcNow;
+                }
+
+                await connection.SendAsync(new EventMessage { Name = IpcProtocol.Events.ClientConnected, Data = SessionEvent() }, ct)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                _order.Release();
+            }
+        }
+
+        /// <summary>The client leaves: no longer listed, then <c>client_disconnected</c>.</summary>
+        public async Task DisconnectAsync(IpcConnection connection, CancellationToken ct)
+        {
+            await _order.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                var ended = SessionEvent();
+                lock (_gate)
+                {
+                    _streaming = false;
+                }
+
+                await connection.SendAsync(new EventMessage { Name = IpcProtocol.Events.ClientDisconnected, Data = ended }, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                _order.Release();
+            }
+        }
+
+        public async Task SendHeartbeatAsync(IpcConnection connection, long seq, CancellationToken ct)
+        {
+            await _order.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                await connection.SendAsync(Heartbeat(seq), ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                _order.Release();
+            }
+        }
+
+        private HeartbeatMessage Heartbeat(long seq)
+        {
+            lock (_gate)
+            {
+                if (!_streaming)
+                {
+                    return new HeartbeatMessage { Seq = seq, State = "idle", Metrics = Metrics(new Live(), clients: 0) };
+                }
+
+                var live = Next();
+                return new HeartbeatMessage
+                {
+                    Seq = seq,
+                    State = "streaming",
+                    Metrics = Metrics(live, clients: 1),
+                    Sessions = ToElement(w =>
+                    {
+                        w.WriteStartArray();
+                        WriteSession(w, live);
+                        w.WriteEndArray();
+                    }),
+                };
+            }
+        }
+
+        /// <summary>The <c>client_connected</c>/<c>client_disconnected</c> data.</summary>
+        private JsonElement SessionEvent()
+        {
+            lock (_gate)
+            {
+                return ToElement(w => WriteSession(w, null));
+            }
+        }
+
+        private void WriteSession(Utf8JsonWriter w, Live? live)
+        {
+            w.WriteStartObject();
+            w.WriteNumber("id", _id);
+            w.WriteString("client", options.SimulatedClientName);
+            w.WriteString("client_uuid", string.Create(CultureInfo.InvariantCulture, $"0f5c3a52-6a3e-4c1b-9a51-{_id % 1_000_000_000_000:D12}"));
+            w.WriteString("address", "192.168.1.42");
+            w.WriteNumber("width", 1920);
+            w.WriteNumber("height", 1080);
+            w.WriteNumber("fps_requested", 120);
+            w.WriteString("codec", "hevc");
+            w.WriteNumber("bitrate_kbps_requested", 50_000);
+            w.WriteBoolean("hdr", false);
+            w.WriteString("started_at", _startedAt.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
+            if (live is { } l)
+            {
+                WriteLive(w, l);
+            }
+
+            w.WriteEndObject();
+        }
+
+        private static void WriteLive(Utf8JsonWriter w, Live l)
+        {
+            w.WriteNumber("fps", l.Fps);
+            w.WriteNumber("bitrate_kbps", l.BitrateKbps);
+            w.WriteNumber("encode_ms_p50", l.EncodeMsP50);
+            w.WriteNumber("encode_ms_p99", l.EncodeMsP99);
+            w.WriteNumber("loss_pct", l.LossPct);
+            w.WriteNumber("rtt_ms", l.RttMs);
+        }
+
+        /// <summary>One heartbeat interval's numbers.</summary>
+        private Live Next()
+        {
+            var p50 = Math.Round(3.1 + (_random.NextDouble() * 0.8), 1);
+            return new Live(
+                Fps: Math.Round(120 - (_random.NextDouble() * 1.6), 1),
+                BitrateKbps: 31_000 + _random.Next(0, 12_000),
+                EncodeMsP50: p50,
+                EncodeMsP99: Math.Round(p50 + 1.2 + (_random.NextDouble() * 2.4), 1),
+                LossPct: _random.Next(0, 10) == 0 ? Math.Round(_random.NextDouble() * 0.8, 1) : 0,
+                RttMs: _random.Next(2, 6));
+        }
+
+        private static Dictionary<string, JsonElement> Metrics(Live live, int clients)
+        {
+            var element = ToElement(w =>
+            {
+                w.WriteStartObject();
+                WriteLive(w, live);
+                w.WriteNumber("clients", clients);
+                w.WriteEndObject();
+            });
+            return element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value, StringComparer.Ordinal);
+        }
+
+        private static JsonElement ToElement(Action<Utf8JsonWriter> write)
+        {
+            var buffer = new ArrayBufferWriter<byte>();
+            using (var w = new Utf8JsonWriter(buffer))
+            {
+                write(w);
+            }
+
+            using var doc = JsonDocument.Parse(buffer.WrittenMemory);
+            return doc.RootElement.Clone();
+        }
     }
 
     private static async Task<int> DrainAsync(IpcConnection connection, CancellationToken ct)

@@ -156,7 +156,7 @@ public sealed class DeskSupervisor : IHostedService
             memoryTotalMb,
             composeMs > 0 ? Math.Round(1000.0 / composeMs, 1) : null,
             _gpus.Get());
-        var desks = List().Select(d => new DeskMetricsEntryDto(d.Id, d.Metrics.Fps, d.Metrics.BitrateKbps, d.Metrics.EncodeMsP99, d.Metrics.Clients)).ToList();
+        var desks = List().Select(d => DeskMetricsEntryDto.From(d.Id, d.Metrics)).ToList();
         return new MetricsDto(host, desks);
     }
 
@@ -678,6 +678,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.ChildState = null;
                 rt.SessionLost = false;
                 rt.Metrics = new DeskMetricsDto();
+                rt.ClearStreams();
                 if (rt.Machine.State == DeskState.Stopping)
                 {
                     rt.Machine.Fire(DeskTrigger.Stopped);
@@ -854,6 +855,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.WorkerAbort = null;
                 rt.ChildPid = null;
                 rt.Metrics = new DeskMetricsDto();
+                rt.ClearStreams();
             }
         }
     }
@@ -1287,14 +1289,34 @@ public sealed class DeskSupervisor : IHostedService
         switch (message)
         {
             case HeartbeatMessage heartbeat:
+            {
+                var changed = false;
                 lock (rt.Gate)
                 {
                     rt.LastHeartbeat = _time.GetUtcNow();
                     rt.ChildState = heartbeat.State;
                     rt.Metrics = DeskRuntime.MapMetrics(heartbeat.Metrics);
+                    if (heartbeat.Sessions is { } sessions)
+                    {
+                        changed = rt.ReplaceStreams(IpcStreamSession.ListFromJson(sessions));
+                    }
+                    else if (heartbeat.Metrics?.ContainsKey("clients") == true && rt.Metrics.Clients == 0)
+                    {
+                        // A worker without "sessions" that reports no clients has no stream either.
+                        changed = rt.ClearStreams();
+                    }
+
+                    // A missed event is caught up here; a transition publishes the desk itself.
+                    changed &= !SyncStreamingState(rt);
+                }
+
+                if (changed)
+                {
+                    Publish(rt);
                 }
 
                 break;
+            }
 
             case ReadyMessage:
                 worker.MarkReady();
@@ -1309,13 +1331,50 @@ public sealed class DeskSupervisor : IHostedService
 
                 break;
 
-            case EventMessage { Name: IpcProtocol.Events.ClientConnected }:
-                Fire(rt, DeskTrigger.ClientConnected);
-                break;
+            case EventMessage { Name: IpcProtocol.Events.ClientConnected } e:
+            {
+                var stream = IpcStreamSession.FromJson(e.Data) ?? new IpcStreamSession();
+                _logger.LogInformation("Desk {Desk}: {Client} ({Address}) connected, {Width}x{Height}@{Fps} {Codec}", rt.Id,
+                    stream.Client ?? "unnamed client", stream.Address ?? "?", stream.Width, stream.Height, stream.FpsRequested, stream.Codec ?? "?");
+                bool changed;
+                lock (rt.Gate)
+                {
+                    changed = rt.AddStream(stream);
+                    changed &= !SyncStreamingState(rt);
+                }
 
-            case EventMessage { Name: IpcProtocol.Events.ClientDisconnected }:
-                Fire(rt, DeskTrigger.ClientDisconnected);
+                if (changed)
+                {
+                    Publish(rt);
+                }
+
                 break;
+            }
+
+            case EventMessage { Name: IpcProtocol.Events.ClientDisconnected } e:
+            {
+                var stream = IpcStreamSession.FromJson(e.Data) ?? new IpcStreamSession();
+                _logger.LogInformation("Desk {Desk}: {Client} ({Address}) disconnected", rt.Id, stream.Client ?? "unnamed client", stream.Address ?? "?");
+                bool changed;
+                lock (rt.Gate)
+                {
+                    changed = rt.RemoveStream(stream);
+                    if (!changed && stream.Id is null && stream.Address is null && rt.Streams.Count == 1)
+                    {
+                        // An event without identifying fields (an older worker): the only stream is the one that ended.
+                        changed = rt.ClearStreams();
+                    }
+
+                    changed &= !SyncStreamingState(rt);
+                }
+
+                if (changed)
+                {
+                    Publish(rt);
+                }
+
+                break;
+            }
 
             case EventMessage { Name: IpcProtocol.Events.ModeRequested } e:
                 _ = ForwardModeAsync(rt, EventInt(e, "width"), EventInt(e, "height"), EventInt(e, "fps"));
@@ -1391,6 +1450,17 @@ public sealed class DeskSupervisor : IHostedService
             return false;
         }
     }
+
+    /// <summary>
+    /// Ready and Streaming follow the stream list: Streaming while at least one Moonlight stream runs. Called under
+    /// <see cref="DeskRuntime.Gate"/>; true when a transition fired (the transition publishes the desk).
+    /// </summary>
+    private static bool SyncStreamingState(DeskRuntime rt) => rt.Machine.State switch
+    {
+        DeskState.Ready when rt.Streams.Count > 0 => rt.Machine.TryFire(DeskTrigger.ClientConnected, out _),
+        DeskState.Streaming when rt.Streams.Count == 0 => rt.Machine.TryFire(DeskTrigger.ClientDisconnected, out _),
+        _ => false,
+    };
 
     private static int? EventInt(EventMessage e, string name) =>
         e.Data is { ValueKind: System.Text.Json.JsonValueKind.Object } d && d.TryGetProperty(name, out var v) && v.TryGetInt32(out var i) ? i : null;

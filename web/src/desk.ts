@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Pure desk helpers shared by the library, the add-desk wizard and the desk page.
 
-import type { Desk, DeskConfig, DeskState } from './api/types'
+import type { Desk, DeskConfig, DeskMetrics, DeskState, DeskStream } from './api/types'
 import { DESK_ID_RE } from './api/validate'
+import { fmtBitrate, fmtNumber, t } from './i18n'
 
 export interface ResolutionPreset {
   width: number
@@ -123,4 +124,41 @@ export function newDeskConfig(opts: {
 
 export function moonlightAddress(desk: Pick<Desk, 'basePort'>, address: string): string {
   return `${address}:${desk.basePort}`
+}
+
+/** The stream a desk is serving, or null. */
+export function liveStream(desk: Pick<Desk, 'stream'>): DeskStream | null {
+  return desk.stream ?? null
+}
+
+/** The connected device as people know it: its paired name, else its address. */
+export function deviceName(stream: DeskStream): string {
+  return stream.client || stream.address || t('live.unknownDevice')
+}
+
+/** Codec as Moonlight shows it. */
+export function codecLabel(codec: string | null | undefined): string {
+  if (!codec) return t('common.none')
+  return codec.toLowerCase() === 'h264' ? 'H.264' : codec.toUpperCase()
+}
+
+/** Milliseconds: one decimal below 10 ms, whole numbers above, "<1 ms" for sub-millisecond pings. */
+export function fmtMs(value: number, decimals = true): string {
+  if (value > 0 && value < 1 && !decimals) return t('unit.ms', { value: '<1' })
+  return t('unit.ms', { value: fmtNumber(value, decimals && value < 10 ? 1 : 0) })
+}
+
+/** "1920×1080 · 120 FPS · HEVC · 50 Mbit/s" (+ HDR): what the client asked for. */
+export function streamSummary(stream: DeskStream): string {
+  const parts = [`${stream.width}×${stream.height}`, t('unit.fps', { value: stream.fps }), codecLabel(stream.codec)]
+  if (stream.bitrateKbps > 0) parts.push(fmtBitrate(stream.bitrateKbps))
+  if (stream.hdr) parts.push('HDR')
+  return parts.join(' · ')
+}
+
+/** The desk list's second line while streaming: "Laptop · 120 FPS · 8 ms". */
+export function streamLine(stream: DeskStream, metrics: Partial<DeskMetrics>): string {
+  const parts = [deviceName(stream), t('unit.fps', { value: fmtNumber(metrics.fps ?? 0) })]
+  if (metrics.rttMs !== undefined) parts.push(fmtMs(metrics.rttMs, false))
+  return parts.join(' · ')
 }

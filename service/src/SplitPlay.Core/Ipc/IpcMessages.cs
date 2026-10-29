@@ -46,7 +46,10 @@ public static class IpcProtocol
 
     public static class Events
     {
+        /// <summary>Worker: a Moonlight stream started, <c>data</c> = one <see cref="IpcStreamSession"/>.</summary>
         public const string ClientConnected = "client_connected";
+
+        /// <summary>Worker: a Moonlight stream ended, <c>data</c> = the same <see cref="IpcStreamSession"/> fields.</summary>
         public const string ClientDisconnected = "client_disconnected";
 
         /// <summary>Worker: a Moonlight client asked for a mode, <c>data: {width, height, fps}</c>; forwarded to the seat as <c>set_mode</c>.</summary>
@@ -118,6 +121,12 @@ public sealed record HeartbeatMessage : IpcMessage
 
     /// <summary>Optional metrics (<c>fps</c>, <c>bitrate_kbps</c>, <c>encode_ms_p50</c>, …); unknown keys are passed through.</summary>
     public Dictionary<string, JsonElement>? Metrics { get; init; }
+
+    /// <summary>
+    /// Worker: the running streams, an array of <see cref="IpcStreamSession"/> objects (absent from workers that do not
+    /// report them). Kept as raw JSON and parsed leniently with <see cref="IpcStreamSession.ListFromJson"/>.
+    /// </summary>
+    public JsonElement? Sessions { get; init; }
 }
 
 public sealed record LogMessage : IpcMessage

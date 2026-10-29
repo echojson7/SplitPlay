@@ -38,8 +38,33 @@ describe('ApiClient', () => {
     const { client } = setup()
     const desks = await client.listDesks()
     expect(desks.map((d) => d.id)).toEqual(['anna', 'guest'])
-    expect(desks[0]!.state).toBe('Ready')
+    expect(desks[0]!.state).toBe('Streaming')
     expect(desks[1]!.state).toBe('Stopped')
+  })
+
+  it('simulates a streaming device with live numbers', async () => {
+    const { client, advance } = setup()
+    const anna = await client.getDesk('anna')
+    expect(anna.stream).toMatchObject({ client: 'Ноутбук Ани', address: '192.168.1.37', width: 1920, height: 1080, fps: 120, codec: 'hevc' })
+    expect(anna.metrics.fps).toBeGreaterThan(110)
+    expect(anna.metrics.rttMs).toBeGreaterThan(0)
+    expect(anna.metrics.encodeMsP50).toBeLessThan(anna.metrics.encodeMsP99)
+    const m = await client.metrics()
+    expect(m.desks[0]).toMatchObject({ id: 'anna', clients: 1 })
+    expect(m.desks[0]!.lossPct).toBeGreaterThanOrEqual(0)
+
+    // Stopping ends the stream; the next start brings the paired device back.
+    await client.stopDesk('anna')
+    expect((await client.getDesk('anna')).stream).toBeNull()
+    advance(200)
+    const stopped = await client.getDesk('anna')
+    expect(stopped.metrics).toMatchObject({ fps: 0, clients: 0 })
+    await client.startDesk('anna')
+    advance(1000)
+    const again = await client.getDesk('anna')
+    expect(again.state).toBe('Streaming')
+    expect(again.stream?.client).toBe('Ноутбук Ани')
+    expect((await client.getDesk('guest')).stream).toBeNull()
   })
 
   it('accepts list responses wrapped in an object', async () => {

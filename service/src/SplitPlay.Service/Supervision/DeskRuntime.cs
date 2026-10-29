@@ -35,6 +35,18 @@ internal sealed class DeskRuntime
 
     public DeskMetricsDto Metrics { get; set; } = new();
 
+    /// <summary>
+    /// The worker's running Moonlight streams, oldest first: added by <c>client_connected</c>, removed by
+    /// <c>client_disconnected</c>, replaced by every heartbeat that carries <c>sessions</c>. Cleared when the worker
+    /// stops or restarts.
+    /// </summary>
+    public List<IpcStreamSession> Streams { get; } = [];
+
+    /// <summary>Ids of streams that ended recently: a heartbeat written before the event must not bring them back.</summary>
+    private readonly Queue<long> _endedStreams = new();
+
+    private const int EndedStreamsKept = 32;
+
     public DateTimeOffset LastHeartbeat { get; set; }
 
     /// <summary>The worker's control connection while it is connected (used for pair, list_clients, …).</summary>
@@ -99,9 +111,110 @@ internal sealed class DeskRuntime
                 SteamIsolation = Config.SteamIsolationEnabled,
                 WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,
+                Stream = Streams.Count > 0 ? ToStreamDto(Streams[0]) : null,
                 LastError = Machine.LastError ?? Warning,
             };
         }
+    }
+
+    /// <summary><c>client_connected</c>: adds the stream, or updates it when it is already listed. True when the list changed.</summary>
+    public bool AddStream(IpcStreamSession stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        lock (Gate)
+        {
+            var index = Streams.FindIndex(s => s.SameStream(stream));
+            if (index >= 0)
+            {
+                if (Streams[index] == stream)
+                {
+                    return false;
+                }
+
+                Streams[index] = stream;
+                return true;
+            }
+
+            Streams.Add(stream);
+            SortStreams();
+            return true;
+        }
+    }
+
+    /// <summary><c>client_disconnected</c>: removes the stream. True when the list changed.</summary>
+    public bool RemoveStream(IpcStreamSession stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        lock (Gate)
+        {
+            if (stream.Id is long id)
+            {
+                _endedStreams.Enqueue(id);
+                while (_endedStreams.Count > EndedStreamsKept)
+                {
+                    _endedStreams.Dequeue();
+                }
+            }
+
+            return Streams.RemoveAll(s => s.SameStream(stream)) > 0;
+        }
+    }
+
+    /// <summary>A heartbeat with <c>sessions</c>: the worker's list is authoritative. True when the list changed.</summary>
+    public bool ReplaceStreams(IReadOnlyList<IpcStreamSession> streams)
+    {
+        ArgumentNullException.ThrowIfNull(streams);
+        lock (Gate)
+        {
+            var next = streams.Where(s => s.Id is not long id || !_endedStreams.Contains(id)).ToList();
+            var before = Streams.ToList();
+            Streams.Clear();
+            Streams.AddRange(next);
+            SortStreams();
+            return !before.SequenceEqual(Streams);
+        }
+    }
+
+    /// <summary>The worker stopped or restarts: no stream survives it. True when the list changed.</summary>
+    public bool ClearStreams()
+    {
+        lock (Gate)
+        {
+            _endedStreams.Clear();
+            if (Streams.Count == 0)
+            {
+                return false;
+            }
+
+            Streams.Clear();
+            return true;
+        }
+    }
+
+    private void SortStreams()
+    {
+        // OrderBy is stable: streams without a start time keep their order, after the timed ones.
+        var sorted = Streams.OrderBy(s => s.StartedAt ?? DateTimeOffset.MaxValue).ToList();
+        Streams.Clear();
+        Streams.AddRange(sorted);
+    }
+
+    public static DeskStreamDto ToStreamDto(IpcStreamSession s)
+    {
+        ArgumentNullException.ThrowIfNull(s);
+        return new DeskStreamDto
+        {
+            Client = s.Client,
+            ClientId = s.ClientUuid,
+            Address = s.Address,
+            Width = s.Width,
+            Height = s.Height,
+            Fps = s.FpsRequested,
+            Codec = s.Codec,
+            BitrateKbps = s.BitrateKbpsRequested,
+            Hdr = s.Hdr,
+            StartedAt = s.StartedAt,
+        };
     }
 
     /// <summary>Maps heartbeat metrics: known keys to camelCase fields, unknown keys passed through unchanged.</summary>
@@ -124,8 +237,17 @@ internal sealed class DeskRuntime
                 case "bitrate_kbps" when number is not null:
                     dto.BitrateKbps = number.Value;
                     break;
+                case "encode_ms_p50" when number is not null:
+                    dto.EncodeMsP50 = number.Value;
+                    break;
                 case "encode_ms_p99" when number is not null:
                     dto.EncodeMsP99 = number.Value;
+                    break;
+                case "loss_pct" when number is not null:
+                    dto.LossPct = number.Value;
+                    break;
+                case "rtt_ms" when number is not null:
+                    dto.RttMs = number.Value;
                     break;
                 case "clients" when number is not null:
                     dto.Clients = number.Value;

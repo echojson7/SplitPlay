@@ -83,6 +83,32 @@ describe('DeskCard', () => {
     expect(w.emitted('stop')).toHaveLength(1)
   })
 
+  it('shows the connected device, FPS and ping while streaming', async () => {
+    const w = await mountCard(
+      desk('Streaming', {
+        stream: {
+          client: 'Ноутбук Ани',
+          address: '192.168.1.37',
+          width: 1920,
+          height: 1080,
+          fps: 120,
+          codec: 'hevc',
+          bitrateKbps: 50000,
+          hdr: false,
+        },
+        metrics: { fps: 119.6, bitrateKbps: 38000, encodeMsP50: 3.4, encodeMsP99: 6.1, lossPct: 0, rttMs: 8, clients: 1 },
+      }),
+    )
+    expect(w.find('[data-live]').text()).toBe('Ноутбук Ани · 120 FPS · 8 мс')
+    expect(w.text()).not.toContain('1920×1080 · 120 FPS')
+  })
+
+  it('names an unpaired stream by its address', async () => {
+    const stream = { client: null, address: '10.0.0.7', width: 1280, height: 720, fps: 60, codec: 'h264', bitrateKbps: 0, hdr: false }
+    const w = await mountCard(desk('Streaming', { stream, metrics: { fps: 60, bitrateKbps: 0, encodeMsP99: 0, clients: 1 } }))
+    expect(w.find('[data-live]').text()).toBe('10.0.0.7 · 60 FPS')
+  })
+
   it('shows the last error of a faulted desk', async () => {
     const w = await mountCard(desk('Faulted', { lastError: 'seat: logon failed' }))
     expect(w.text()).toContain('seat: logon failed')

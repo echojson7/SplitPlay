@@ -79,10 +79,37 @@ export interface HostNetwork {
 
 /** Live metrics carried in the desk object. Unknown keys from the worker pass through untyped. */
 export interface DeskMetrics {
+  /** Frames actually sent over the last second. */
   fps: number
+  /** Video bitrate actually sent. */
   bitrateKbps: number
+  /** Host capture-to-encoded time over the last second, median, ms (older services: absent). */
+  encodeMsP50?: number
   encodeMsP99: number
+  /** Frames the client reported lost, percent of the frames sent. */
+  lossPct?: number
+  /** Round-trip time to the Moonlight client, ms. */
+  rttMs?: number
   clients: number
+}
+
+/** The Moonlight stream a desk is serving (`desk.stream`): who is connected and what it asked for. */
+export interface DeskStream {
+  /** Paired device name; null when the worker does not know it. */
+  client: string | null
+  /** Paired client id (as in GET /desks/{id}/clients). */
+  clientId?: string | null
+  /** Client IP address. */
+  address: string | null
+  width: number
+  height: number
+  /** Requested frame rate. */
+  fps: number
+  codec: Codec | string | null
+  /** Requested bitrate (the Moonlight setting). */
+  bitrateKbps: number
+  hdr: boolean
+  startedAt?: string | null
 }
 
 /** Desk object as returned by GET /desks and GET /desks/{id}. */
@@ -97,6 +124,8 @@ export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   state: DeskState
   sessionId: number | null
   metrics: DeskMetrics
+  /** The stream being served; null (or absent from older services) when nobody is connected. */
+  stream?: DeskStream | null
   lastError: string | null
 }
 

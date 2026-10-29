@@ -37,7 +37,10 @@ $userListKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\Spec
 $ownUser = 'e2e-own'
 
 function Get-UserListValue([string] $user) {
-    (Get-ItemProperty -Path $userListKey -Name $user -ErrorAction SilentlyContinue).$user
+    # Strict mode: a missing value is not a property at all.
+    $item = Get-ItemProperty -Path $userListKey -ErrorAction SilentlyContinue
+    if ($item -and ($item.PSObject.Properties.Name -contains $user)) { return $item.$user }
+    return $null
 }
 
 function Step([string] $what) { Write-Host "== $what" }

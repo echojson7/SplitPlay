@@ -13,7 +13,8 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
     "basePortStart": 48089,
     "basePortStride": 100,
     "composeIntervalMs": 4,
-    "logLevel": "info"
+    "logLevel": "info",
+    "keepAwake": true
   },
   "desks": [
     {
@@ -75,3 +76,8 @@ Rules:
 - Desk port ranges may not overlap each other or contain `host.webPort`; `basePortStride` must be at least 27.
 - `profile.fps` 10–500, `codec` one of `h264`, `hevc`, `av1`; `gpuPriority` `normal`, `high`, `realtime`.
 - `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz).
+- `host.keepAwake` (default `true`; left out = `true`): while a Moonlight client streams from any desk the service holds
+  a system-required power request (`powercfg /requests` lists it), so Windows does not sleep on its own. Sleeping by
+  hand still works: before sleep every worker is shut down and its desk waits (state `Recovering`, not a failure, the
+  seat and session are kept); after resume each paused desk gets a new worker (NVENC and capture are recreated).
+  In the web UI: Settings → Power.

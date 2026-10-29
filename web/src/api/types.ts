@@ -232,6 +232,8 @@ export interface HostSettings {
   basePortStride: number
   composeIntervalMs: number
   logLevel: string
+  /** Keep the PC from sleeping while a client streams (default true; older services leave it out). */
+  keepAwake?: boolean
 }
 
 /** Events pushed over GET /ws. */

@@ -40,6 +40,9 @@ public sealed class HostConfig
     public int ComposeIntervalMs { get; set; } = 4;
 
     public string LogLevel { get; set; } = "info";
+
+    /// <summary>Keep the PC from sleeping on its own while a Moonlight client streams from any desk (default true).</summary>
+    public bool KeepAwake { get; set; } = true;
 }
 
 /// <summary>One desk (an isolated Windows session streamed to Moonlight).</summary>

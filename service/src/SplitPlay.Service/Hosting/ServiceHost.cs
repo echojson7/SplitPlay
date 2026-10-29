@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 using System.Net;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging.Console;
 using Microsoft.Extensions.Options;
 using SplitPlay.Core;
@@ -35,10 +36,16 @@ public static class ServiceHost
             WebRootPath = options.WebRoot ?? Path.Combine(AppContext.BaseDirectory, "wwwroot"),
         });
 
+        builder.Services.AddSingleton<PowerEvents>();
         if (!options.Console)
         {
             // No-op unless the process was started by the Service Control Manager.
             builder.Services.AddWindowsService(o => o.ServiceName = BuildInfo.ServiceName);
+            if (OperatingSystem.IsWindows() && WindowsServiceHelpers.IsWindowsService())
+            {
+                // The same lifetime plus sleep/resume notifications (SERVICE_CONTROL_POWEREVENT).
+                builder.Services.AddSingleton<IHostLifetime, SplitPlayServiceLifetime>();
+            }
         }
 
         // ---- logging
@@ -94,6 +101,13 @@ public static class ServiceHost
         builder.Services.AddHostedService(sp => sp.GetRequiredService<RequiredServicesStarter>());
         builder.Services.AddSingleton<DeskSupervisor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<DeskSupervisor>());
+        builder.Services.AddSingleton<FakePowerRequest>();
+        builder.Services.AddSingleton<IPowerRequest>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? new WindowsPowerRequest()
+                : sp.GetRequiredService<FakePowerRequest>());
+        builder.Services.AddSingleton<SleepGuard>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<SleepGuard>());
         builder.Services.AddSingleton<EventHub>();
         builder.Services.AddSingleton<AuthService>();
         builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.Section));

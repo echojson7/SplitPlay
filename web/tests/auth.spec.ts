@@ -3,6 +3,7 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from '../src/App.vue'
+import { api } from '../src/api/client'
 import { createAppRouter } from '../src/router'
 import { store } from '../src/store'
 import { MockBackend, mockFetch } from '../mock/backend'
@@ -51,6 +52,25 @@ describe('sign-in', () => {
     vi.stubGlobal('fetch', () => Promise.resolve(new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'x' } }), { status: 401 })))
     await store.refreshDesks().catch(() => undefined)
     expect(postMessage).toHaveBeenCalledWith('auth')
+    w.unmount()
+  })
+
+  it('turns keep-awake off and on from Settings', async () => {
+    vi.stubGlobal('fetch', mockFetch(new MockBackend({ stepMs: 10 })))
+    vi.stubGlobal('WebSocket', undefined)
+    const router = createAppRouter()
+    const w = mount(App, { global: { plugins: [router] }, attachTo: document.body })
+    await router.push('/settings')
+    await settle()
+    const toggle = w.find<HTMLInputElement>('input#keep-awake')
+    expect(toggle.element.checked).toBe(true)
+    expect(w.text()).toContain('Не засыпать во время трансляции')
+    await toggle.setValue(false)
+    await settle()
+    expect((await api.getHostSettings()).keepAwake).toBe(false)
+    await toggle.setValue(true)
+    await settle()
+    expect((await api.getHostSettings()).keepAwake).toBe(true)
     w.unmount()
   })
 })

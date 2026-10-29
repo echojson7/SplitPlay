@@ -188,6 +188,7 @@ export class MockBackend {
     basePortStride: 100,
     composeIntervalMs: 4,
     logLevel: 'info',
+    keepAwake: true,
   }
   private clientSeq = 1
   private readonly services = new Map<string, ServiceEntry>()

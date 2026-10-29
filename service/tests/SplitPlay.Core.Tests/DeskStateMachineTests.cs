@@ -235,4 +235,40 @@ public sealed class DeskStateMachineTests
         Assert.Equal(DeskState.Faulted, m.Fire(DeskTrigger.Fail).To);
         Assert.Equal(TimeSpan.FromMilliseconds(25), policy.BackoffFor(3));
     }
+
+    [Theory]
+    [InlineData(DeskState.SessionReady)]
+    [InlineData(DeskState.DisplayReady)]
+    [InlineData(DeskState.Ready)]
+    [InlineData(DeskState.Streaming)]
+    public void Pause_for_sleep_is_not_a_failure_and_waits_for_resume(DeskState state)
+    {
+        var m = NewMachine(state);
+        Assert.Equal(DeskState.Recovering, m.Fire(DeskTrigger.Pause, "the PC is going to sleep").To);
+        Assert.True(m.Paused);
+        Assert.Null(m.RetryAt);
+        Assert.Null(m.LastError);
+        Assert.Equal(0, m.FailuresInWindow);
+        Assert.Equal(0, m.ConsecutiveFailures);
+        _time.Advance(TimeSpan.FromHours(1));
+        Assert.False(m.CanFire(DeskTrigger.RetryDue));
+        Assert.Equal(DeskState.Connecting, m.Fire(DeskTrigger.Resume).To);
+        Assert.False(m.Paused);
+        Assert.False(m.CanFire(DeskTrigger.Resume));
+    }
+
+    [Fact]
+    public void Resume_only_leaves_a_paused_desk_and_stop_ends_the_pause()
+    {
+        var m = NewMachine(DeskState.Ready);
+        m.Fire(DeskTrigger.Fail);
+        Assert.False(m.CanFire(DeskTrigger.Resume));
+        Assert.False(NewMachine(DeskState.Stopped).CanFire(DeskTrigger.Pause));
+        Assert.False(NewMachine(DeskState.Provisioning).CanFire(DeskTrigger.Pause));
+
+        var paused = NewMachine(DeskState.Ready);
+        paused.Fire(DeskTrigger.Pause);
+        Assert.Equal(DeskState.Stopping, paused.Fire(DeskTrigger.Stop).To);
+        Assert.False(paused.Paused);
+    }
 }

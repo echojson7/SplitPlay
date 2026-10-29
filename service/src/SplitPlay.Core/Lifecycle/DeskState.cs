@@ -52,6 +52,15 @@ public enum DeskTrigger
 
     /// <summary>Children are gone and the session is closed.</summary>
     Stopped,
+
+    /// <summary>
+    /// The PC is going to sleep: the worker was shut down on purpose. Not a failure; the desk waits in Recovering
+    /// until <see cref="Resume"/>.
+    /// </summary>
+    Pause,
+
+    /// <summary>The PC woke up: a paused desk reconnects (a new worker, so NVENC and capture are recreated).</summary>
+    Resume,
 }
 
 public static class DeskStateExtensions

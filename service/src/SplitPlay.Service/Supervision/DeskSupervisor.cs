@@ -34,6 +34,9 @@ public sealed class DeskSupervisor : IHostedService
 
     private const int DefaultHeight = 1080;
 
+    /// <summary>What <see cref="RunOnceAsync"/> returns when the worker was stopped because the PC goes to sleep (compared by reference).</summary>
+    private static readonly string PausedForSleep = new("the PC is going to sleep".AsSpan());
+
     private readonly ConcurrentDictionary<string, DeskRuntime> _desks = new(StringComparer.Ordinal);
     private readonly object _registryGate = new();
     private readonly ConfigService _config;
@@ -49,9 +52,17 @@ public sealed class DeskSupervisor : IHostedService
     private TimeSpan _lastCpu;
     private DateTimeOffset _lastCpuAt;
 
+    // Power state: _sleep completes when the PC goes to sleep, _wake when it is awake (again).
+    private readonly object _powerGate = new();
+    private TaskCompletionSource _sleep = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private TaskCompletionSource _wake = Completed();
+
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
-        TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform)
+        TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
+        PowerEvents power)
     {
+        ArgumentNullException.ThrowIfNull(power);
+        power.Changed += OnPowerChange;
         _gpus = gpus;
         _platform = platform;
         _childLogger = loggerFactory.CreateLogger(Logging.LogStoreLoggerProvider.ChildCategory);
@@ -125,6 +136,63 @@ public sealed class DeskSupervisor : IHostedService
         catch (Exception ex) when (ex is TimeoutException or OperationCanceledException)
         {
             _logger.LogWarning("Not all desks stopped within {Limit}", limit);
+        }
+    }
+
+    // ------------------------------------------------------------------ sleep and resume
+
+    private static TaskCompletionSource Completed()
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tcs.SetResult();
+        return tcs;
+    }
+
+    /// <summary>Completes when the PC goes to sleep (already completed while it sleeps).</summary>
+    private Task SleepTask
+    {
+        get
+        {
+            lock (_powerGate)
+            {
+                return _sleep.Task;
+            }
+        }
+    }
+
+    /// <summary>Completes once the PC is awake.</summary>
+    private Task WakeTask
+    {
+        get
+        {
+            lock (_powerGate)
+            {
+                return _wake.Task;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Sleep: every running worker is shut down (its NVENC session and desktop duplication do not survive sleep) and
+    /// its desk waits, paused, with its seat and session kept. Resume: the paused desks reconnect and get new workers.
+    /// Neither counts as a failure.
+    /// </summary>
+    private void OnPowerChange(PowerChange change)
+    {
+        lock (_powerGate)
+        {
+            if (change == PowerChange.Suspend && !_sleep.Task.IsCompleted)
+            {
+                _wake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _sleep.TrySetResult();
+                _logger.LogInformation("Stopping the desks' workers for sleep");
+            }
+            else if (change == PowerChange.Resume && _sleep.Task.IsCompleted)
+            {
+                _sleep = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _wake.TrySetResult();
+                _logger.LogInformation("Restarting the desks' workers after sleep");
+            }
         }
     }
 
@@ -543,7 +611,12 @@ public sealed class DeskSupervisor : IHostedService
 
     private void OnTransition(DeskRuntime rt, DeskTransition t)
     {
-        if (t.To is DeskState.Recovering or DeskState.Faulted)
+        if (t.Trigger is DeskTrigger.Pause or DeskTrigger.Resume)
+        {
+            _logger.LogInformation("Desk {Desk}: {From} -> {To} ({Reason})", rt.Id, t.From, t.To,
+                t.Trigger == DeskTrigger.Pause ? t.Reason : "the PC woke up");
+        }
+        else if (t.To is DeskState.Recovering or DeskState.Faulted)
         {
             _logger.LogWarning("Desk {Desk}: {From} -> {To} ({Reason})", rt.Id, t.From, t.To, t.Reason);
         }
@@ -665,7 +738,31 @@ public sealed class DeskSupervisor : IHostedService
 
             while (true)
             {
+                await WakeTask.WaitAsync(stop).ConfigureAwait(false);
                 var reason = await RunOnceAsync(rt, credentials, stop).ConfigureAwait(false);
+                if (ReferenceEquals(reason, PausedForSleep))
+                {
+                    lock (rt.Gate)
+                    {
+                        if (!rt.Machine.TryFire(DeskTrigger.Pause, out _, reason))
+                        {
+                            stop.ThrowIfCancellationRequested();
+                            return;
+                        }
+                    }
+
+                    await WakeTask.WaitAsync(stop).ConfigureAwait(false);
+                    lock (rt.Gate)
+                    {
+                        if (!rt.Machine.TryFire(DeskTrigger.Resume, out _))
+                        {
+                            return;
+                        }
+                    }
+
+                    continue;
+                }
+
                 lock (rt.Gate)
                 {
                     if (!rt.Machine.TryFire(DeskTrigger.Fail, out _, reason) || rt.Machine.State == DeskState.Faulted)
@@ -752,6 +849,7 @@ public sealed class DeskSupervisor : IHostedService
     private async Task<string> RunOnceAsync(DeskRuntime rt, DeskCredentials? credentials, CancellationToken stop)
     {
         var o = _options.Value;
+        var sleep = SleepTask;
         DeskConfig config;
         lock (rt.Gate)
         {
@@ -796,6 +894,12 @@ public sealed class DeskSupervisor : IHostedService
         }
 
         // ---- worker
+        if (sleep.IsCompleted)
+        {
+            // Went to sleep while the session came up: start the worker after resume.
+            return PausedForSleep;
+        }
+
         int attempt;
         lock (rt.Gate)
         {
@@ -842,11 +946,19 @@ public sealed class DeskSupervisor : IHostedService
             }
 
             var stopped = Task.Delay(Timeout.Infinite, stop);
-            var winner = await Task.WhenAny(worker.Completion, seatLost, abort.Task, stopped).ConfigureAwait(false);
+            var winner = await Task.WhenAny(worker.Completion, seatLost, abort.Task, stopped, sleep).ConfigureAwait(false);
             if (winner == stopped)
             {
                 await worker.ShutdownAsync(TimeSpan.FromMilliseconds(o.ShutdownTimeoutMs)).ConfigureAwait(false);
                 stop.ThrowIfCancellationRequested();
+            }
+
+            if (winner == sleep)
+            {
+                // Windows gives the suspend notification about two seconds: a clean shutdown if the worker manages it,
+                // and the job object takes the rest.
+                await worker.ShutdownAsync(TimeSpan.FromMilliseconds(Math.Min(o.ShutdownTimeoutMs, 2000))).ConfigureAwait(false);
+                return PausedForSleep;
             }
 
             if (winner == seatLost)

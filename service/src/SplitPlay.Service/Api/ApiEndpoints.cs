@@ -254,7 +254,8 @@ public static partial class ApiEndpoints
         // ---- host settings (the "host" object of config.json)
         api.MapGet("/host", (ConfigService config) => Results.Json(config.Snapshot().Host, Ctx.HostConfig));
 
-        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, IDeskPlatform platform, ILoggerFactory loggers) =>
+        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, IDeskPlatform platform, SleepGuard sleepGuard,
+            ILoggerFactory loggers) =>
         {
             var host = await ReadBodyAsync(request, Ctx.HostConfig).ConfigureAwait(false);
             var before = config.Snapshot().Host;
@@ -281,6 +282,7 @@ public static partial class ApiEndpoints
                 }
             }
 
+            sleepGuard.Refresh();
             if (saved.LanAccess != before.LanAccess)
             {
                 await firewall.SetWebUiRuleEnabledAsync(saved.LanAccess).ConfigureAwait(false);
@@ -387,7 +389,8 @@ public static partial class ApiEndpoints
             return Results.File(buffer.ToArray(), "application/zip", name);
         });
 
-        api.MapPost("/config/import", async (HttpRequest request, DeskSupervisor s, ConfigService config, IFirewallRule firewall) =>
+        api.MapPost("/config/import", async (HttpRequest request, DeskSupervisor s, ConfigService config, IFirewallRule firewall,
+            SleepGuard sleepGuard) =>
         {
             var lanBefore = config.Snapshot().Host.LanAccess;
             var bytes = await ReadUploadAsync(request).ConfigureAwait(false);
@@ -407,6 +410,7 @@ public static partial class ApiEndpoints
 
             var parsed = ConfigStore.Parse(json);
             var desks = s.Import(parsed.Config).ToList();
+            sleepGuard.Refresh();
             if (parsed.Config.Host.LanAccess != lanBefore)
             {
                 await firewall.SetWebUiRuleEnabledAsync(parsed.Config.Host.LanAccess).ConfigureAwait(false);

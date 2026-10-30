@@ -311,11 +311,26 @@ two workers create the profile at the same time, the second reloads the driver s
 with `nvenc_latency_over_power=disabled` removes the profile's setting for every desk until another desk
 starts. Both settle once the service owns driver profiles (below).
 
+## Not possible without drivers of our own
+
+SplitPlay ships no drivers of its own (owner's decision of 2026-10-30: no own IDD or pad driver, no Windows test mode,
+no EV certificate; see [ARCHITECTURE.md §10](../docs/ARCHITECTURE.md#10-решения-владельца-от-2026-10-30-без-своих-драйверов)).
+Capture stays DXGI Desktop Duplication and gamepads stay on ViGEmBus with DualShock 4 by default. That rules out:
+
+- the IDD capture ring (`capture_ring.h`): encoding straight from the IDD, a late cursor, a display mode at the
+  client's refresh rate. Capturing on frame arrival with DDA recovers part of it;
+- 500 Hz as a guarantee: the rate is capped by DWM composition in the RDP session (240-250 Hz are realistic, 500 Hz
+  only if the lab measures it);
+- HDR: the session's display is Microsoft's RdpIdd, which enables HDR only for an RDP client with HDR over GFX, and the
+  seat runs without GFX (a probe will confirm);
+- per-session gamepads and DualSense or Xbox Series profiles: ViGEm pads are visible to every session;
+- 5.1/7.1 audio and a microphone: they need an audio driver signed by Microsoft;
+- split-frame encoding for 1440p500: the RTX 5070 has a single NVENC engine.
+
 ## Not done yet
 
-- Frame tracing, the IDD capture ring and the input ring (the contract headers are already on the include path);
-  the profile's `gpu_priority`, `gpu_luid` and `cpu_set`.
-- Per-session gamepads: ViGEm pads are visible to every session; SplitPlay's isolated pad driver comes in Stage 4.
+- Frame tracing and the input ring (the contract headers are already on the include path); capturing on frame
+  arrival; the profile's `gpu_priority`, `gpu_luid` and `cpu_set`.
 - Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile from each worker (patch 0015);
   with several workers they should move to the service.
 - mDNS: every worker publishes itself; Moonlight's automatic discovery is not tested with several desks yet

@@ -61,9 +61,6 @@
 #if !FileExists(AddBackslash(StageDir) + "native\splitplay-seat.exe")
   #error Missing staged file native\splitplay-seat.exe (check /DStageDir, see installer/README.md)
 #endif
-#if !FileExists(AddBackslash(StageDir) + "native\splitplay-rdsprov.dll")
-  #error Missing staged file native\splitplay-rdsprov.dll (check /DStageDir, see installer/README.md)
-#endif
 #if !FileExists(AddBackslash(StageDir) + "native\splitplay-stubworker.exe")
   #error Missing staged file native\splitplay-stubworker.exe (check /DStageDir, see installer/README.md)
 #endif
@@ -195,14 +192,14 @@ Name: "{commonappdata}\SplitPlay\logs"; Flags: uninsneveruninstall
 Source: "{#StageDir}\service\*"; DestDir: "{app}\service"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 ; The tray carries its own self-contained runtime (with WindowsDesktop), so it cannot share the service folder.
 Source: "{#StageDir}\tray\*"; DestDir: "{app}\tray"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#StageDir}\native\*"; DestDir: "{app}\native"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
+; SplitPlay ships no drivers of its own and no TermService protocol provider (owner's decision of 2026-10-30,
+; docs/ARCHITECTURE.md §10): splitplay-rdsprov is never installed, even when a stage still carries it.
+Source: "{#StageDir}\native\*"; DestDir: "{app}\native"; Excludes: "splitplay-rdsprov.*"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\worker\*"; DestDir: "{app}\worker"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 ; TermService (svchost) keeps TermWrap.dll loaded: an upgrade replaces it at the next restart, and the uninstaller
 ; deletes it at the next restart after "host revert" has pointed TermService back at termsrv.dll.
 Source: "{#StageDir}\termwrap\*"; DestDir: "{app}\termwrap"; Components: termwrap; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
-; Driver packages are shipped but not installed in Stage 2 (pnputil comes with the drivers in Stage 4).
-Source: "{#StageDir}\drivers\*"; DestDir: "{app}\drivers"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
-; Interim gamepads (until the Stage 4 pad driver): extracted to {tmp} and run only when ViGEmBus is missing.
+; Gamepads (ViGEmBus, DualShock 4 by default): extracted to {tmp} and run only when ViGEmBus is missing.
 Source: "{#StageDir}\vigembus\{#ViGEmBusSetup}"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Components: core; Flags: ignoreversion
 Source: "..\NOTICE.md"; DestDir: "{app}"; Components: core; Flags: ignoreversion
@@ -220,6 +217,13 @@ Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 ; Started by hand the tray opens its dashboard window; the Run entry above passes --autostart to stay an icon.
 Filename: "{app}\tray\SplitPlay.Tray.exe"; Description: "{cm:LaunchTray}"; Flags: postinstall nowait skipifsilent runasoriginaluser
+
+[InstallDelete]
+; Earlier versions copied the test-signed driver packages and splitplay-rdsprov to Program Files (never installed or
+; registered); an upgrade removes them.
+Type: filesandordirs; Name: "{app}\drivers"
+Type: files; Name: "{app}\native\splitplay-rdsprov.dll"
+Type: files; Name: "{app}\native\splitplay-rdsprov.pdb"
 
 [UninstallDelete]
 Type: files; Name: "{group}\{cm:WebUiShortcut}.url"
@@ -614,8 +618,8 @@ begin
     Result := FindNewViGEmBusProductIn(HKLM32, Before32);
 end;
 
-{ Interim gamepads (until the Stage 4 per-session pad driver): the workers emulate Moonlight's gamepads as ViGEm pads,
-  which every session sees. Installs the bundled ViGEmBus only when no ViGEmBus driver is present; a failure is logged
+{ Gamepads: the workers emulate Moonlight's gamepads as ViGEm pads (DualShock 4 by default), which every session sees;
+  SplitPlay has no pad driver of its own (owner's decision of 2026-10-30). Installs the bundled ViGEmBus only when no ViGEmBus driver is present; a failure is logged
   and setup continues (desks then have no gamepads). }
 procedure InstallViGEmBus;
 var

@@ -111,11 +111,18 @@ function Test-ServiceDacl {
 function Test-Installed([string] $label, [bool] $termWrap = $true) {
     Write-Host "== $label"
     foreach ($f in 'service\SplitPlay.Service.exe', 'service\splitplay.exe', 'tray\SplitPlay.Tray.exe',
-                   'service\wwwroot\index.html', 'native\splitplay-seat.exe', 'native\splitplay-rdsprov.dll',
+                   'service\wwwroot\index.html', 'native\splitplay-seat.exe',
                    'native\splitplay-stubworker.exe', 'worker\splitplay-worker.exe', 'worker\COPYING',
                    'LICENSE.txt', 'NOTICE.md', 'unins000.exe') {
         Check "file $f" (Test-Path (Join-Path $app $f))
     }
+    # No drivers of our own and no TermService protocol provider (ARCHITECTURE.md §10), even when a stage carries them
+    # (the fake stage does) or an earlier version left them behind (planted before the reinstall below).
+    foreach ($f in 'drivers', 'native\splitplay-rdsprov.dll', 'native\splitplay-rdsprov.pdb') {
+        Check "no $f" (-not (Test-Path (Join-Path $app $f)))
+    }
+    Check 'no driver package (.inf, .cat, .sys) anywhere under Program Files\SplitPlay' (
+        @(Get-ChildItem $app -Recurse -File -Include '*.inf', '*.cat', '*.sys' -ErrorAction SilentlyContinue).Count -eq 0)
     foreach ($f in 'termwrap\TermWrap.dll', 'termwrap\UmWrap.dll', 'termwrap\Zydis.dll', 'termwrap\LICENSE') {
         if ($termWrap) { Check "file $f (TermWrap component)" (Test-Path (Join-Path $app $f)) }
         else { Check "no $f (TermWrap component not selected)" (-not (Test-Path (Join-Path $app $f))) }
@@ -241,6 +248,10 @@ Test-Installed 'after install'
 
 # 2. Upgrade in place: the running service must be stopped, files replaced and the service started again.
 Set-Content -Path (Join-Path $data 'config.json') -Value '{"schemaVersion":1}'
+# What an earlier version installed and this one no longer ships: the upgrade must delete it.
+New-Item -ItemType Directory -Force -Path (Join-Path $app 'drivers\idd') | Out-Null
+Set-Content -Path (Join-Path $app 'drivers\idd\SplitPlayIdd.inf') -Value '; left by an earlier version'
+Set-Content -Path (Join-Path $app 'native\splitplay-rdsprov.dll') -Value 'left by an earlier version'
 Check 'reinstall exit code 0' ((Invoke-Silent $Setup 'reinstall.log' "$common$vigemLater") -eq 0)
 Test-Installed 'after reinstall'
 

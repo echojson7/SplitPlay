@@ -2,20 +2,19 @@
 # Builds the SplitPlay UMDF2 driver packages (SplitPlayIdd, SplitPlayPad) with MSBuild and the WDK/SDK from
 # NuGet (drivers/packages.config), runs host-side smoke tests and InfVerif, creates catalogs, test-signs them
 # with a throwaway self-signed certificate and uploads the packages. Nothing is installed on the runner.
+# The drivers are frozen (owner's decision of 2026-10-30, docs/ARCHITECTURE.md §10): the installer does not ship
+# them and ci.yml no longer calls this workflow, so it runs only when drivers/** changes (or by hand).
 name: drivers
 
 on:
   push:
-    branches: ['stage2/**', 'main']
+    branches: [main]
     paths:
       - 'drivers/**'
-      - '.github/workflows/drivers.yml'
   pull_request:
     paths:
       - 'drivers/**'
-      - '.github/workflows/drivers.yml'
   workflow_dispatch:
-  workflow_call:
 
 permissions:
   contents: read

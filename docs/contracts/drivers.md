@@ -1,5 +1,14 @@
 # Driver control interfaces
 
+> **Frozen (owner's decision of 2026-10-30).** SplitPlay ships no drivers of its own: no own IDD or gamepad driver, no
+> Windows test mode, no EV certificate. Capture stays DXGI Desktop Duplication in the desk's RdpIdd session, gamepads
+> stay on ViGEmBus (DualShock 4 by default). The sources in `drivers/idd`, `drivers/pad` and `native/rdsprov` stay in
+> the repository and still build in CI (the drivers only when `drivers/**` changes), but the installer no longer ships
+> them and nothing at run time opens these interfaces: the service, the seat and the worker do not load, install or
+> register a SplitPlay driver or `splitplay-rdsprov.dll`. This page is kept as the record of the interface should the
+> decision change; see [ARCHITECTURE.md §10](../ARCHITECTURE.md#10-решения-владельца-от-2026-10-30-без-своих-драйверов)
+> for what is infeasible without them.
+
 The two UMDF2 drivers are controlled only through the IOCTL headers below. Those headers are the contract;
 this page says who calls what and in which order. Both headers are MIT and may be included by the GPL worker.
 

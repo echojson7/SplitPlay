@@ -900,6 +900,9 @@ begin
       UninstallRebootRequired := True;
     { After the service is gone, so that no worker holds a ViGEm pad any more. }
     UninstallViGEmBus;
+    { With every worker stopped: put the NVIDIA driver settings back (the global value a killed worker left recorded in
+      its undo file, and the workers' "SplitPlay worker" application profile). Nothing happens without an NVIDIA driver. }
+    RunHidden(ExpandConstant('{app}\worker\splitplay-worker.exe'), '--desk-dir "' + ExpandConstant('{tmp}\worker') + '" --restore-nvprefs-undo');
     RunHidden(SysTool('netsh.exe'), 'advfirewall firewall delete rule name="' + FirewallRuleWeb + '"');
     { netsh cannot delete by wildcard. }
     RunHidden(SysTool('WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' +

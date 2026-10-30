@@ -37,9 +37,10 @@ public static class Program
         auth token                  print a bearer token for the Web API (valid 15 minutes), for scripts:
                                     Authorization: Bearer <token>
 
-        host prepare [--skip-termwrap] [--termwrap-dir DIR] [--compose-interval-ms N] [--json]
-                                    prepare Remote Desktop for desks (TermWrap, RDP policies); records the
-                                    previous values in <data root>\host-tuning.json
+        host prepare [--skip-termwrap] [--termwrap-dir DIR] [--compose-interval-ms N] [--worker-exe FILE] [--json]
+                                    prepare Remote Desktop for desks (TermWrap, RDP policies) and tune the
+                                    host (High performance power plan, no power throttling for the worker);
+                                    records the previous values in <data root>\host-tuning.json
         host revert [--json]        restore exactly what prepare changed
         host status [--json]        show each item and whether a reboot is required
                                     (host commands need an elevated prompt; exit code 3010 = reboot required)

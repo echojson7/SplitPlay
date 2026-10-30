@@ -9,6 +9,7 @@ public sealed class HostTuningTests : IDisposable
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "splitplay-host-" + Guid.NewGuid().ToString("N")[..8]);
     private readonly FakeRegistry _registry = new();
     private readonly FakeServices _services = new();
+    private readonly FakePower _power = new();
     private readonly FakeTimeProvider _time = new(new DateTimeOffset(2026, 10, 28, 12, 0, 0, TimeSpan.Zero));
 
     public HostTuningTests()
@@ -191,6 +192,198 @@ public sealed class HostTuningTests : IDisposable
         Assert.True(Tuner().ApplyComposeInterval(2));
         Assert.Equal("2", _registry.Get(HostTuner.WinStationsKey, "DWMFRAMEINTERVAL")!.Data);
         Assert.True(Tuner().Status(Options(compose: 4)).Ready); // the recorded value wins over the default
+    }
+
+    private static readonly Guid Balanced = new("381b4222-f694-41f0-9685-ff5bb260df2e");
+
+    private HostTuner PowerTuner() => new(_registry, _services, StateFile, _time, _power);
+
+    private string WorkerExe => Path.Combine(_dir, "app", "worker", "splitplay-worker.exe");
+
+    private HostTuningOptions PowerOptions() => Options(skip: true) with { WorkerExecutable = WorkerExe };
+
+    [Fact]
+    public void Prepare_switches_to_High_performance_and_revert_restores_the_previous_plan()
+    {
+        var result = PowerTuner().Prepare(PowerOptions());
+        Assert.Equal(HostTuner.HighPerformanceScheme, _power.Active);
+        Assert.Contains(result.Changes, c => c.StartsWith("power plan: Balanced", StringComparison.Ordinal));
+
+        // A second prepare keeps the plan recorded first as the one to restore.
+        Assert.DoesNotContain(PowerTuner().Prepare(PowerOptions()).Changes, c => c.StartsWith("power plan", StringComparison.Ordinal));
+        var status = PowerTuner().Status(PowerOptions());
+        Assert.Contains(status.Items, i => i is { Id: "PowerPlan", State: HostItemStatus.Ok, Optional: true });
+
+        var reverted = PowerTuner().Revert();
+        Assert.Equal(Balanced, _power.Active);
+        Assert.Contains(reverted.Changes, c => c.StartsWith("power plan: High performance", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Ultimate_Performance_is_preferred_when_it_exists()
+    {
+        _power.Names[HostTuner.UltimatePerformanceScheme] = "Ultimate Performance";
+        PowerTuner().Prepare(PowerOptions());
+        Assert.Equal(HostTuner.UltimatePerformanceScheme, _power.Active);
+    }
+
+    [Fact]
+    public void A_plan_the_owner_picked_after_prepare_is_left_alone_and_never_blocks_desks()
+    {
+        PowerTuner().Prepare(PowerOptions());
+        _power.Active = Balanced; // the owner switched back by hand
+
+        var status = PowerTuner().Status(PowerOptions());
+        Assert.True(status.Ready);
+        Assert.Contains(status.Items, i => i is { Id: "PowerPlan", State: HostItemStatus.Differs, Optional: true });
+
+        _power.Names[new Guid("a1841308-3541-4fab-bc81-f71556f20b4a")] = "Power saver";
+        _power.Active = new Guid("a1841308-3541-4fab-bc81-f71556f20b4a");
+        var reverted = PowerTuner().Revert();
+        Assert.Equal(new Guid("a1841308-3541-4fab-bc81-f71556f20b4a"), _power.Active);
+        Assert.Contains(reverted.Notes, n => n.Contains("changed since prepare", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Without_a_High_performance_plan_or_with_a_failing_API_prepare_still_succeeds()
+    {
+        _power.Names.Remove(HostTuner.HighPerformanceScheme); // Modern Standby: Balanced only
+        var result = PowerTuner().Prepare(PowerOptions());
+        Assert.Equal(Balanced, _power.Active);
+        Assert.Contains(result.Notes, n => n.Contains("no High performance power plan", StringComparison.Ordinal));
+        Assert.True(PowerTuner().Status(PowerOptions()).Ready);
+
+        _power.Names[HostTuner.HighPerformanceScheme] = "High performance";
+        _power.FailSet = true;
+        result = PowerTuner().Prepare(PowerOptions());
+        Assert.Equal(Balanced, _power.Active);
+        Assert.Contains(result.Notes, n => n.Contains("could not switch the power plan", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void The_worker_is_exempted_from_power_throttling_once_and_revert_hands_it_back_to_Windows()
+    {
+        var missing = PowerTuner().Prepare(PowerOptions());
+        Assert.Contains(missing.Notes, n => n.Contains("not found", StringComparison.Ordinal));
+        Assert.Empty(_power.Throttling);
+
+        Directory.CreateDirectory(Path.GetDirectoryName(WorkerExe)!);
+        File.WriteAllText(WorkerExe, "fake");
+        PowerTuner().Prepare(PowerOptions());
+        PowerTuner().Prepare(PowerOptions());
+        Assert.Equal([(WorkerExe, true)], _power.Throttling);
+        Assert.Contains(PowerTuner().Status(PowerOptions()).Items, i => i is { Id: "PowerThrottling", State: HostItemStatus.Ok });
+
+        PowerTuner().Revert();
+        Assert.Equal([(WorkerExe, true), (WorkerExe, false)], _power.Throttling);
+        Assert.Empty(PowerTuner().Revert().Changes); // nothing left to revert
+    }
+
+    [Fact]
+    public void Preparing_again_keeps_a_plan_the_owner_picked_after_the_first_prepare()
+    {
+        PowerTuner().Prepare(PowerOptions());
+        _power.Active = Balanced; // the owner switched back; then an upgrade runs prepare again
+
+        var again = PowerTuner().Prepare(PowerOptions());
+        Assert.Equal(Balanced, _power.Active);
+        Assert.Contains(again.Notes, n => n.Contains("left as the owner set it", StringComparison.Ordinal));
+        Assert.DoesNotContain(again.Changes, c => c.StartsWith("power plan", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_revert_that_failed_for_power_is_retried_by_the_next_revert()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(WorkerExe)!);
+        File.WriteAllText(WorkerExe, "fake");
+        PowerTuner().Prepare(PowerOptions());
+
+        _power.FailSet = true;
+        _power.FailThrottling = true;
+        var first = PowerTuner().Revert();
+        Assert.Equal(HostTuner.HighPerformanceScheme, _power.Active);
+        Assert.Contains(first.Notes, n => n.Contains("could not restore the power plan", StringComparison.Ordinal));
+        Assert.Contains(first.Notes, n => n.Contains("could not reset power throttling", StringComparison.Ordinal));
+        Assert.False(PowerTuner().Status(PowerOptions()).Prepared);
+
+        _power.FailSet = false;
+        _power.FailThrottling = false;
+        var second = PowerTuner().Revert();
+        Assert.Equal(Balanced, _power.Active);
+        Assert.Equal((WorkerExe, false), _power.Throttling[^1]);
+        Assert.Equal(2, second.Changes.Count);
+        Assert.Contains("nothing to revert", Assert.Single(PowerTuner().Revert().Notes), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void An_exemption_the_owner_set_before_prepare_is_left_on_revert()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(WorkerExe)!);
+        File.WriteAllText(WorkerExe, "fake");
+        _power.OwnerExempt.Add(WorkerExe);
+
+        var result = PowerTuner().Prepare(PowerOptions());
+        Assert.Contains(result.Notes, n => n.Contains("already off", StringComparison.Ordinal));
+        Assert.Contains(PowerTuner().Status(PowerOptions()).Items, i => i is { Id: "PowerThrottling", State: HostItemStatus.Ok });
+
+        PowerTuner().Revert();
+        Assert.Empty(_power.Throttling); // never disabled, never reset
+    }
+
+    [Fact]
+    public void Tuners_without_power_access_leave_power_alone()
+    {
+        Tuner().Prepare(PowerOptions());
+        Assert.Equal(Balanced, _power.Active);
+        Assert.DoesNotContain(Tuner().Status(PowerOptions()).Items, i => i.Id == "PowerPlan");
+    }
+
+    private sealed class FakePower : IHostPower
+    {
+        public Dictionary<Guid, string> Names { get; } = new()
+        {
+            [Balanced] = "Balanced",
+            [HostTuner.HighPerformanceScheme] = "High performance",
+        };
+
+        public Guid Active { get; set; } = Balanced;
+
+        public bool FailSet { get; set; }
+
+        public List<(string Path, bool Exempt)> Throttling { get; } = [];
+
+        public Guid? ActiveScheme() => Active;
+
+        public IReadOnlyList<Guid> Schemes() => [.. Names.Keys];
+
+        public void SetActiveScheme(Guid scheme)
+        {
+            if (FailSet)
+            {
+                throw new System.ComponentModel.Win32Exception(5, "PowerSetActiveScheme");
+            }
+
+            Active = Names.ContainsKey(scheme) ? scheme : throw new InvalidOperationException("no such plan");
+        }
+
+        public string? SchemeName(Guid scheme) => Names.TryGetValue(scheme, out var name) ? name : null;
+
+        public HashSet<string> OwnerExempt { get; } = new(StringComparer.OrdinalIgnoreCase);
+
+        public bool FailThrottling { get; set; }
+
+        public void SetPowerThrottling(string executable, bool exempt)
+        {
+            if (FailThrottling)
+            {
+                throw new InvalidOperationException("powercfg /powerthrottling exited with 1");
+            }
+
+            Throttling.Add((executable, exempt));
+        }
+
+        public bool? IsPowerThrottlingDisabled(string executable) =>
+            OwnerExempt.Contains(executable) || Throttling.LastOrDefault(t => t.Path == executable) is { Exempt: true };
     }
 
     private sealed class FakeRegistry : IHostRegistry

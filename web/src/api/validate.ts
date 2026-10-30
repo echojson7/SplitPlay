@@ -13,7 +13,7 @@ export const FPS_MAX = 500
 export const PORT_MIN = 1029 // basePort-5 must stay >= 1024
 export const PORT_MAX = 65514 // basePort+21 must stay <= 65535
 
-export type DeskConfigErrors = Partial<Record<'id' | 'name' | 'user' | 'basePort' | 'fps' | 'resolution' | 'bitrate' | 'fecPercent' | 'minFps', MessageKey>>
+export type DeskConfigErrors = Partial<Record<'id' | 'name' | 'user' | 'basePort' | 'fps' | 'resolution' | 'bitrate' | 'fecPercent' | 'minFps' | 'pacingMbps', MessageKey>>
 
 function isInt(n: unknown): n is number {
   return typeof n === 'number' && Number.isInteger(n)
@@ -35,6 +35,8 @@ export function validateDeskConfig(c: DeskConfig, existingIds: readonly string[]
   if (p.fecPercent !== undefined && (!isInt(p.fecPercent) || p.fecPercent < 0 || p.fecPercent > 100))
     e.fecPercent = 'form.err.fec'
   if (p.minFps !== undefined && (!isInt(p.minFps) || p.minFps < 1 || p.minFps > p.fps)) e.minFps = 'form.err.minFps'
+  if (p.pacingMbps !== undefined && (!isInt(p.pacingMbps) || p.pacingMbps < 1 || p.pacingMbps > 100_000))
+    e.pacingMbps = 'form.err.pacing'
   return e
 }
 

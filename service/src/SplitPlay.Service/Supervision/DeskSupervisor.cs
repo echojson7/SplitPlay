@@ -1852,6 +1852,11 @@ public sealed class DeskSupervisor : IHostedService
             {
                 _logger.LogWarning("Desk {Desk} rejected the new profile: {Code} {Message}", id, result.Error?.Code, result.Error?.Message);
             }
+            else if (result.Data is { } applied)
+            {
+                // The worker lists what applies now, what from the next stream and what it does not apply (ipc.md).
+                _logger.LogInformation("Desk {Desk}: new profile applied {Result}", id, applied.GetRawText());
+            }
         }
         catch (Exception ex)
         {

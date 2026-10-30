@@ -81,7 +81,11 @@ repository's `LICENSE` and `NOTICE.md` are added by the script.
    `fSingleSessionPerUser=0`, NLA on), sets the session policies desks need (no idle or disconnection limits,
    `bEnumerateHWBeforeSW=1`, `DWMFRAMEINTERVAL` from `host.composeIntervalMs`), sets TermService to start
    automatically and, with TermWrap, points the `ServiceDll` of TermService (and of UmRdpService on Home and Server
-   editions) at `{app}\termwrap\` exactly as TermWrap's own `Install_termwrap_*.reg` files do. Every previous value
+   editions) at `{app}\termwrap\` exactly as TermWrap's own `Install_termwrap_*.reg` files do. It also switches to
+   the Ultimate Performance plan when it exists, otherwise High performance (left alone on PCs without one, and on
+   later runs when the owner picked another plan since), and turns power throttling off for
+   `{app}\worker\splitplay-worker.exe` (`powercfg /powerthrottling disable`, unless the owner already did); these
+   two only tune performance, so a failure is a note and a plan changed later does not stop desks. Every previous value
    is recorded in `%ProgramData%\SplitPlay\host-tuning.json`. When the ServiceDll changed while TermService was
    running, the command exits with 3010 and setup asks for a restart (`NeedRestart`; `/NORESTART` suppresses it).
    Until that restart desks go to Faulted with "RDP host not prepared: reboot required". A failure shows a message
@@ -124,7 +128,9 @@ undoes the Steam isolation values in the desk user's hive, shows the account on 
 off and deletes the accounts SplitPlay created (desk accounts and any left by desks deleted earlier) with their
 profiles and stored passwords; accounts SplitPlay did not create are never deleted. Other stored passwords stay in
 the data folder for a reinstall over kept data. Then it runs `splitplay.exe host revert`
-(restores the exact values recorded in `host-tuning.json`, deleting the ones that did not exist before; when it
+(restores the exact values recorded in `host-tuning.json`, deleting the ones that did not exist before, switches back
+to the previous power plan unless the owner picked another one since, and resets the worker's power throttling if prepare
+turned it off (a revert that fails for these is retried by the next one); when it
 reverted a loaded ServiceDll it exits with 3010 and the uninstaller asks for a restart, and `TermWrap.dll` is deleted
 at that restart), removes ViGEmBus with `msiexec /x <ViGEmBusProductCode> /qn /norestart` (same timeout) only if
 `HKLM\Software\SplitPlay` records that SplitPlay installed it (a failed removal is logged and keeps the record),

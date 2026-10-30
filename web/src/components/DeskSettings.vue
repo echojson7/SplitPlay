@@ -29,6 +29,7 @@ const form = reactive({
   basePort: String(d.basePort),
   fecPercent: d.profile.fecPercent === undefined ? '' : String(d.profile.fecPercent),
   minFps: d.profile.minFps === undefined ? '' : String(d.profile.minFps),
+  pacingMbps: d.profile.pacingMbps === undefined ? '' : String(d.profile.pacingMbps),
   gpuPriority: (d.profile.gpuPriority ?? '') as GpuPriority | '',
   // Stored as the worker's `gamepad` setting (keys are case-insensitive); the service defaults it to ds4.
   gamepad: gamepadSetting(d.workerSettings),
@@ -75,6 +76,8 @@ function toConfig(): DeskConfig {
   else profile.fecPercent = Number(form.fecPercent)
   if (form.minFps.trim() === '') delete profile.minFps
   else profile.minFps = Number(form.minFps)
+  if (form.pacingMbps.trim() === '') delete profile.pacingMbps
+  else profile.pacingMbps = Number(form.pacingMbps)
   if (form.gpuPriority) profile.gpuPriority = form.gpuPriority
   else delete profile.gpuPriority
   const config: DeskConfig = { ...base, profile }
@@ -223,6 +226,11 @@ const gpuOptions = computed(() => {
         <label for="adv-minfps">{{ t('adv.minFps') }}</label>
         <input id="adv-minfps" v-model="form.minFps" name="minFps" inputmode="numeric" :placeholder="t('adv.default')" />
         <span v-if="err('minFps')" class="err">{{ err('minFps') }}</span>
+      </div>
+      <div class="field">
+        <label for="adv-pacing">{{ t('adv.pacing') }}</label>
+        <input id="adv-pacing" v-model="form.pacingMbps" name="pacingMbps" inputmode="numeric" :placeholder="t('adv.default')" />
+        <span v-if="err('pacingMbps')" class="err">{{ err('pacingMbps') }}</span>
       </div>
       <div class="field">
         <label for="adv-prio">{{ t('adv.gpuPriority') }}</label>

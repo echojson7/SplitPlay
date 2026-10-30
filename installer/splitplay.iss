@@ -16,6 +16,9 @@
 ;                          ("splitplay host prepare --skip-termwrap"; CI runners must keep their RDP stack)
 ; Uninstaller parameters:
 ;   /PurgeData=1           also delete %ProgramData%\SplitPlay (default: keep it; interactive runs ask)
+;   /DeleteDeskAccounts=1  also delete the Windows accounts SplitPlay created for desks, with their profiles (default:
+;                          keep them; interactive runs offer a check box, off by default). Accounts SplitPlay did not
+;                          create are never deleted.
 ;   /ViGEmBusTimeout=<s>   as for setup, for removing a ViGEmBus that SplitPlay installed
 
 #if VER < EncodeVer(6, 3, 0)
@@ -150,6 +153,12 @@ en.ServiceStartFailed=The SplitPlay service was installed but did not start (exi
 ru.ServiceStartFailed=Служба SplitPlay установлена, но не запустилась (код %1). Логи: %2.
 en.KeepDataQuestion=Keep the SplitPlay configuration, desk data and logs in %1?%n%nYes: keep them for a later reinstall.%nNo: delete them.
 ru.KeepDataQuestion=Сохранить конфигурацию, данные столов и логи SplitPlay в %1?%n%nДа: оставить для повторной установки.%nНет: удалить.
+en.UninstallOptions=Uninstall SplitPlay
+ru.UninstallOptions=Удаление SplitPlay
+en.DeleteDeskAccounts=Also delete the desk accounts SplitPlay created
+ru.DeleteDeskAccounts=Удалить и учётные записи столов, созданные SplitPlay
+en.CleanupFailed=Some desk settings could not be undone (code %1). Their records are kept in %2: install SplitPlay again and uninstall it to retry.
+ru.CleanupFailed=Часть настроек столов не удалось отменить (код %1). Их записи сохранены в %2: установите SplitPlay снова и удалите, чтобы повторить.
 en.StatusAcl=Securing the data folder...
 ru.StatusAcl=Настройка прав на папку данных...
 en.StatusFirewall=Adding firewall rules...
@@ -261,6 +270,8 @@ var
   HostRebootRequired: Boolean;
   ViGEmBusRebootRequired: Boolean;
   UninstallRebootRequired: Boolean;
+  DeleteDeskAccounts: Boolean;
+  CleanupFailed: Boolean;
 
 { Runs a program hidden and waits; returns its exit code, or -1 if it could not start. }
 function RunHidden(const FileName, Params: String): Integer;
@@ -762,10 +773,96 @@ begin
   end;
 end;
 
+{ Deletes the data folder except desks\ (the per-desk records a later cleanup needs). }
+procedure PurgeDataExceptDesks;
+var
+  F: TFindRec;
+begin
+  if FindFirst(DataDir + '\*', F) then
+  try
+    repeat
+      if (F.Name <> '.') and (F.Name <> '..') and (CompareText(F.Name, 'desks') <> 0) then
+      begin
+        if (F.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+          DelTree(DataDir + '\' + F.Name, True, True, True)
+        else
+          DeleteFile(DataDir + '\' + F.Name);
+      end;
+    until not FindNext(F);
+  finally
+    FindClose(F);
+  end;
+end;
+
+{ The uninstall options: one check box, off by default. False when the owner cancels. }
+function AskUninstallOptions: Boolean;
+var
+  Form: TSetupForm;
+  Check: TNewCheckBox;
+  OkButton, CancelButton: TNewButton;
+begin
+  { Inno Setup 6.5 gave CreateCustomForm its size and scaling parameters. }
+#if VER >= EncodeVer(6, 5, 0)
+  Form := CreateCustomForm(ScaleX(440), ScaleY(96), False, False);
+#else
+  Form := CreateCustomForm;
+#endif
+  try
+    Form.ClientWidth := ScaleX(440);
+    Form.ClientHeight := ScaleY(96);
+    Form.Caption := CustomMessage('UninstallOptions');
+
+    Check := TNewCheckBox.Create(Form);
+    Check.Parent := Form;
+    Check.Left := ScaleX(16);
+    Check.Top := ScaleY(18);
+    Check.Width := Form.ClientWidth - ScaleX(32);
+    Check.Height := ScaleY(20);
+    Check.Caption := CustomMessage('DeleteDeskAccounts');
+    Check.Checked := False;
+
+    OkButton := TNewButton.Create(Form);
+    OkButton.Parent := Form;
+    OkButton.Width := ScaleX(80);
+    OkButton.Height := ScaleY(24);
+    OkButton.Left := Form.ClientWidth - ScaleX(16 + 80 + 8 + 80);
+    OkButton.Top := Form.ClientHeight - ScaleY(16 + 24);
+    OkButton.Caption := SetupMessage(msgButtonOK);
+    OkButton.ModalResult := mrOk;
+    OkButton.Default := True;
+
+    CancelButton := TNewButton.Create(Form);
+    CancelButton.Parent := Form;
+    CancelButton.Width := ScaleX(80);
+    CancelButton.Height := ScaleY(24);
+    CancelButton.Left := Form.ClientWidth - ScaleX(16 + 80);
+    CancelButton.Top := OkButton.Top;
+    CancelButton.Caption := SetupMessage(msgButtonCancel);
+    CancelButton.ModalResult := mrCancel;
+    CancelButton.Cancel := True;
+
+    Form.ActiveControl := OkButton;
+    Result := Form.ShowModal = mrOk;
+    DeleteDeskAccounts := Check.Checked;
+  finally
+    Form.Free;
+  end;
+end;
+
+function InitializeUninstall: Boolean;
+begin
+  Result := True;
+  DeleteDeskAccounts := ParamIsSet('DeleteDeskAccounts');
+  if not UninstallSilent and not DeleteDeskAccounts then
+    Result := AskUninstallOptions;
+  Log(Format('Delete the desk accounts SplitPlay created: %d', [Ord(DeleteDeskAccounts)]));
+end;
+
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   Purge: Boolean;
   Code: Integer;
+  Params: String;
 begin
   if CurUninstallStep = usUninstall then
   begin
@@ -781,6 +878,21 @@ begin
         RunHidden(SysTool('net.exe'), 'stop ' + ServiceName);
         RunHidden(SysTool('sc.exe'), 'delete ' + ServiceName);
       end;
+    end;
+    { With the desks stopped: undo what each desk changed (its Steam values in the desk user's hive, its sign-in screen
+      entry and firewall rules) and, when asked, delete the accounts SplitPlay created. Accounts SplitPlay did not
+      create are never deleted. }
+    Params := 'cleanup';
+    if DeleteDeskAccounts then
+      Params := Params + ' --delete-accounts';
+    Code := RunHiddenWithTimeout(ExpandConstant('{app}\service\SplitPlay.Service.exe'), Params, 180, 'SplitPlay.Service');
+    if Code <> 0 then
+    begin
+      { The desk records (logon-hidden.json, the Steam state) are what a later cleanup needs: they are never purged now. }
+      CleanupFailed := True;
+      Log(Format('Desk cleanup failed or timed out (code %d); keeping %s\desks', [Code, DataDir]));
+      if not UninstallSilent then
+        MsgBox(FmtMessage(CustomMessage('CleanupFailed'), [IntToStr(Code), DataDir + '\desks']), mbError, MB_OK);
     end;
     { Restore the exact Remote Desktop settings recorded by "host prepare" (TermService's ServiceDll included). }
     Code := RunHidden(ExpandConstant('{app}\service\splitplay.exe'), 'host revert');
@@ -803,7 +915,12 @@ begin
       Purge := ParamIsSet('PurgeData');
       if not Purge and not UninstallSilent then
         Purge := MsgBox(FmtMessage(CustomMessage('KeepDataQuestion'), [DataDir]), mbConfirmation, MB_YESNO) = IDNO;
-      if Purge then
+      if Purge and CleanupFailed then
+      begin
+        Log('Deleting ' + DataDir + ' except desks (the desk cleanup failed)');
+        PurgeDataExceptDesks;
+      end
+      else if Purge then
       begin
         Log('Deleting ' + DataDir);
         DelTree(DataDir, True, True, True);

@@ -24,6 +24,8 @@ public sealed class InvalidDeskTransitionException(DeskState state, DeskTrigger 
 /// so a desk stuck in a retry loop can always be stopped.</item>
 /// <item><c>Fail</c> during Provisioning goes straight to Faulted: provisioning errors (account, rights, LSA) are not
 /// transient and retrying from Connecting would skip the failed step.</item>
+/// <item><c>Pause</c> (the PC goes to sleep) moves a running desk to Recovering without counting a failure and without
+/// a retry time; only <c>Resume</c> (back to Connecting) or <c>Stop</c> leave it.</item>
 /// </list>
 /// </remarks>
 public sealed class DeskStateMachine
@@ -83,6 +85,9 @@ public sealed class DeskStateMachine
 
     /// <summary>While Recovering: the earliest time <see cref="DeskTrigger.RetryDue"/> is accepted.</summary>
     public DateTimeOffset? RetryAt { get; private set; }
+
+    /// <summary>Recovering because of <see cref="DeskTrigger.Pause"/> (the PC sleeps), waiting for <see cref="DeskTrigger.Resume"/>.</summary>
+    public bool Paused { get; private set; }
 
     /// <summary>Number of failures inside the sliding window, as of now.</summary>
     public int FailuresInWindow
@@ -149,7 +154,8 @@ public sealed class DeskStateMachine
             case DeskTrigger.Fail when Recoverable.Contains(State):
             {
                 Prune(now);
-                var faulted = _failures.Count + 1 > Policy.MaxFailuresInWindow;
+                var faulted = _failures.Count + 1 > Policy.MaxFailuresInWindow
+                              || ConsecutiveFailures + 1 > Policy.MaxConsecutiveFailures;
                 if (commit)
                 {
                     RecordFailure(now, reason);
@@ -158,6 +164,23 @@ public sealed class DeskStateMachine
 
                 return faulted ? DeskState.Faulted : DeskState.Recovering;
             }
+
+            case DeskTrigger.Pause when Recoverable.Contains(State):
+                if (commit)
+                {
+                    Paused = true;
+                    RetryAt = null;
+                }
+
+                return DeskState.Recovering;
+
+            case DeskTrigger.Resume when State == DeskState.Recovering && Paused:
+                if (commit)
+                {
+                    Paused = false;
+                }
+
+                return DeskState.Connecting;
 
             case DeskTrigger.RetryDue when State == DeskState.Recovering && RetryAt is { } at && now >= at:
                 if (commit)
@@ -182,6 +205,7 @@ public sealed class DeskStateMachine
                 ConsecutiveFailures = 0;
                 LastError = null;
                 RetryAt = null;
+                Paused = false;
                 break;
             case DeskTrigger.WorkerReady:
                 ConsecutiveFailures = 0;
@@ -189,6 +213,7 @@ public sealed class DeskStateMachine
                 break;
             case DeskTrigger.Stop:
                 RetryAt = null;
+                Paused = false;
                 break;
         }
     }

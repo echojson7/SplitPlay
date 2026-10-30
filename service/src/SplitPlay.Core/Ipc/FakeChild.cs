@@ -29,6 +29,9 @@ public enum FakeChildBehavior
 
     /// <summary>Seat: becomes ready, then reports <c>session_lost</c> and exits with code 4 (gave up reconnecting).</summary>
     GiveUpAfterReady,
+
+    /// <summary>Seat: becomes ready, reports <c>session_lost</c> and keeps running without ever restoring it (a hung reconnect).</summary>
+    LoseSessionAfterReady,
 }
 
 /// <summary>Options for <see cref="FakeChild.RunAsync"/>.</summary>
@@ -164,6 +167,12 @@ public static class FakeChild
                 await Task.Delay(options.HeartbeatInterval, cancellationToken).ConfigureAwait(false);
                 await SendEventAsync(connection, IpcProtocol.Events.SessionLost, """{"reason":"simulated"}""", cancellationToken).ConfigureAwait(false);
                 return IpcProtocol.ExitCodes.SeatGaveUp;
+            }
+
+            if (options.Behavior == FakeChildBehavior.LoseSessionAfterReady)
+            {
+                await Task.Delay(options.HeartbeatInterval, cancellationToken).ConfigureAwait(false);
+                await SendEventAsync(connection, IpcProtocol.Events.SessionLost, """{"reason":"simulated hang"}""", cancellationToken).ConfigureAwait(false);
             }
 
             if (options.RequestMode is { } mode)

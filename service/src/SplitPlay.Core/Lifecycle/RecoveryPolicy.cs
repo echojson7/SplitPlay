@@ -3,7 +3,8 @@ namespace SplitPlay.Core.Lifecycle;
 
 /// <summary>
 /// Recovery rules from ARCHITECTURE.md §4: retry with backoff 1, 2, 4 … 60 s; more than 5 failures within 10 minutes
-/// puts the desk into <see cref="DeskState.Faulted"/>.
+/// puts the desk into <see cref="DeskState.Faulted"/>, and so do more than 10 failures in a row without reaching Ready
+/// (slow failures such as a logon that times out after minutes never fill the window, but must not retry forever).
 /// </summary>
 public sealed record RecoveryPolicy
 {
@@ -17,6 +18,9 @@ public sealed record RecoveryPolicy
     public int MaxFailuresInWindow { get; init; } = 5;
 
     public TimeSpan FailureWindow { get; init; } = TimeSpan.FromMinutes(10);
+
+    /// <summary>A desk faults when its failures since it was last Ready exceed this value, however far apart they are.</summary>
+    public int MaxConsecutiveFailures { get; init; } = 10;
 
     /// <summary>
     /// Delay before retry number <paramref name="consecutiveFailures"/> (1-based): initial · 2^(n-1), capped at the maximum.

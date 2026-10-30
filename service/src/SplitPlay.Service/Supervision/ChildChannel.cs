@@ -18,6 +18,7 @@ internal sealed class ChildChannel : IAsyncDisposable
     private readonly ILogger _logger;
     private readonly CancellationTokenSource _io = new();
     private readonly object _gate = new();
+    private readonly TaskCompletionSource<string> _failed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private DateTimeOffset _lastHeartbeat;
     private Task<string>? _completion;
     private bool _ready;
@@ -188,8 +189,11 @@ internal sealed class ChildChannel : IAsyncDisposable
         var reader = ReadLoopAsync(handler, _io.Token);
         var watchdog = WatchdogAsync(readyDeadline, readyTimeout, _io.Token);
         var exited = ExitReasonAsync();
-        _completion = FirstAsync(reader, watchdog, exited);
+        _completion = FirstAsync(reader, watchdog, exited, _failed.Task);
     }
+
+    /// <summary>Ends <see cref="Completion"/> with <paramref name="reason"/> (the owner decided the child is unusable).</summary>
+    public void Fail(string reason) => _failed.TrySetResult(reason);
 
     private static async Task<string> FirstAsync(params Task<string>[] tasks) => await (await Task.WhenAny(tasks).ConfigureAwait(false)).ConfigureAwait(false);
 

@@ -56,7 +56,22 @@ function Invoke-Cli {
     if ($LASTEXITCODE -ne 0) { throw "splitplay $($args -join ' ') exited with $LASTEXITCODE" }
 }
 
+# The Web API wants the admin (web-api.md "Authentication"): a bearer token from "splitplay auth token" (the admin pipe;
+# this shell is elevated). Tokens live in the service's memory, so a (re)started service needs a new one.
+$script:apiToken = $null
+$script:apiTokenAt = [datetime]::MinValue
+function Get-ApiHeaders {
+    if (-not $script:apiToken -or ((Get-Date) - $script:apiTokenAt).TotalMinutes -gt 5) {
+        $out = (& $cli auth token 2>&1) -join "`n"
+        if ($LASTEXITCODE -ne 0) { throw "splitplay auth token exited with ${LASTEXITCODE}: $out" }
+        $script:apiToken = $out.Trim()
+        $script:apiTokenAt = Get-Date
+    }
+    @{ Authorization = "Bearer $script:apiToken" }
+}
+
 function Wait-Health([int]$Seconds) {
+    $script:apiToken = $null
     $deadline = (Get-Date).AddSeconds($Seconds)
     while ($true) {
         try {
@@ -77,7 +92,13 @@ function Wait-PortFree([int]$Seconds) {
     }
 }
 
-function Get-Desk([string]$id) { Invoke-RestMethod -Uri "$base/desks/$id" }
+function Get-Desk([string]$id) { Invoke-RestMethod -Headers (Get-ApiHeaders) -Uri "$base/desks/$id" }
+
+# Status code of a request without any credential (a desk user's process or a plain browser).
+function Get-AnonymousStatus([string]$Method, [string]$Uri) {
+    try { Invoke-WebRequest -Method $Method -Uri $Uri -UseBasicParsing -TimeoutSec 10 | Out-Null; return 200 }
+    catch { return [int]$_.Exception.Response.StatusCode }
+}
 
 function Wait-Desk([string]$id, [scriptblock]$until, [int]$seconds, [string]$what) {
     $deadline = (Get-Date).AddSeconds($seconds)
@@ -271,9 +292,22 @@ try {
         Write-Host "health: $($health | ConvertTo-Json -Compress)"
         if ($health.version -ne '0.1.0') { throw "unexpected version $($health.version)" }
 
+        Step 'console mode: only the admin may use the API'
+        foreach ($probe in 'Get desks', 'Get logs', 'Post desks/x/start', 'Put host') {
+            $method, $path = $probe -split ' ', 2
+            $code = Get-AnonymousStatus $method "$base/$path"
+            if ($code -ne 401) { throw "$method /$path without a token answered $code, expected 401" }
+        }
+        if ((Get-AnonymousStatus 'Get' "$base/health") -ne 200) { throw '/health must answer without a token' }
+        $session = Invoke-RestMethod -Uri "$base/auth/session"
+        if ($session.authenticated) { throw "an anonymous caller is authenticated: $($session | ConvertTo-Json -Compress)" }
+        $session = Invoke-RestMethod -Headers (Get-ApiHeaders) -Uri "$base/auth/session"
+        if (-not $session.authenticated) { throw "the admin pipe token is not accepted: $($session | ConvertTo-Json -Compress)" }
+        Write-Host '  anonymous: 401; admin pipe token (elevated shell): accepted'
+
         Step 'console mode: related Windows services (SCM queries, allow-list)'
         # Invoke-RestMethod writes a JSON array as one object; ForEach-Object unrolls it into the services.
-        $services = @(Invoke-RestMethod -Uri "$base/host/services" -TimeoutSec 10 | ForEach-Object { $_ })
+        $services = @(Invoke-RestMethod -Headers (Get-ApiHeaders) -Uri "$base/host/services" -TimeoutSec 10 | ForEach-Object { $_ })
         Write-Host ($services | ForEach-Object { "$($_.name)=$($_.status)/$($_.startType) start=$($_.canStart) stop=$($_.canStop)" })
         $names = @($services | ForEach-Object { $_.name })
         foreach ($n in 'SplitPlay', 'TermService', 'UmRdpService', 'ViGEmBus', 'Audiosrv') {
@@ -282,7 +316,7 @@ try {
         $term = $services | Where-Object { $_.name -eq 'TermService' }
         if ($term.status -eq 'missing' -or -not $term.displayName) { throw "TermService not found by the SCM: $($term | ConvertTo-Json -Compress)" }
         $refused = $false
-        try { Invoke-RestMethod -Method Post -Uri "$base/host/services/Spooler/stop" -TimeoutSec 10 | Out-Null }
+        try { Invoke-RestMethod -Headers (Get-ApiHeaders) -Method Post -Uri "$base/host/services/Spooler/stop" -TimeoutSec 10 | Out-Null }
         catch { $refused = $_.Exception.Response.StatusCode.value__ -eq 404 }
         if (-not $refused) { throw 'POST /host/services/Spooler/stop was not refused with 404' }
 
@@ -310,7 +344,7 @@ try {
         Invoke-Cli desk delete smoke-1
         if (-not (Get-LocalUser -Name 'smoke desk 1' -ErrorAction SilentlyContinue)) { throw 'desk delete without --delete-user removed the account' }
         Invoke-Cli config import $zip
-        $desks = @(Invoke-RestMethod -Uri "$base/desks")
+        $desks = @(Invoke-RestMethod -Headers (Get-ApiHeaders) -Uri "$base/desks")
         if ($desks.Count -ne 1 -or $desks[0].id -ne 'smoke-1') { throw "import did not restore smoke-1" }
 
         # The secret went with the first delete: the next start rotates the password of the existing account.
@@ -402,7 +436,7 @@ try {
             Remove-LocalUser -Name $existing -ErrorAction SilentlyContinue
         }
 
-        $metrics = Invoke-RestMethod -Uri "$base/metrics"
+        $metrics = Invoke-RestMethod -Headers (Get-ApiHeaders) -Uri "$base/metrics"
         Write-Host "metrics: $($metrics | ConvertTo-Json -Compress -Depth 5)"
         $index = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing
         if ($index.Content -notmatch '<title>SplitPlay</title>') { throw 'placeholder index.html not served' }
@@ -524,7 +558,7 @@ try {
                     if ($sessions -match 'splitplay-smoke3') { throw 'the desk session was not logged off on stop' }
 
                     # Turning the option off reverts both hives from disk (NTUSER.DAT and UsrClass.dat mounted).
-                    Invoke-RestMethod -Method Put -Uri "$base/desks/smoke-3" -ContentType 'application/json' -Body '{"steamIsolation":false}' | Out-Null
+                    Invoke-RestMethod -Headers (Get-ApiHeaders) -Method Put -Uri "$base/desks/smoke-3" -ContentType 'application/json' -Body '{"steamIsolation":false}' | Out-Null
                     $seatProfile = (Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $seatSid }).LocalPath
                     # (Windows may keep a logged-off user's hive loaded for a while: then it is read where it is.)
                     $after = if (Test-Path "Registry::HKEY_USERS\$seatSid") { Get-SteamHiveValues -sid $seatSid } else { Get-SteamHiveValues $seatProfile }

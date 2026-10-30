@@ -77,6 +77,13 @@ async function changePassword(): Promise<void> {
   }, t('settings.passwordChanged'))
 }
 
+function onKeepAwake(e: Event): Promise<void> {
+  const keepAwake = (e.target as HTMLInputElement).checked
+  return run(async () => {
+    if (host.value) host.value = await api.updateHostSettings({ ...host.value, keepAwake })
+  }, t('common.saved'))
+}
+
 function onTheme(e: Event): void {
   setTheme((e.target as HTMLSelectElement).value as ThemeMode)
 }
@@ -167,6 +174,25 @@ function importConfig(): Promise<void> {
       </div>
     </form>
 
+    <h2 class="group-title">{{ t('settings.power') }}</h2>
+    <div class="rows">
+      <div class="srow">
+        <AppIcon name="moon" :size="16" />
+        <label class="text" for="keep-awake"><span class="title">{{ t('settings.keepAwake') }}</span></label>
+        <div class="ctl">
+          <span class="switch">
+            <input
+              id="keep-awake"
+              type="checkbox"
+              :checked="host?.keepAwake !== false"
+              :disabled="!host || busy"
+              @change="onKeepAwake"
+            />
+          </span>
+        </div>
+      </div>
+    </div>
+
     <h2 class="group-title">{{ t('common.more') }}</h2>
     <div class="rows">
       <details class="more">
@@ -255,7 +281,7 @@ function importConfig(): Promise<void> {
 </template>
 
 <style scoped>
-.ctl input,
+.ctl input:not([type='checkbox']),
 .ctl select {
   width: 240px;
 }
@@ -320,7 +346,7 @@ details.more > summary .text {
     display: none;
   }
 
-  .ctl input,
+  .ctl input:not([type='checkbox']),
   .ctl select,
   .irow > input,
   .irow > select {

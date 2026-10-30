@@ -5,6 +5,7 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { api } from './api/client'
 import AppIcon from './components/AppIcon.vue'
 import BrandMark from './components/BrandMark.vue'
+import ServicesFlyout from './components/ServicesFlyout.vue'
 import ToastHost from './components/ToastHost.vue'
 import { t } from './i18n'
 import { store } from './store'
@@ -36,10 +37,13 @@ async function logout(): Promise<void> {
 <template>
   <div :class="['shell', { bare }]">
     <aside v-if="!bare" class="navpane">
-      <RouterLink to="/" class="appname" :aria-label="t('app.title')">
-        <BrandMark :size="16" />
-        <span class="appname-text">SplitPlay</span>
-      </RouterLink>
+      <div class="approw">
+        <RouterLink to="/" class="appname" :aria-label="t('app.title')">
+          <BrandMark :size="16" />
+          <span class="appname-text">SplitPlay</span>
+        </RouterLink>
+        <ServicesFlyout />
+      </div>
       <nav class="nav" aria-label="main">
         <RouterLink to="/" :class="{ active: section === 'library' }">
           <AppIcon name="monitor" :size="16" /><span>{{ t('nav.library') }}</span>
@@ -89,6 +93,8 @@ async function logout(): Promise<void> {
 .navpane {
   position: sticky;
   top: 0;
+  /* Above the page so that the Services flyout covers it. */
+  z-index: 35;
   height: 100vh;
   display: flex;
   flex-direction: column;
@@ -96,13 +102,23 @@ async function logout(): Promise<void> {
   padding: 4px 0 8px;
 }
 
+.approw {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 48px;
+  padding-right: 8px;
+  margin-bottom: 4px;
+}
+
 .appname {
+  flex: 1;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 12px;
-  height: 48px;
+  height: 100%;
   padding: 0 16px;
-  margin-bottom: 4px;
   color: var(--text);
   font-size: 12px;
 }
@@ -179,10 +195,15 @@ async function logout(): Promise<void> {
     border-bottom: 1px solid var(--divider);
   }
 
-  .appname {
+  .approw {
     height: 40px;
-    padding: 0 8px;
+    padding: 0;
     margin: 0;
+  }
+
+  .appname {
+    flex: none;
+    padding: 0 8px;
   }
 
   .appname-text,

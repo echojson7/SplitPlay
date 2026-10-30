@@ -11,6 +11,8 @@ Vue 3 + Vite + TypeScript single-page app for the SplitPlay host, styled after t
   autostart, Bluetooth and the Sunshine settings sit in the collapsed "Advanced" section; delete is at the bottom.
 - **Settings** (`/settings`): admin password and language; service options and backup under "Advanced".
 - **Diagnostics** (`/diagnostics/metrics`, `/diagnostics/logs`).
+- **Services**: a button next to the app name opens a flyout with the Windows services SplitPlay depends on
+  (`GET /host/services`), their state and Start / Stop; stopping SplitPlay or Remote Desktop asks first.
 - Login / first-time password setup.
 
 The UI is in Russian; English strings are the fallback. Labels stay short: no help paragraphs. Errors appear as

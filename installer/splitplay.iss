@@ -246,6 +246,14 @@ const
   { After a timeout: how long to wait for the Windows Installer service to finish (commit or roll back). }
   MsiIdleWaitSec = 60;
   ExitTimedOut = 1460; { ERROR_TIMEOUT }
+  { DACL of the SplitPlay service: the default ACEs (SYSTEM, Administrators, interactive users IU, service logons SU)
+    with SERVICE_START (RP) added for interactive users, so that the tray can start a stopped service without
+    elevation. IU covers console and RDP sign-ins. Rights: CC query config, LC query status, SW enumerate dependents,
+    RP start, LO interrogate, CR user-defined control, RC read permissions. Stop (WP), pause (DT), reconfigure (DC),
+    delete (SD) and permission changes (WD, WO) stay with SYSTEM and Administrators. ServiceSacl is the default audit
+    ACE. }
+  ServiceDacl = 'D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPLOCRRC;;;IU)(A;;CCLCSWLOCRRC;;;SU)';
+  ServiceSacl = 'S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)';
 
 var
   DownloadPage: TDownloadWizardPage;
@@ -707,6 +715,16 @@ begin
     Log(Format('Removing ViGEmBus failed (msiexec exit code %d); it stays installed', [Code]));
 end;
 
+{ Lets signed-in users start (not stop) the service: see ServiceDacl. Also applied on upgrades. }
+procedure AllowUsersToStartService;
+begin
+  if RunHidden(SysTool('sc.exe'), 'sdset ' + ServiceName + ' ' + ServiceDacl + ServiceSacl) = 0 then
+    Exit;
+  Log('sc sdset with the audit SACL failed; setting the DACL only');
+  if RunHidden(SysTool('sc.exe'), 'sdset ' + ServiceName + ' ' + ServiceDacl) <> 0 then
+    Log('Could not change the service permissions: starting it from the tray will ask for elevation');
+end;
+
 procedure InstallAndStartService;
 var
   Code: Integer;
@@ -721,6 +739,7 @@ begin
       Exit;
     end;
   end;
+  AllowUsersToStartService;
   Code := RunHidden(SysTool('net.exe'), 'start ' + ServiceName);
   if Code <> 0 then
     SuppressibleMsgBox(FmtMessage(CustomMessage('ServiceStartFailed'), [IntToStr(Code), DataDir + '\logs']),

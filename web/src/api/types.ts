@@ -77,6 +77,22 @@ export interface HostNetwork {
   addresses: string[]
 }
 
+export const SERVICE_STATUSES = ['running', 'stopped', 'starting', 'stopping', 'missing'] as const
+export type ServiceStatus = (typeof SERVICE_STATUSES)[number]
+
+/** GET /host/services: a Windows service SplitPlay depends on. */
+export interface HostService {
+  /** Service name: SplitPlay, TermService, UmRdpService, ViGEmBus, Audiosrv, Steam Client Service. */
+  name: string
+  /** Windows display name; the UI shows its own label per `name`. */
+  displayName: string
+  status: ServiceStatus
+  /** automatic, automaticDelayed, manual, disabled, boot, system; null when missing. */
+  startType: string | null
+  canStart: boolean
+  canStop: boolean
+}
+
 /** Live metrics carried in the desk object. Unknown keys from the worker pass through untyped. */
 export interface DeskMetrics {
   /** Frames actually sent over the last second. */

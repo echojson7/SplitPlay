@@ -9,6 +9,7 @@ import type {
   DeskProfile,
   Health,
   HostNetwork,
+  HostService,
   HostSettings,
   HostUser,
   LiveEvent,
@@ -275,6 +276,21 @@ export class ApiClient {
   async hostAddresses(): Promise<string[]> {
     const raw = await this.request<Partial<HostNetwork> | undefined>('GET', '/host/network')
     return Array.isArray(raw?.addresses) ? raw.addresses.filter((a): a is string => typeof a === 'string') : []
+  }
+
+  /** The Windows services SplitPlay depends on, with their state. */
+  async listServices(): Promise<HostService[]> {
+    return unwrapList<HostService>(await this.request('GET', '/host/services'), 'services')
+  }
+
+  /** Starts one of the listed services; answers with its entry (usually `starting`). */
+  startService(name: string): Promise<HostService> {
+    return this.request('POST', `/host/services/${encodeURIComponent(name)}/start`)
+  }
+
+  /** Stops one of the listed services. Stopping `SplitPlay` takes this UI down; `TermService` ends every desk session. */
+  stopService(name: string): Promise<HostService> {
+    return this.request('POST', `/host/services/${encodeURIComponent(name)}/stop`)
   }
 
   /** Host settings: the `host` object of config.json. */

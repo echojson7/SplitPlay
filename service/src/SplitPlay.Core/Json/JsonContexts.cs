@@ -23,6 +23,8 @@ namespace SplitPlay.Core.Json;
 [JsonSerializable(typeof(HostUserDto))]
 [JsonSerializable(typeof(List<HostUserDto>))]
 [JsonSerializable(typeof(HostNetworkDto))]
+[JsonSerializable(typeof(HostServiceDto))]
+[JsonSerializable(typeof(List<HostServiceDto>))]
 [JsonSerializable(typeof(AuthSessionDto))]
 [JsonSerializable(typeof(LoginRequest))]
 [JsonSerializable(typeof(LoginResponse))]

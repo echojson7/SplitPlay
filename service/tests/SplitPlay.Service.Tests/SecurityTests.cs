@@ -159,15 +159,31 @@ public sealed class SecurityTests
         Assert.False(desks.IsDeskSession(7));
         Assert.False(desks.IsDeskSession(8));   // nobody signed in
 
-        // Who is signed in cannot be read: deny, but the console stays the owner's.
+        // Who is signed in cannot be read: deny, but the console stays the owner's. (Session 9 was not asked before:
+        // answers are kept for a few seconds, failures never.)
         svc.Platform.SessionQueryFails = true;
-        Assert.True(desks.IsDeskSession(7));
+        Assert.True(desks.IsDeskSession(9));
+        Assert.True(desks.IsDeskSession(9));
         Assert.False(desks.IsDeskSession(1));
 
         // And the Web API refuses such a peer, token or not.
         svc.Platform.SessionQueryFails = false;
         svc.App.Services.GetRequiredService<FakePeerInspector>().Session = 5;
         Assert.Equal(HttpStatusCode.Forbidden, (await svc.Client.GetAsync("/api/v1/desks")).StatusCode);
+    }
+
+    [Fact]
+    public async Task Desk_session_answers_are_kept_for_a_few_seconds()
+    {
+        await using var svc = await TestService.StartAsync(platform: p => p.AddSession(6, "gamer", disconnected: false));
+        var desks = svc.App.Services.GetRequiredService<DeskSupervisor>();
+        var before = svc.Platform.SessionUserCalls;
+        for (var i = 0; i < 20; i++)
+        {
+            Assert.False(desks.IsDeskSession(6));
+        }
+
+        Assert.Equal(before + 1, svc.Platform.SessionUserCalls);
     }
 
     // ------------------------------------------------------------------ login throttling
@@ -193,15 +209,61 @@ public sealed class SecurityTests
         throttle.Succeeded("a");
         Assert.Null(throttle.RetryAfter("a"));
 
-        // Many callers together lock everybody out.
+        // Many callers together slow every check down, but lock nobody else out.
+        time.Advance(LoginThrottle.GlobalWindow + TimeSpan.FromSeconds(1));
+        Assert.Equal(TimeSpan.Zero, throttle.GlobalDelay());
         for (var i = 0; i <= LoginThrottle.GlobalFreeFailures; i++)
         {
             throttle.Failed($"peer-{i}");
         }
 
-        Assert.NotNull(throttle.RetryAfter("someone-new"));
-        time.Advance(LoginThrottle.MaxLockout);
         Assert.Null(throttle.RetryAfter("someone-new"));
+        Assert.Equal(TimeSpan.FromMilliseconds(100), throttle.GlobalDelay());
+        for (var i = 0; i < 20; i++)
+        {
+            throttle.Failed($"more-{i}");
+        }
+
+        Assert.Equal(LoginThrottle.MaxGlobalDelay, throttle.GlobalDelay());
+        time.Advance(LoginThrottle.GlobalWindow + TimeSpan.FromSeconds(1));
+        Assert.Equal(TimeSpan.Zero, throttle.GlobalDelay());
+    }
+
+    [Fact]
+    public async Task Throttle_runs_one_check_per_caller_and_rechecks_the_lockout_when_its_turn_comes()
+    {
+        var throttle = new LoginThrottle(TimeProvider.System);
+        using var started = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        var verified = 0;
+        bool Slow()
+        {
+            Interlocked.Increment(ref verified);
+            started.Set();
+            release.Wait(TimeSpan.FromSeconds(10));
+            return false;
+        }
+
+        // While "a" has a check running, its further attempts are refused at once, not queued.
+        var first = Task.Run(() => throttle.AttemptAsync("a", Slow, CancellationToken.None));
+        Assert.True(started.Wait(TimeSpan.FromSeconds(5)));
+        var extra = await Task.WhenAll(Enumerable.Range(0, 10).Select(_ => throttle.AttemptAsync("a", Slow, CancellationToken.None)));
+        Assert.All(extra, r => Assert.Equal(LoginOutcome.Throttled, r.Outcome));
+        Assert.All(extra, r => Assert.Equal(LoginThrottle.BusyRetryAfter, r.RetryAfter));
+
+        // "b" waits for its turn; meanwhile it gets locked out, which is seen once the turn comes: never verified.
+        var bVerified = false;
+        var b = throttle.AttemptAsync("b", () => bVerified = true, CancellationToken.None);
+        for (var i = 0; i < LoginThrottle.FreeFailures; i++)
+        {
+            throttle.Failed("b");
+        }
+
+        release.Set();
+        Assert.Equal(LoginOutcome.Wrong, (await first).Outcome);
+        Assert.Equal(LoginOutcome.Throttled, (await b).Outcome);
+        Assert.False(bVerified);
+        Assert.Equal(1, verified);
     }
 
     [Fact]
@@ -240,20 +302,44 @@ public sealed class SecurityTests
         svc.App.Services.GetRequiredService<FakeAdminCallerCheck>().RefuseAtConnect = "callers in a desk session cannot manage SplitPlay";
         var ns = PipeNamespace(svc);
 
-        // A client that never writes still gets its refusal and the pipe closes at once.
+        // A client that never writes is disconnected at once, without an answer.
+        var started = DateTime.UtcNow;
         await using var idle = new NamedPipeClientStream(".", AdminPipe.LocalName(ns), PipeDirection.InOut, PipeOptions.Asynchronous);
         await idle.ConnectAsync(5000);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-        var line = await AdminPipe.ReadLineAsync(idle, cts.Token);
-        Assert.Contains("desk session", line, StringComparison.Ordinal);
+        Assert.Null(await AdminPipe.ReadLineAsync(idle, cts.Token));
         Assert.True(server.Dropped >= 1);
 
-        // A real client writes its request while the refusal is being written: it must still get the refusal, and
-        // well before the connection deadline (on Windows both writes used to wait on each other until it fired).
-        var started = DateTime.UtcNow;
+        // A real client is told it was refused (not "no service"), well before the connection deadline.
         var ex = await Assert.ThrowsAsync<AdminPipeException>(() => AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "test", TimeSpan.FromSeconds(5), ns));
-        Assert.Contains("desk session", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(AdminPipe.ClosedMessage, ex.Message);
         Assert.True(DateTime.UtcNow - started < AdminPipeServer.RequestTimeout, "the refusal waited for the connection deadline");
+    }
+
+    [Fact]
+    public async Task A_flood_of_refused_pipe_callers_is_cheap_and_does_not_keep_the_admin_out()
+    {
+        await using var svc = await TestService.StartAsync();
+        var server = svc.App.Services.GetRequiredService<AdminPipeServer>();
+        await server.Listening;
+        var check = svc.App.Services.GetRequiredService<FakeAdminCallerCheck>();
+        check.RefuseAtConnect = "callers in a desk session cannot manage SplitPlay";
+        var ns = PipeNamespace(svc);
+
+        var started = DateTime.UtcNow;
+        var flood = await Task.WhenAll(Enumerable.Range(0, 60).Select(async _ =>
+        {
+            await using var c = new NamedPipeClientStream(".", AdminPipe.LocalName(ns), PipeDirection.InOut, PipeOptions.Asynchronous);
+            await c.ConnectAsync(5000);
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            return await AdminPipe.ReadLineAsync(c, cts.Token);
+        }));
+        Assert.All(flood, Assert.Null);
+        Assert.True(DateTime.UtcNow - started < AdminPipeServer.RequestTimeout, "refused callers were held open");
+        Assert.True(server.Dropped >= 60);
+
+        check.RefuseAtConnect = null;
+        Assert.NotNull(await AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "test", TimeSpan.FromSeconds(5), ns));
     }
 
     [Fact]
@@ -298,7 +384,8 @@ public sealed class SecurityTests
     public async Task Too_many_pipe_requests_from_one_session_are_refused()
     {
         await using var svc = await TestService.StartAsync();
-        await svc.App.Services.GetRequiredService<AdminPipeServer>().Listening;
+        var server = svc.App.Services.GetRequiredService<AdminPipeServer>();
+        await server.Listening;
         var ns = PipeNamespace(svc);
         for (var i = 0; i < AdminPipeServer.MaxRequestsPerSession; i++)
         {
@@ -306,8 +393,10 @@ public sealed class SecurityTests
         }
 
         var started = DateTime.UtcNow;
+        var dropped = server.Dropped;
         var ex = await Assert.ThrowsAsync<AdminPipeException>(() => AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "test", TimeSpan.FromSeconds(5), ns));
-        Assert.Contains("too many", ex.Message, StringComparison.Ordinal);
+        Assert.Equal(AdminPipe.ClosedMessage, ex.Message);
+        Assert.Equal(dropped + 1, server.Dropped);
         Assert.True(DateTime.UtcNow - started < AdminPipeServer.RequestTimeout, "the refusal waited for the connection deadline");
     }
 
@@ -375,7 +464,18 @@ public sealed class SecurityTests
     [InlineData("file_state")]
     [InlineData("origin_web_ui_allowed")]
     [InlineData("something_cmd")]
-    public async Task Worker_settings_that_run_commands_or_name_files_are_refused(string name)
+    [InlineData("upnp")]
+    [InlineData("bind_address")]
+    [InlineData("address_family")]
+    [InlineData("external_ip")]
+    [InlineData("lan_encryption_mode")]
+    [InlineData("wan_encryption_mode")]
+    [InlineData("install_steam_audio_drivers")]
+    [InlineData("capture")]
+    [InlineData("audio_sink")]
+    [InlineData("dd_configuration_option")]
+    [InlineData("no_such_setting")]
+    public async Task Worker_settings_outside_the_allow_list_are_refused(string name)
     {
         await using var svc = await TestService.StartAsync();
         var response = await svc.Client.PostAsync("/api/v1/desks", JsonBody($$$"""{"id":"desk-1","workerSettings":{"{{{name}}}":"x"}}"""));

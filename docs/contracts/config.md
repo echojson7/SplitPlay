@@ -76,10 +76,23 @@ Rules:
   `"<InstallPath>\steam.exe" -master_ipc_name_override SplitPlay_<id> -gamepadui` (an owner's own "Steam" entry
   without the flag is kept). Changing the option requires a stopped desk.
 - `workerSettings`: extra Sunshine `name=value` settings passed to the worker after the service defaults (ipc.md);
-  names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters; `port` is reserved. Settings that run commands or
-  name files are refused, because the worker runs as SYSTEM (`global_prep_cmd`, any `*cmd`, `file_apps`, `file_state`,
-  `credentials_file`, `pkey`, `cert`, `log_path`, any `*_file`, `*_path`, `*_dir`, `origin_web_ui_allowed`, …): the API answers 400,
-  a `config.json` with them is invalid like any other, and the worker launch drops them in any case.
+  names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters. Only these may be set (Sunshine's `src/config.cpp` at
+  the commit in `worker/upstream.lock`), because the worker runs as SYSTEM:
+  - encoder and codec: `encoder`, `hevc_mode`, `av1_mode`, `qp`, `min_threads`, `sw_preset`, `sw_tune`, `nvenc_preset`,
+    `nvenc_vbv_increase`, `nvenc_spatial_aq`, `nvenc_twopass`, `nvenc_h264_cavlc`, `nvenc_split_encode`,
+    `nvenc_realtime_hags`, `nvenc_latency_over_power`, `qsv_preset`, `qsv_coder`, `qsv_slow_hevc`, `amd_quality`,
+    `amd_rc`, `amd_coder`, `amd_usage`, `amd_preanalysis`, `amd_vbaq`, `amd_enforce_hrd`;
+  - rate control and frame rate: `max_bitrate`, `minimum_fps_target`, `fec_percentage`;
+  - audio: `stream_audio`;
+  - input and gamepads: `gamepad`, `ds4_back_as_touchpad_click`, `motion_as_ds4`, `touchpad_as_ds4`, `mouse`,
+    `keyboard`, `controller`, `always_send_scancodes`, `high_resolution_scrolling`, `native_pen_touch`, `keybindings`,
+    `key_rightalt_to_key_win`, `back_button_timeout`, `key_repeat_frequency`, `key_repeat_delay`;
+  - `sunshine_name`, `min_log_level`.
+
+  Anything else (commands, files, certificates, network and UPnP, encryption modes, driver installs, capture, display
+  and audio devices, which follow the desk's session) gets a 400 naming the setting; a `config.json` that has them
+  loads without them (logged as a warning) and the worker launch drops them in any case. `port` is set by the service
+  from `basePort`, as are the defaults the service passes itself.
 - `basePort` unique; if omitted the service picks `basePortStart + stride * k` with the lowest free `k ≥ 0`. A desk occupies `basePort-5 … basePort+21`.
 - `gpu`: `"auto"` or an adapter LUID string `"0x…"`.
 - `profile` may also carry `gpuLuid` and `cpuSet` (array of logical CPU indices), passed to the worker as in ipc.md.

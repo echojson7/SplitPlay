@@ -18,11 +18,13 @@ namespace SplitPlay.Service.Api;
 /// (an elevated administrator anywhere, a UAC-filtered administrator at the console; never a desk session).
 /// </summary>
 /// <remarks>
-/// Nobody can hold the pipe: there is no instance limit; a caller from a desk session or one that is clearly not the
-/// admin is dropped right after it connects (<see cref="IAdminCallerCheck.Screen"/>); at most
-/// <see cref="MaxConnectionsPerSession"/> connections per session run at once and at most
-/// <see cref="MaxRequestsPerSession"/> are accepted per session within <see cref="RateWindow"/>; every connection ends
-/// after <see cref="RequestTimeout"/>. Stopping the service cancels and disposes every connection.
+/// Nobody can hold the pipe: there is no instance limit and <see cref="ListeningInstances"/> instances wait for
+/// callers at once. A caller from a desk session or one that is clearly not the admin is disconnected right after it
+/// connects, without an answer (<see cref="IAdminCallerCheck.Screen"/>, run off the accept loop and at most
+/// <see cref="MaxConcurrentScreens"/> at once); at most <see cref="MaxConnectionsPerSession"/> connections per session
+/// run at once and at most <see cref="MaxRequestsPerSession"/> are accepted per session within <see cref="RateWindow"/>;
+/// every admitted connection ends after <see cref="RequestTimeout"/>. Stopping the service cancels and disposes every
+/// connection.
 /// </remarks>
 public sealed class AdminPipeServer(
     AuthService auth,
@@ -36,6 +38,12 @@ public sealed class AdminPipeServer(
 
     public const int MaxRequestsPerSession = 30;
 
+    /// <summary>Pipe instances waiting for a caller at any time.</summary>
+    public const int ListeningInstances = 3;
+
+    /// <summary>Connections being screened at once; more are disconnected unscreened.</summary>
+    public const int MaxConcurrentScreens = 16;
+
     public static readonly TimeSpan RateWindow = TimeSpan.FromMinutes(1);
 
     /// <summary>Time a client has from connecting to having read the answer.</summary>
@@ -43,11 +51,18 @@ public sealed class AdminPipeServer(
 
     private static readonly TimeSpan MaxCreateRetry = TimeSpan.FromSeconds(30);
 
+    private static readonly TimeSpan DropLogInterval = TimeSpan.FromSeconds(10);
+
     private readonly TaskCompletionSource _listening = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly object _gate = new();
     private readonly Dictionary<int, int> _active = [];
     private readonly Dictionary<int, Queue<DateTimeOffset>> _recent = [];
     private readonly HashSet<NamedPipeServerStream> _open = [];
+    private readonly HashSet<Task> _handlers = [];
+    private int _screens;
+    private int _dropped;
+    private int _droppedSinceLog;
+    private DateTimeOffset _lastDropLog = DateTimeOffset.MinValue;
 
     /// <summary>The pipe name for .NET pipe streams.</summary>
     public string LocalName => AdminPipe.LocalName(supervisor.Value.PipeNamespace);
@@ -56,7 +71,7 @@ public sealed class AdminPipeServer(
     public Task Listening => _listening.Task;
 
     /// <summary>Connections dropped right after connecting (tests).</summary>
-    public int Dropped { get; private set; }
+    public int Dropped => Volatile.Read(ref _dropped);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -66,18 +81,17 @@ public sealed class AdminPipeServer(
             return;
         }
 
-        var handlers = new List<Task>();
         var retry = TimeSpan.FromSeconds(1);
         try
         {
             while (!stoppingToken.IsCancellationRequested)
             {
-                NamedPipeServerStream listening;
+                NamedPipeServerStream first;
                 try
                 {
                     // The first instance must be ours (FILE_FLAG_FIRST_PIPE_INSTANCE): a pipe someone created earlier under
                     // this name is refused, and nobody gets the tray's or the CLI's requests.
-                    listening = Create(first: true);
+                    first = Create(first: true);
                 }
                 catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
                 {
@@ -90,33 +104,21 @@ public sealed class AdminPipeServer(
                 }
 
                 retry = TimeSpan.FromSeconds(1);
-                Track(listening, add: true);
+                Track(first, add: true);
+
+                // Each loop keeps one instance listening; when one fails they all stop and start over from a first instance.
+                using var round = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                var loops = new List<Task> { Task.Run(() => ListenAsync(first, round, stoppingToken), CancellationToken.None) };
+                for (var i = 1; i < ListeningInstances; i++)
+                {
+                    loops.Add(Task.Run(() => ListenAsync(null, round, stoppingToken), CancellationToken.None));
+                }
+
                 _listening.TrySetResult();
-                try
+                await Task.WhenAll(loops).ConfigureAwait(false);
+                if (!stoppingToken.IsCancellationRequested)
                 {
-                    while (true)
-                    {
-                        await listening.WaitForConnectionAsync(stoppingToken).ConfigureAwait(false);
-                        var connected = listening;
-                        // Create the next instance while this one still exists, so that the name is never free for a squatter.
-                        listening = Create(first: false);
-                        Track(listening, add: true);
-                        handlers.RemoveAll(t => t.IsCompleted);
-                        handlers.Add(HandleAsync(connected, stoppingToken));
-                    }
-                }
-                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-                {
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
-                {
-                    logger.LogWarning("Admin pipe failed: {Message}; recreating it", ex.Message);
                     await Task.Delay(TimeSpan.FromSeconds(1), time, stoppingToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    Track(listening, add: false);
-                    await listening.DisposeAsync().ConfigureAwait(false);
                 }
             }
         }
@@ -128,10 +130,12 @@ public sealed class AdminPipeServer(
             // Every handler is bounded by RequestTimeout and cancelled with stoppingToken; disposing the open pipes ends
             // any I/O that ignores cancellation.
             List<NamedPipeServerStream> open;
+            List<Task> handlers;
             lock (_gate)
             {
                 open = [.. _open];
                 _open.Clear();
+                handlers = [.. _handlers];
             }
 
             foreach (var pipe in open)
@@ -148,6 +152,65 @@ public sealed class AdminPipeServer(
                 logger.LogWarning("Admin pipe connections did not end within 2 s of stopping");
             }
         }
+    }
+
+    /// <summary>Keeps one instance listening and hands each connection to a handler of its own.</summary>
+    private async Task ListenAsync(NamedPipeServerStream? listening, CancellationTokenSource round, CancellationToken stoppingToken)
+    {
+        var ct = round.Token;
+        try
+        {
+            while (true)
+            {
+                if (listening is null)
+                {
+                    listening = Create(first: false);
+                    Track(listening, add: true);
+                }
+
+                await listening.WaitForConnectionAsync(ct).ConfigureAwait(false);
+                var connected = listening;
+                listening = null;
+                Dispatch(connected, stoppingToken);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
+        {
+            if (!ct.IsCancellationRequested)
+            {
+                logger.LogWarning("Admin pipe failed: {Message}; recreating it", ex.Message);
+                await round.CancelAsync().ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            if (listening is not null)
+            {
+                Track(listening, add: false);
+                await listening.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>Runs <see cref="HandleAsync"/> off the accept loop and keeps it until it ends (for shutdown).</summary>
+    private void Dispatch(NamedPipeServerStream pipe, CancellationToken stoppingToken)
+    {
+        var task = Task.Run(() => HandleAsync(pipe, stoppingToken), CancellationToken.None);
+        lock (_gate)
+        {
+            _handlers.Add(task);
+        }
+
+        _ = task.ContinueWith(t =>
+        {
+            lock (_gate)
+            {
+                _handlers.Remove(t);
+            }
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     private void Track(NamedPipeServerStream pipe, bool add)
@@ -216,37 +279,63 @@ public sealed class AdminPipeServer(
         }
     }
 
+    /// <summary>Counts a dropped connection; logs at most every <see cref="DropLogInterval"/> so that a flood cannot fill the log.</summary>
+    private void Drop(string caller, string reason)
+    {
+        Interlocked.Increment(ref _dropped);
+        var now = time.GetUtcNow();
+        int count;
+        lock (_gate)
+        {
+            _droppedSinceLog++;
+            if (now - _lastDropLog < DropLogInterval)
+            {
+                return;
+            }
+
+            count = _droppedSinceLog;
+            _droppedSinceLog = 0;
+            _lastDropLog = now;
+        }
+
+        logger.LogWarning("Admin pipe: dropped {Caller} at connect: {Reason} ({Count} dropped since the last report)", caller, reason, count);
+    }
+
     private async Task HandleAsync(NamedPipeServerStream pipe, CancellationToken stoppingToken)
     {
         int? admitted = null;
         try
         {
-            using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-            cts.CancelAfter(RequestTimeout);
-
-            // Before reading anything: a desk session or a caller that is clearly not the admin is dropped at once.
+            // Before reading anything: a desk session or a caller that is clearly not the admin is disconnected at once,
+            // without an answer, so that refusing costs next to nothing.
             AdminCallerDecision screen;
             try
             {
-                screen = check.Screen(pipe);
+                screen = Interlocked.Increment(ref _screens) > MaxConcurrentScreens
+                    ? new AdminCallerDecision(false, "unknown caller", "too many connections at once")
+                    : check.Screen(pipe);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception
                                            or InvalidOperationException)
             {
                 screen = new AdminCallerDecision(false, "unknown caller", $"could not identify the caller: {ex.Message}");
             }
+            finally
+            {
+                Interlocked.Decrement(ref _screens);
+            }
 
             var session = screen.Session ?? -1;
             var refusal = screen.Allowed ? Admit(session) : screen.Reason;
             if (refusal is not null)
             {
-                Dropped++;
-                logger.LogWarning("Admin pipe: dropped {Caller} at connect: {Reason}", screen.Caller, refusal);
-                await TryAnswerAsync(pipe, Refused(ApiErrorCodes.Forbidden, refusal), cts.Token).ConfigureAwait(false);
+                Drop(screen.Caller, refusal);
                 return;
             }
 
             admitted = session;
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+            cts.CancelAfter(RequestTimeout);
             var line = await AdminPipe.ReadLineAsync(pipe, cts.Token).ConfigureAwait(false);
             if (line is null)
             {

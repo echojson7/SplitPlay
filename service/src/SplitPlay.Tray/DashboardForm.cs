@@ -62,7 +62,7 @@ internal sealed class DashboardForm : Form
     /// <summary>The service's uptime at the last health check: a smaller one means it restarted (sessions are gone).</summary>
     private long? _uptime;
     private bool _restarted;
-    private DateTime _lastAuthReload = DateTime.MinValue;
+    private readonly TraySignInGate _signInGate = new(TimeProvider.System);
     private int _signInRetries;
 
     public DashboardForm(Uri url)
@@ -154,7 +154,13 @@ internal sealed class DashboardForm : Form
         _retry.Stop();
         _misses = 0;
         _monitor.Start();
+        _signInGate.Reset();
         var signedIn = await SignInAsync();
+        if (signedIn)
+        {
+            _signInGate.Reloaded();
+        }
+
         _webView.CoreWebView2.Navigate(_url.ToString());
         if (!signedIn)
         {
@@ -177,7 +183,7 @@ internal sealed class DashboardForm : Form
 
             if (await SignInAsync())
             {
-                _lastAuthReload = DateTime.UtcNow;
+                _signInGate.Reloaded();
                 _webView.CoreWebView2.Reload();
                 return;
             }
@@ -264,14 +270,15 @@ internal sealed class DashboardForm : Form
     {
         if (!_fallback)
         {
-            // The UI got a 401: sign in again and reload, at most every 10 s (a refused user gets the password login).
-            if (IsUi(e.Source) && e.TryGetWebMessageAsString() == "auth" && DateTime.UtcNow - _lastAuthReload > TimeSpan.FromSeconds(10))
+            // The UI is not signed in: sign in again and reload, at most every 10 s. When the API keeps rejecting what the
+            // pipe grants, the gate stops after a few reloads and the page stays on its password login.
+            if (IsUi(e.Source) && e.TryGetWebMessageAsString() == "auth" && _signInGate.ShouldSignIn())
             {
-                _lastAuthReload = DateTime.UtcNow;
                 await SafeAsync(async () =>
                 {
                     if (await SignInAsync())
                     {
+                        _signInGate.Reloaded();
                         _webView.CoreWebView2.Reload();
                     }
                 });

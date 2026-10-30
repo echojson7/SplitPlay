@@ -33,9 +33,14 @@ public static class AdminPipe
     /// <summary>The pipe name for .NET pipe streams (without <c>\\.\pipe\</c>).</summary>
     public static string LocalName(string ns = PipeNames.DefaultNamespace) => ns + "admin";
 
+    /// <summary>What a caller the service disconnects without an answer is told.</summary>
+    public const string ClosedMessage = "the SplitPlay service closed the connection without an answer: it refuses callers in a desk " +
+                                        "session, callers that are not the host's administrator and callers that ask too often";
+
     /// <summary>
     /// Asks the service for a credential. Returns null when the pipe is not there (service stopped, older build) or does
-    /// not answer within <paramref name="timeout"/>; throws <see cref="AdminPipeException"/> when the service refuses.
+    /// not answer within <paramref name="timeout"/>; throws <see cref="AdminPipeException"/> when the service refuses,
+    /// also when it disconnects without an answer (how it drops callers it will not serve).
     /// </summary>
     public static async Task<AdminToken?> RequestAsync(string kind, string client, TimeSpan timeout, string ns = PipeNames.DefaultNamespace,
         CancellationToken cancellationToken = default)
@@ -55,10 +60,16 @@ public static class AdminPipe
             return null;
         }
 
-        if (OperatingSystem.IsWindows() && !ServerIsTrusted(pipe))
+        if (OperatingSystem.IsWindows())
         {
-            // Someone else created the pipe before the service did (the service was not running): never talk to it.
-            throw new AdminPipeException("forbidden", "the admin pipe is not owned by the SplitPlay service");
+            switch (ServerIsTrusted(pipe))
+            {
+                case null:
+                    throw new AdminPipeException("forbidden", ClosedMessage);
+                case false:
+                    // Someone else created the pipe before the service did (the service was not running): never talk to it.
+                    throw new AdminPipeException("forbidden", "the admin pipe is not owned by the SplitPlay service");
+            }
         }
 
         try
@@ -70,7 +81,7 @@ public static class AdminPipe
             var line = await ReadLineAsync(pipe, cts.Token).ConfigureAwait(false);
             if (line is null)
             {
-                return null;
+                throw new AdminPipeException("forbidden", ClosedMessage);
             }
 
             var answer = JsonSerializer.Deserialize(line, AdminPipeJsonContext.Default.AdminTokenResponse);
@@ -85,6 +96,12 @@ public static class AdminPipe
             }
 
             return new AdminToken(answer.Token, answer.CsrfToken, answer.ExpiresAt ?? DateTimeOffset.UtcNow.AddMinutes(5));
+        }
+        catch (IOException) when (!cts.IsCancellationRequested)
+        {
+            // Connected, then the service closed its end before answering.
+            cancellationToken.ThrowIfCancellationRequested();
+            throw new AdminPipeException("forbidden", ClosedMessage);
         }
         catch (Exception ex) when (ex is OperationCanceledException or IOException or JsonException)
         {
@@ -120,10 +137,10 @@ public static class AdminPipe
 
     /// <summary>
     /// The pipe's owner must be SYSTEM (the service), the Administrators group (an elevated console-mode service) or
-    /// the caller itself: a pipe created by anybody else is a squatter.
+    /// the caller itself: a pipe created by anybody else is a squatter. Null when the pipe was closed meanwhile.
     /// </summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static bool ServerIsTrusted(NamedPipeClientStream pipe)
+    private static bool? ServerIsTrusted(NamedPipeClientStream pipe)
     {
         try
         {
@@ -138,7 +155,11 @@ public static class AdminPipe
                    || owner.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid)
                    || (self.User is { } me && owner.Equals(me));
         }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or InvalidOperationException or IOException
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or InvalidOperationException
                                        or System.Security.AccessControl.PrivilegeNotHeldException)
         {
             return false;

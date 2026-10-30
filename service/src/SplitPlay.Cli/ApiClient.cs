@@ -26,7 +26,9 @@ internal sealed class ServiceUnreachableException(string message, Exception inne
 /// <summary>
 /// Thin client for the loopback Web API (docs/contracts/web-api.md). Every request but <c>/health</c> carries a bearer
 /// token: <c>SPLITPLAY_TOKEN</c> when set, otherwise one from the service's admin pipe (granted to an administrator at
-/// the console or in an elevated prompt).
+/// the console or in an elevated prompt). At the console the pipe's token is kept in a per-user cache
+/// (<see cref="CliTokenCache"/>) while it is still accepted, so that scripts calling the CLI in a loop do not hit the
+/// pipe's rate limit.
 /// </summary>
 internal sealed class ApiClient : IDisposable
 {
@@ -152,12 +154,13 @@ internal sealed class ApiClient : IDisposable
     /// <summary>A bearer token from the admin pipe; throws <see cref="ApiCallException"/> when there is none.</summary>
     public async Task<string> TokenAsync()
     {
-        await EnsureTokenAsync().ConfigureAwait(false);
+        // For scripts: a fresh token (its whole lifetime), never the cached one.
+        await EnsureTokenAsync(useCache: false).ConfigureAwait(false);
         return _token ?? throw new ApiCallException(HttpStatusCode.Unauthorized, ApiErrorCodes.Unauthorized,
             _tokenProblem ?? "no token: the SplitPlay service's admin pipe did not answer");
     }
 
-    private async Task EnsureTokenAsync()
+    private async Task EnsureTokenAsync(bool useCache = true)
     {
         await _tokenGate.WaitAsync().ConfigureAwait(false);
         try
@@ -168,9 +171,26 @@ internal sealed class ApiClient : IDisposable
             }
 
             _tokenTried = true;
+            var cache = CliTokenCache.Open();
+            if (useCache && cache?.Read() is { } cached)
+            {
+                if (await AcceptedAsync(cached).ConfigureAwait(false))
+                {
+                    _token = cached;
+                    return;
+                }
+
+                cache.Clear();
+            }
+
             try
             {
-                _token = (await AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "cli", TimeSpan.FromSeconds(5)).ConfigureAwait(false))?.Token;
+                var granted = await AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "cli", TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                _token = granted?.Token;
+                if (granted is not null)
+                {
+                    cache?.Write(granted);
+                }
             }
             catch (AdminPipeException ex)
             {
@@ -180,6 +200,29 @@ internal sealed class ApiClient : IDisposable
         finally
         {
             _tokenGate.Release();
+        }
+    }
+
+    /// <summary>True when the service still takes <paramref name="token"/> (the service may have restarted since).</summary>
+    private async Task<bool> AcceptedAsync(string token)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "auth/session");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var response = await _http.SendAsync(request).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            var session = await JsonSerializer.DeserializeAsync(await response.Content.ReadAsStreamAsync().ConfigureAwait(false),
+                SplitPlayJsonContext.Default.AuthSessionDto).ConfigureAwait(false);
+            return session?.Authenticated == true;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            return false;
         }
     }
 

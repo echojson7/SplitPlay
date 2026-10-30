@@ -143,6 +143,11 @@ public static class ServiceHost
             logger.LogInformation("Migrated {File} from schema {From} to {To}", paths.ConfigFile, from, SplitPlayConfig.CurrentSchemaVersion);
         }
 
+        if (loaded.DroppedWorkerSettings is { } dropped)
+        {
+            logger.LogWarning("Ignoring workerSettings a desk may not change (see config.md): {Settings}", string.Join(", ", dropped));
+        }
+
         if (host.LanAccess)
         {
             logger.LogWarning("host.lanAccess is set but LAN access is not implemented yet; listening on loopback only");

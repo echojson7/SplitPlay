@@ -385,9 +385,17 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     /// <summary>When set, <see cref="SessionUser"/> fails (a WTS query that does not work).</summary>
     public bool SessionQueryFails { get; set; }
 
-    public string? SessionUser(int sessionId) =>
-        SessionQueryFails ? throw new System.ComponentModel.Win32Exception("simulated WTS failure")
-        : _sessions.TryGetValue(sessionId, out var s) ? s.User : null;
+    private int _sessionUserCalls;
+
+    /// <summary>How often <see cref="SessionUser"/> was asked.</summary>
+    public int SessionUserCalls => Volatile.Read(ref _sessionUserCalls);
+
+    public string? SessionUser(int sessionId)
+    {
+        Interlocked.Increment(ref _sessionUserCalls);
+        return SessionQueryFails ? throw new System.ComponentModel.Win32Exception("simulated WTS failure")
+            : _sessions.TryGetValue(sessionId, out var s) ? s.User : null;
+    }
 
     public void LogoffSession(int sessionId)
     {

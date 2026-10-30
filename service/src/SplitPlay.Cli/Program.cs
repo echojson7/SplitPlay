@@ -48,7 +48,8 @@ public static class Program
 
         The Web API URL defaults to SPLITPLAY_URL or http://127.0.0.1:<host.webPort>/ from config.json.
         Desk, config and auth commands need an administrator signed in at this PC, an elevated prompt, or a
-        token in SPLITPLAY_TOKEN.
+        token in SPLITPLAY_TOKEN. At the console the token is cached per user while it is valid; in loops
+        elsewhere set SPLITPLAY_TOKEN once from 'splitplay auth token' (the service limits token requests).
         Exit codes: 0 ok, 1 error, 2 usage, 3 service unreachable, 4 timeout.
         """;
 

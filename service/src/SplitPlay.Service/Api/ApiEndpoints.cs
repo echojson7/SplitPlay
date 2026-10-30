@@ -156,29 +156,22 @@ public static partial class ApiEndpoints
         return peer.Kind == PeerLookupKind.Found ? $"session:{peer.Session}" : $"ip:{context.Connection.RemoteIpAddress}";
     }
 
-    /// <summary>Checks a password through <see cref="LoginThrottle"/>: 429 while locked out, counts the outcome.</summary>
+    /// <summary>
+    /// Checks a password through <see cref="LoginThrottle"/>: 429 while the caller is locked out or already has a check
+    /// running; the outcome is counted.
+    /// </summary>
     private static async Task<bool> VerifyThrottledAsync(HttpContext context, AuthService auth, LoginThrottle throttle, string? password)
     {
-        var key = PeerKey(context);
-        if (throttle.RetryAfter(key) is { } wait)
+        var attempt = await throttle.AttemptAsync(PeerKey(context), () => auth.Verify(password), context.RequestAborted).ConfigureAwait(false);
+        if (attempt.Outcome == LoginOutcome.Throttled)
         {
-            var seconds = (int)Math.Ceiling(wait.TotalSeconds);
+            var seconds = Math.Max(1, (int)Math.Ceiling(attempt.RetryAfter.TotalSeconds));
             context.Response.Headers.RetryAfter = seconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
             throw new ApiException(StatusCodes.Status429TooManyRequests, ApiErrorCodes.TooManyAttempts,
-                $"too many wrong passwords; try again in {seconds} s");
+                $"too many password attempts; try again in {seconds} s");
         }
 
-        var ok = await throttle.VerifyAsync(() => auth.Verify(password), context.RequestAborted).ConfigureAwait(false);
-        if (ok)
-        {
-            throttle.Succeeded(key);
-        }
-        else
-        {
-            throttle.Failed(key);
-        }
-
-        return ok;
+        return attempt.Outcome == LoginOutcome.Ok;
     }
 
     /// <summary>

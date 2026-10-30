@@ -44,6 +44,12 @@ public sealed class DeskSupervisor : IHostedService
     private readonly IChildLauncher _launcher;
     private readonly IOptions<SupervisorOptions> _options;
     private readonly TimeProvider _time;
+
+    /// <summary>How long <see cref="IsDeskSession"/> keeps what it learnt from a session's user.</summary>
+    internal static readonly TimeSpan SessionKindLifetime = TimeSpan.FromSeconds(5);
+
+    private readonly object _sessionKindGate = new();
+    private readonly Dictionary<int, (bool Desk, DateTimeOffset At)> _sessionKinds = [];
     private readonly ILogger<DeskSupervisor> _logger;
     private readonly ILogger _childLogger;
     private readonly GpuInventory _gpus;
@@ -339,7 +345,6 @@ public sealed class DeskSupervisor : IHostedService
             }
         }
 
-        string? user;
         try
         {
             if (_platform.ConsoleSessionId() == sessionId)
@@ -347,8 +352,30 @@ public sealed class DeskSupervisor : IHostedService
                 return false;
             }
 
-            user = _platform.SessionUser(sessionId);
-            return user is not null && IsDeskUser(user);
+            // Every API request asks: the answer from the session's user (a WTS query and an account lookup) is kept for
+            // a few seconds. A failed lookup is not kept.
+            var now = _time.GetUtcNow();
+            lock (_sessionKindGate)
+            {
+                if (_sessionKinds.TryGetValue(sessionId, out var known) && now - known.At < SessionKindLifetime)
+                {
+                    return known.Desk;
+                }
+            }
+
+            var user = _platform.SessionUser(sessionId);
+            var desk = user is not null && IsDeskUser(user);
+            lock (_sessionKindGate)
+            {
+                if (_sessionKinds.Count > 256)
+                {
+                    _sessionKinds.Clear();
+                }
+
+                _sessionKinds[sessionId] = (desk, now);
+            }
+
+            return desk;
         }
         catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException or UnauthorizedAccessException)
         {
@@ -1241,8 +1268,8 @@ public sealed class DeskSupervisor : IHostedService
         };
         foreach (var (name, value) in config.WorkerSettings ?? [])
         {
-            // A hand-edited config.json is not validated by the API: never pass these to a worker running as SYSTEM.
-            if (!ConfigValidator.IsForbiddenWorkerSetting(name) && !ConfigValidator.ReservedWorkerSettings.Contains(name))
+            // Only the allowed settings ever reach a worker running as SYSTEM, whatever config.json says.
+            if (ConfigValidator.IsAllowedWorkerSetting(name))
             {
                 settings[name] = value;
             }

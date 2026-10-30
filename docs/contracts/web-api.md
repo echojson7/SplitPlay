@@ -10,10 +10,16 @@ Desk users are other people signed in on the same PC, so loopback alone proves n
 (desks, logs, accounts, config export, the WebSocket); without it the answer is 401 `unauthorized`. Proof is one of:
 
 - **A bearer token from the admin pipe** (CLI, scripts): `Authorization: Bearer <token>`, valid 15 minutes, no CSRF
-  token needed. `splitplay auth token` prints one.
+  token needed. `splitplay auth token` prints one. The CLI uses `SPLITPLAY_TOKEN` when it is set; otherwise, in the
+  console session, it keeps the pipe's token in `%LOCALAPPDATA%\SplitPlay\cli-token-s<session>.bin` (DPAPI, current
+  user) and reuses it while the service accepts it and at least a minute is left. Elsewhere (an elevated prompt in
+  another session) there is no cache: a script that calls the CLI in a loop sets `SPLITPLAY_TOKEN` from
+  `splitplay auth token` once, because the pipe takes at most 30 requests a minute per session.
 - **A session from the admin pipe** (tray): the tray puts it into its WebView as the `splitplay_session` cookie, so the
-  owner never sees a login. Valid 12 hours; the UI posts `auth` to the tray on a 401 (expired, service restarted) and
-  the tray signs in again. A password change does not end it.
+  owner never sees a login. Valid 12 hours; the UI posts `auth` to the tray whenever it is not signed in (expired,
+  service restarted) and the tray signs in again and reloads, at most every 10 s. If the page is still not signed in
+  right after 3 such reloads (the API rejects what the pipe granted) the tray stops and the page keeps its password
+  login until the dashboard is opened again. A password change does not end it.
 - **A session from the admin password** (any other browser): `POST /auth/login {"password":"..."}` sets the cookie;
   `POST /auth/logout` clears it. Valid 12 hours; a password change ends it.
 
@@ -26,12 +32,14 @@ Its DACL lets SYSTEM, Administrators and interactive users (IU) connect; the ser
   is not a desk session;
 - an administrator with a UAC-filtered token in the active console session (the owner's tray and CLI).
 
-Everybody else is refused with the reason: a standard user at the console, any RDP session, a process below medium
-integrity, and always a process in a desk session, even a desk user who is an administrator. Desk sessions and callers
-that are clearly not the admin are dropped right after connecting, before anything is read; the pipe has no instance
-limit, a session may keep at most 4 connections open and make 30 requests a minute, and every connection ends after
-3 s. They can still log in with the admin password (except from a
-desk session, see below). Clients only talk to a pipe owned by SYSTEM, Administrators or themselves (squatting while
+Everybody else is refused: a standard user at the console, any RDP session, a process below medium integrity, and
+always a process in a desk session, even a desk user who is an administrator. Desk sessions, callers that are clearly
+not the admin and callers over a limit are disconnected right after connecting, before anything is read and without
+an answer (the client reports that the service closed the connection); a caller refused after its request was read
+gets the reason. The pipe has no instance limit and keeps 3 instances listening; at most 16 new connections are
+screened at once (more are disconnected unscreened), a session may keep at most 4 connections open and make 30
+requests a minute, every admitted connection ends after 3 s, and dropped connections are logged at most every 10 s.
+Refused users can still log in with the admin password (except from a desk session, see below). Clients only talk to a pipe owned by SYSTEM, Administrators or themselves (squatting while
 the service is stopped). The first admin password can only be set by the administrator (tray, CLI) in Settings, so a
 desk user cannot set it and take the host over.
 
@@ -42,9 +50,11 @@ configured desk user or an account SplitPlay created; a session whose user canno
 session never does. A loopback peer whose process cannot be found gets 403 too, unless it carries a credential only the
 admin pipe hands out (the tray's session, a bearer token).
 
-Password checks (`/auth/login`, `/auth/password`) run one at a time. After 5 wrong passwords from one caller each
-further one locks it out for 1, 2, 4 … s up to 15 minutes, and more than 20 wrong passwords within a minute from
-everybody lock everybody out the same way: 429 `too_many_attempts` with `Retry-After`.
+Password checks (`/auth/login`, `/auth/password`) run one at a time, and a caller (its session, or its address) has at
+most one in progress: further attempts meanwhile get 429 at once. After 5 wrong passwords from one caller each further
+one locks it out for 1, 2, 4 … s up to 15 minutes (checked again when its turn comes): 429 `too_many_attempts` with
+`Retry-After`. More than 20 wrong passwords within a minute from everybody lock nobody else out; instead every check
+waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 
 - Sessions use the HttpOnly, `SameSite=Strict` cookie `splitplay_session`. A request that carries the cookie and
   changes state (POST, PUT, DELETE) must send `X-CSRF-Token` (returned by login, by `GET /auth/session` and by the
@@ -207,7 +217,7 @@ The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}`
 | `validation_failed` | 400 | the body breaks a rule of config.md |
 | `unauthorized` | 401 | no admin proof (session or bearer token) |
 | `invalid_password` | 401 | wrong admin password |
-| `too_many_attempts` | 429 | too many wrong passwords; `Retry-After` says when to try again |
+| `too_many_attempts` | 429 | too many wrong passwords, or a check from the same caller is still running; `Retry-After` says when to try again |
 | `csrf_failed`, `forbidden` | 403 | missing or wrong `X-CSRF-Token`; not allowed (non-loopback caller, cross-origin state change, unexpected `Host`, a desk session) |
 | `not_found` | 404 | unknown desk or client |
 | `already_exists` | 409 | desk id, user or base port taken |

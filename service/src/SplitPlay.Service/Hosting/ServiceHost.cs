@@ -127,6 +127,11 @@ public static class ServiceHost
         builder.Services.AddSingleton<AdminPipeServer>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<AdminPipeServer>());
         builder.Services.AddSingleton<GpuInventory>();
+        builder.Services.AddSingleton<FakeHostNetworkStatus>();
+        builder.Services.AddSingleton<IHostNetworkStatus>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? ActivatorUtilities.CreateInstance<WindowsHostNetworkStatus>(sp)
+                : sp.GetRequiredService<FakeHostNetworkStatus>());
         builder.Services.Configure<FirewallOptions>(builder.Configuration.GetSection(FirewallOptions.Section));
         builder.Services.AddSingleton<IFirewallRule, NetshFirewallRule>();
 

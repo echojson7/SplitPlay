@@ -1005,6 +1005,13 @@ public sealed class DeskSupervisor : IHostedService
                     {
                         var c = _platform.Provision(config);
                         _platform.EnsureFirewallRules(config);
+                        // Another program on the desk's ports: the worker could not bind them, and retrying would not
+                        // help, so the desk faults at once with the port and the program.
+                        if (_platform.FindPortConflict(config) is { } conflict)
+                        {
+                            throw new DeskProvisioningException(conflict.Message);
+                        }
+
                         return c;
                     }, CancellationToken.None);
                     rt.ProvisionCall = call;
@@ -1141,6 +1148,11 @@ public sealed class DeskSupervisor : IHostedService
             return PausedForSleep;
         }
 
+        if (await PrepareNetworkAsync(rt, config, stop).ConfigureAwait(false) is { } busy)
+        {
+            return busy;
+        }
+
         int attempt;
         lock (rt.Gate)
         {
@@ -1257,6 +1269,71 @@ public sealed class DeskSupervisor : IHostedService
     }
 
     /// <summary>
+    /// Before every worker start: the desk's firewall rules are created again if someone deleted them, and its ports
+    /// must be free. A busy port gets <see cref="SupervisorOptions.PortBusyGraceMs"/> to come free (the previous worker
+    /// may still be exiting); after that the attempt fails with "Port N busy: X" instead of starting a worker that cannot
+    /// bind it. Returns that reason, or null.
+    /// </summary>
+    private async Task<string?> PrepareNetworkAsync(DeskRuntime rt, DeskConfig config, CancellationToken stop)
+    {
+        var deadline = _time.GetUtcNow() + TimeSpan.FromMilliseconds(Math.Max(0, _options.Value.PortBusyGraceMs));
+        await Task.Run(() => _platform.EnsureFirewallRules(config), stop).ConfigureAwait(false);
+        while (true)
+        {
+            var conflict = await Task.Run(() => _platform.FindPortConflict(config), stop).ConfigureAwait(false);
+            if (conflict is null)
+            {
+                return null;
+            }
+
+            if (_time.GetUtcNow() >= deadline)
+            {
+                _logger.LogWarning("Desk {Desk}: {Conflict}; the worker is not started", rt.Id, conflict);
+                return conflict.Message;
+            }
+
+            await Task.Delay(TimeSpan.FromMilliseconds(500), _time, stop).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// The name Moonlight shows for a desk and the worker's mDNS instance is made from (Sunshine's <c>sunshine_name</c>,
+    /// patch 0017): <c>&lt;PC name&gt;-&lt;desk name&gt;</c>, with the desk id when the desk has no name. Control
+    /// characters and <c>#</c> (a comment in Sunshine's settings syntax) are left out and runs of white space become one
+    /// space. Moonlight tells hosts apart by their uniqueid, not by this name, so renaming a desk keeps its pairings.
+    /// </summary>
+    internal static string SunshineName(string machineName, string deskId, string? deskName)
+    {
+        var name = string.IsNullOrWhiteSpace(deskName) ? deskId : deskName;
+        var text = new System.Text.StringBuilder(machineName.Length + 1 + name.Length);
+        text.Append(machineName).Append('-');
+        var space = false;
+        foreach (var c in name.Trim())
+        {
+            if (char.IsWhiteSpace(c))
+            {
+                space = true;
+                continue;
+            }
+
+            if (char.IsControl(c) || c == '#')
+            {
+                continue;
+            }
+
+            if (space)
+            {
+                text.Append(' ');
+                space = false;
+            }
+
+            text.Append(c);
+        }
+
+        return text.Length > machineName.Length + 1 ? text.ToString() : $"{machineName}-{deskId}";
+    }
+
+    /// <summary>
     /// Sunshine settings for the worker: defaults recommended in worker/README.md, overridden by the desk's
     /// <c>workerSettings</c>. Encoder, adapter, output and audio sink stay unset so that the worker picks the session's own.
     /// </summary>
@@ -1264,7 +1341,7 @@ public sealed class DeskSupervisor : IHostedService
     {
         var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["sunshine_name"] = $"{Environment.MachineName}-{deskId}",
+            ["sunshine_name"] = SunshineName(Environment.MachineName, deskId, config.Name),
             ["min_log_level"] = "info",
             ["nvenc_preset"] = "1",
             ["nvenc_twopass"] = "disabled",

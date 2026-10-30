@@ -173,3 +173,24 @@ export function streamLine(stream: DeskStream, metrics: Partial<DeskMetrics>): s
   if (metrics.rttMs != null) parts.push(fmtMs(metrics.rttMs, false))
   return parts.join(' · ')
 }
+
+const PORT_BUSY = /^Port (\d+) busy: (.+)$/
+const PORT_RESERVED = /^Port (\d+) reserved by Windows$/
+
+/** A desk's `lastError` in the UI language: the service's port messages are translated, others are shown as they are. */
+export function lastErrorText(error: string): string {
+  const busy = PORT_BUSY.exec(error)
+  if (busy) return t('error.portBusy', { port: busy[1]!, program: busy[2]! })
+  const reserved = PORT_RESERVED.exec(error)
+  if (reserved) return t('error.portReserved', { port: reserved[1]! })
+  return error
+}
+
+/** The error shown under a desk: any while it is Faulted; while Recovering only a busy port, which holds the restart. */
+export function deskError(desk: Pick<Desk, 'state' | 'lastError'>): string | null {
+  const error = desk.lastError
+  if (!error) return null
+  if (desk.state === 'Faulted') return lastErrorText(error)
+  if (desk.state === 'Recovering' && (PORT_BUSY.test(error) || PORT_RESERVED.test(error))) return lastErrorText(error)
+  return null
+}

@@ -93,7 +93,14 @@ Rules:
   and audio devices, which follow the desk's session) gets a 400 naming the setting; a `config.json` that has them
   loads without them (logged as a warning) and the worker launch drops them in any case. `port` is set by the service
   from `basePort`, as are the defaults the service passes itself.
+- `name` (optional, up to 64 characters) is what Moonlight shows: the worker gets `sunshine_name=<PC name>-<name>`
+  (`<PC name>-<id>` without a name) and names its mDNS instance after it. Moonlight tells hosts apart by their
+  `uniqueid`, so renaming a desk (only while it is stopped) keeps its paired clients; they show the new name at the
+  next poll. A desk's `workerSettings.sunshine_name` overrides it.
 - `basePort` unique; if omitted the service picks `basePortStart + stride * k` with the lowest free `k ≥ 0`. A desk occupies `basePort-5 … basePort+21`.
+  The service creates the desk's inbound firewall rules for those ports (`SplitPlay desk <id> (TCP|UDP)`, the worker's
+  executable, private and domain profiles) and creates them again when the desk starts, or a worker restarts, and they
+  are missing, disabled or different. Before a worker starts the ports must be free (see `lastError` in web-api.md).
 - `gpu`: `"auto"` or an adapter LUID string `"0x…"`.
 - `profile` may also carry `gpuLuid` and `cpuSet` (array of logical CPU indices), passed to the worker as in ipc.md.
 - Desk port ranges may not overlap each other or contain `host.webPort`; `basePortStride` must be at least 27.

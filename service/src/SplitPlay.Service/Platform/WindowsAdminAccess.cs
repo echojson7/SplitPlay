@@ -286,9 +286,6 @@ internal sealed record TokenFacts(string Name, bool IsSystem, bool AdminEnabled,
 public sealed class WindowsPeerInspector : IPeerInspector
 {
     private const string ItemKey = "splitplay.peer-session";
-    private const int AF_INET = 2;
-    private const int AF_INET6 = 23;
-    private const int TCP_TABLE_OWNER_PID_CONNECTIONS = 4;
 
     public PeerLookup PeerSession(HttpContext context)
     {
@@ -316,7 +313,7 @@ public sealed class WindowsPeerInspector : IPeerInspector
         }
 
         var v6 = remote.AddressFamily == AddressFamily.InterNetworkV6 && !remote.IsIPv4MappedToIPv6;
-        var table = Table(v6 ? AF_INET6 : AF_INET);
+        var table = IpHelperTables.Tcp(v6 ? IpHelperTables.AF_INET6 : IpHelperTables.AF_INET, IpHelperTables.TCP_TABLE_OWNER_PID_CONNECTIONS);
         if (table is null || TcpOwnerTable.FindOwner(table, remote, remotePort, localPort) is not uint pid)
         {
             return PeerLookup.Failed;
@@ -324,44 +321,6 @@ public sealed class WindowsPeerInspector : IPeerInspector
 
         return ProcessIdToSessionId(pid, out var session) ? PeerLookup.Found((int)session) : PeerLookup.Failed;
     }
-
-    /// <summary>The raw table, or null.</summary>
-    private static byte[]? Table(int family)
-    {
-        var size = 0;
-        GetExtendedTcpTable(IntPtr.Zero, ref size, false, family, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
-        for (var attempt = 0; attempt < 3; attempt++)
-        {
-            var buffer = Marshal.AllocHGlobal(size);
-            try
-            {
-                var rc = GetExtendedTcpTable(buffer, ref size, false, family, TCP_TABLE_OWNER_PID_CONNECTIONS, 0);
-                if (rc == 122)
-                {
-                    // ERROR_INSUFFICIENT_BUFFER: the table grew in between.
-                    continue;
-                }
-
-                if (rc != 0)
-                {
-                    return null;
-                }
-
-                var bytes = new byte[size];
-                Marshal.Copy(buffer, bytes, 0, size);
-                return bytes;
-            }
-            finally
-            {
-                Marshal.FreeHGlobal(buffer);
-            }
-        }
-
-        return null;
-    }
-
-    [DllImport("iphlpapi.dll")]
-    private static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool order, int family, int tableClass, uint reserved);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool ProcessIdToSessionId(uint pid, out uint sessionId);

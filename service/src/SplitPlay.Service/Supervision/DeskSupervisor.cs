@@ -1265,6 +1265,10 @@ public sealed class DeskSupervisor : IHostedService
             ["nvenc_twopass"] = "disabled",
             ["hevc_mode"] = "0",
             ["av1_mode"] = "0",
+            // XInput hands button state only to the console session's foreground window (rumble still works), so an
+            // emulated Xbox 360 pad is deaf inside a desk. A DualShock 4 is a HID device and reaches the desk's games
+            // directly or through Steam Input; Duo switched to DS4 for the same reason.
+            ["gamepad"] = "ds4",
         };
         foreach (var (name, value) in config.WorkerSettings ?? [])
         {

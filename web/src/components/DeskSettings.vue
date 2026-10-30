@@ -30,11 +30,28 @@ const form = reactive({
   fecPercent: d.profile.fecPercent === undefined ? '' : String(d.profile.fecPercent),
   minFps: d.profile.minFps === undefined ? '' : String(d.profile.minFps),
   gpuPriority: (d.profile.gpuPriority ?? '') as GpuPriority | '',
+  // Stored as the worker's `gamepad` setting (keys are case-insensitive); the service defaults it to ds4.
+  gamepad: gamepadSetting(d.workerSettings),
   workerSettings: Object.entries(d.workerSettings ?? {})
+    .filter(([k]) => k.toLowerCase() !== 'gamepad')
     .map(([k, v]) => `${k}=${v}`)
     .join('\n'),
 })
 const tried = ref(false)
+
+/** Sunshine's gamepad types; anything else set by hand is kept as its own option. */
+function gamepadSetting(ws: Record<string, string> | undefined): string {
+  const entry = Object.entries(ws ?? {}).find(([k]) => k.toLowerCase() === 'gamepad')
+  return entry ? entry[1].trim().toLowerCase() || 'ds4' : 'ds4'
+}
+const gamepadOptions = computed(() => {
+  const list = [
+    { value: 'ds4', label: 'DualShock 4' },
+    { value: 'x360', label: 'Xbox 360' },
+  ]
+  if (!list.some((o) => o.value === form.gamepad)) list.push({ value: form.gamepad, label: form.gamepad })
+  return list
+})
 
 function parseWorkerSettings(text: string): Record<string, string> {
   const out: Record<string, string> = {}
@@ -77,6 +94,8 @@ function toConfig(): DeskConfig {
       config.disableBluetoothUserService = form.bluetooth
     if (props.desk.steamIsolation !== undefined || !form.steam) config.steamIsolation = form.steam
     const ws = parseWorkerSettings(form.workerSettings)
+    for (const k of Object.keys(ws)) if (k.toLowerCase() === 'gamepad') delete ws[k]
+    if (form.gamepad !== 'ds4') ws.gamepad = form.gamepad
     if (Object.keys(ws).length > 0) config.workerSettings = ws
     else delete config.workerSettings
     if (form.password !== '') config.password = form.password
@@ -139,6 +158,12 @@ const gpuOptions = computed(() => {
         <label for="adv-codec">{{ t('adv.codec') }}</label>
         <select id="adv-codec" v-model="form.codec" name="codec">
           <option v-for="c in CODECS" :key="c" :value="c">{{ c.toUpperCase() }}</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="adv-gamepad">{{ t('adv.gamepad') }}</label>
+        <select id="adv-gamepad" v-model="form.gamepad" name="gamepad" :disabled="running">
+          <option v-for="o in gamepadOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
         </select>
       </div>
       <div class="field">

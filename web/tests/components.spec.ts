@@ -108,6 +108,20 @@ describe('DeskSettings', () => {
     } satisfies DeskConfig)
   })
 
+  it('stores the gamepad choice as the worker setting and keeps values it does not list', async () => {
+    const save = async (d: Desk, pick?: string) => {
+      const w = mount(DeskSettings, { props: { desk: d } })
+      if (pick) await w.find('select[name="gamepad"]').setValue(pick)
+      expect((w.find('textarea[name="workerSettings"]').element as HTMLTextAreaElement).value).not.toMatch(/gamepad/i)
+      await w.find('form').trigger('submit')
+      return (w.emitted('save')![0]![0] as DeskConfig).workerSettings
+    }
+    expect(await save(desk)).toEqual({ encoder: 'nvenc' })
+    expect(await save(desk, 'x360')).toEqual({ encoder: 'nvenc', gamepad: 'x360' })
+    expect(await save({ ...desk, workerSettings: { encoder: 'nvenc', Gamepad: 'X360' } }, 'ds4')).toEqual({ encoder: 'nvenc' })
+    expect(await save({ ...desk, workerSettings: { gamepad: 'auto' } })).toEqual({ gamepad: 'auto' })
+  })
+
   it('locks everything but the stream profile while the desk runs', async () => {
     const w = mount(DeskSettings, { props: { desk: { ...desk, state: 'Ready' }, running: true } })
     expect(w.find('input[name="name"]').attributes('disabled')).toBeDefined()

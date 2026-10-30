@@ -87,6 +87,7 @@ public sealed class ConfigTests : IDisposable
     [InlineData("desk_1")]
     [InlineData("")]
     [InlineData("a-very-long-desk-id-that-exceeds-32")]
+    [InlineData("desk-1\n")]
     public void Invalid_desk_ids_are_rejected(string id)
     {
         var config = OneDesk(d => d.Id = id);

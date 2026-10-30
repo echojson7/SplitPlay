@@ -87,6 +87,17 @@ describe('ConnectPack', () => {
     expect(downloaded).toBe('splitplay-anna.cmd')
   })
 
+  it('shows an automatic codec when the desk sets none', async () => {
+    const { client, desk } = await setup()
+    const pack = await client.clientPack('anna')
+    vi.spyOn(client, 'clientPack').mockResolvedValue({ ...pack, settings: { ...pack.settings, codec: 'auto' } })
+    const w = mount(ConnectPack, { props: { desk, client } })
+    await flushPromises()
+    expect(w.find('[data-pack-value="codec"]').text()).toBe('Автоматически')
+    expect(w.find('[data-pack-value="pacing"]').text()).toBe('Выкл.')
+    expect(w.text()).toContain('Плавность кадров')
+  })
+
   it('shows the error when the service has no pack', async () => {
     const { client, desk } = await setup()
     vi.spyOn(client, 'clientPack').mockRejectedValue(new Error('no endpoint'))

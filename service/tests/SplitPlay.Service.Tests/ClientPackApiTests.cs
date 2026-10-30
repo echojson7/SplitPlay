@@ -65,6 +65,8 @@ public sealed class ClientPackApiTests
     [InlineData("/api/v1/desks/desk-1/client-pack/macos", HttpStatusCode.NotFound, ApiErrorCodes.NotFound)]
     [InlineData("/api/v1/desks/desk-1/client-pack?address=pc%26calc", HttpStatusCode.BadRequest, ApiErrorCodes.ValidationFailed)]
     [InlineData("/api/v1/desks/desk-1/client-pack/windows?address=%25COMSPEC%25", HttpStatusCode.BadRequest, ApiErrorCodes.ValidationFailed)]
+    [InlineData("/api/v1/desks/desk-1/client-pack/windows?address=evil.com%0A", HttpStatusCode.BadRequest, ApiErrorCodes.ValidationFailed)]
+    [InlineData("/api/v1/desks/desk-1/client-pack/linux?address=evil.com%0D%0A", HttpStatusCode.BadRequest, ApiErrorCodes.ValidationFailed)]
     public async Task Bad_requests_are_refused(string url, HttpStatusCode status, string code)
     {
         await using var svc = await TestService.StartAsync();

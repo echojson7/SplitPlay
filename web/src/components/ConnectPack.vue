@@ -57,7 +57,7 @@ const rows = computed(() => {
   return [
     { key: 'resolution', label: t('pack.resolution'), value: `${s.width} × ${s.height} · ${t('unit.fps', { value: s.fps })}` },
     { key: 'bitrate', label: t('pack.bitrate'), value: fmtBitrate(s.bitrateKbps) },
-    { key: 'codec', label: t('pack.codec'), value: codecLabel(s.codec) },
+    { key: 'codec', label: t('pack.codec'), value: s.codec === 'auto' ? t('pack.codecAuto') : codecLabel(s.codec) },
     { key: 'vsync', label: t('pack.vsync'), value: onOff(s.vsync) },
     { key: 'display', label: t('pack.displayMode'), value: word('pack.mode', s.displayMode) },
     { key: 'decoder', label: t('pack.decoder'), value: word('pack.decoderKind', s.videoDecoder) },

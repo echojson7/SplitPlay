@@ -165,7 +165,7 @@ The host cannot take V-Sync latency out of the client, only recommend settings t
 - `host`: `?address=` when given (an IPv4 address or host name, otherwise 400 `validation_failed`), else the first
   address of `GET /host/network`, else the computer name; `port` is the desk's `basePort`; `app` is the desk's
   Moonlight app "Desktop".
-- `settings`: the desk profile's resolution and fps (1920×1080 and 60 when unset) and codec (HEVC when unset); its
+- `settings`: the desk profile's resolution and fps (1920×1080 and 60 when unset) and codec (`auto` when unset: Moonlight picks, so a client without a hardware HEVC decoder falls back); its
   `bitrateKbps` when set, otherwise 30 Mbit/s for 1080p60 scaled by the square root of the pixel rate, +15 %, rounded
   to 5 Mbit/s, 10–150 Mbit/s (the add-desk wizard's rule), kept within Moonlight's 500–500000 kbit/s. V-Sync off
   (a VRR display avoids tearing without it), exclusive full screen, hardware decoding (D3D11VA on Windows), frame

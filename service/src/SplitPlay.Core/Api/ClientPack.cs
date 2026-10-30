@@ -10,7 +10,7 @@ namespace SplitPlay.Core.Api;
 /// <param name="Height">Stream height.</param>
 /// <param name="Fps">Stream frame rate (the desk's).</param>
 /// <param name="BitrateKbps">Video bitrate, kbit/s.</param>
-/// <param name="Codec"><c>h264</c>, <c>hevc</c> or <c>av1</c>.</param>
+/// <param name="Codec"><c>h264</c>, <c>hevc</c> or <c>av1</c> as the desk sets it; <c>auto</c> when it sets none.</param>
 /// <param name="Vsync">Moonlight's V-Sync: off (a VRR display still avoids tearing).</param>
 /// <param name="DisplayMode"><c>fullscreen</c>: exclusive full screen, the lowest-latency present path.</param>
 /// <param name="VideoDecoder"><c>hardware</c>: D3D11VA on Windows, VAAPI/VDPAU on Linux.</param>
@@ -50,7 +50,7 @@ public sealed record ClientPackDto(
 /// screen, hardware decoding, no frame pacing, the desk's resolution and rate, a bitrate that suits them) and scripts
 /// that start moonlight-qt with them from the command line. Option names are moonlight-qt's
 /// (app/cli/commandlineparser.cpp, v6.2.0): <c>--resolution WxH</c>, <c>--fps</c>, <c>--bitrate</c> (kbit/s),
-/// <c>--no-vsync</c>, <c>--video-codec H.264|HEVC|AV1</c>, <c>--video-decoder hardware</c>,
+/// <c>--no-vsync</c>, <c>--video-codec auto|H.264|HEVC|AV1</c>, <c>--video-decoder hardware</c>,
 /// <c>--display-mode fullscreen</c>, <c>--no-frame-pacing</c>. Moonlight finds the host by <c>address:port</c>
 /// (it adds it as a manual host when it does not know it yet); the device must be paired with the desk first.
 /// </summary>
@@ -75,7 +75,7 @@ public static partial class ClientPack
 
     private const int MaxBitrateKbps = 500_000;
 
-    [GeneratedRegex("^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)*$",
+    [GeneratedRegex("^(?=.{1,253}\\z)[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)*\\z",
         RegexOptions.CultureInvariant)]
     private static partial Regex HostNameRegex();
 
@@ -98,7 +98,7 @@ public static partial class ClientPack
 
     /// <summary>
     /// Builds the pack for desk <paramref name="deskId"/> served at <paramref name="host"/>:<paramref name="port"/>.
-    /// The profile's resolution, rate and codec are kept (HEVC when it has none); its bitrate is used when set,
+    /// The profile's resolution, rate and codec are kept (Moonlight's automatic choice when it has none, so a client without a hardware HEVC decoder falls back); its bitrate is used when set,
     /// otherwise <see cref="SuggestBitrateKbps"/>.
     /// </summary>
     public static ClientPackDto Build(string deskId, ProfileConfig profile, string host, int port)
@@ -116,8 +116,9 @@ public static partial class ClientPack
         var codec = profile.Codec?.ToLowerInvariant() switch
         {
             "h264" => "h264",
+            "hevc" => "hevc",
             "av1" => "av1",
-            _ => "hevc",
+            _ => "auto",
         };
 
         var settings = new ClientPackSettings(width, height, fps, bitrate, codec, Vsync: false, DisplayMode: "fullscreen",
@@ -148,8 +149,9 @@ public static partial class ClientPack
     public static string MoonlightCodec(string codec) => codec switch
     {
         "h264" => "H.264",
+        "hevc" => "HEVC",
         "av1" => "AV1",
-        _ => "HEVC",
+        _ => "auto",
     };
 
     /// <summary>The script for <paramref name="platform"/> (<c>windows</c> or <c>linux</c>), null for another name.</summary>

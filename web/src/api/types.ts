@@ -83,7 +83,8 @@ export interface ClientPackSettings {
   height: number
   fps: number
   bitrateKbps: number
-  codec: Codec
+  /** The desk's codec; `auto` (Moonlight picks) when the desk sets none. */
+  codec: Codec | 'auto'
   vsync: boolean
   /** `fullscreen` (also `windowed`, `borderless` in Moonlight). */
   displayMode: string

@@ -38,16 +38,17 @@ public sealed class ClientPackTests
     public void Missing_profile_values_get_defaults_and_a_suggested_bitrate()
     {
         var pack = ClientPack.Build("d", new ProfileConfig(), "host-pc", 47989);
-        Assert.Equal(new ClientPackSettings(1920, 1080, 60, 35_000, "hevc", false, "fullscreen", "hardware", false), pack.Settings);
-        Assert.Contains("HEVC", pack.Arguments);
+        Assert.Equal(new ClientPackSettings(1920, 1080, 60, 35_000, "auto", false, "fullscreen", "hardware", false), pack.Settings);
+        Assert.Equal("auto", pack.Arguments[pack.Arguments.ToList().IndexOf("--video-codec") + 1]);
     }
 
     [Theory]
     [InlineData("h264", "H.264")]
     [InlineData("AV1", "AV1")]
     [InlineData("hevc", "HEVC")]
-    [InlineData("vp9", "HEVC")]
-    public void Codec_maps_to_moonlight_choices(string codec, string expected)
+    [InlineData("vp9", "auto")]
+    [InlineData(null, "auto")]
+    public void Codec_maps_to_moonlight_choices(string? codec, string expected)
     {
         var pack = ClientPack.Build("d", new ProfileConfig { Codec = codec }, "10.0.0.2", 48089);
         Assert.Equal(expected, pack.Arguments[pack.Arguments.ToList().IndexOf("--video-codec") + 1]);
@@ -69,6 +70,9 @@ public sealed class ClientPackTests
     [InlineData("pc;rm -rf", false)]
     [InlineData("$(id)", false)]
     [InlineData("%PATH%", false)]
+    [InlineData("pc\n", false)]
+    [InlineData("pc\r\n", false)]
+    [InlineData("evil.com\nstart calc", false)]
     [InlineData("fe80::1", false)]
     [InlineData("-pc", false)]
     public void Host_must_be_safe_to_put_in_a_script(string host, bool valid)
@@ -83,7 +87,7 @@ public sealed class ClientPackTests
     [Fact]
     public void Windows_script_finds_moonlight_and_starts_the_stream()
     {
-        var pack = ClientPack.Build("desk-1", new ProfileConfig { Width = 1920, Height = 1080, Fps = 120, BitrateKbps = 50_000 }, "192.168.1.20", 48089);
+        var pack = ClientPack.Build("desk-1", new ProfileConfig { Width = 1920, Height = 1080, Fps = 120, BitrateKbps = 50_000, Codec = "hevc" }, "192.168.1.20", 48089);
         var script = ClientPack.WindowsScript(pack);
 
         Assert.StartsWith("@echo off\r\n", script, StringComparison.Ordinal);
@@ -99,7 +103,7 @@ public sealed class ClientPackTests
     [Fact]
     public void Linux_script_tries_path_and_flatpak()
     {
-        var pack = ClientPack.Build("desk-1", new ProfileConfig { Fps = 60 }, "192.168.1.20", 48089);
+        var pack = ClientPack.Build("desk-1", new ProfileConfig { Fps = 60, Codec = "hevc" }, "192.168.1.20", 48089);
         var script = ClientPack.LinuxScript(pack);
 
         Assert.StartsWith("#!/bin/sh\n", script, StringComparison.Ordinal);

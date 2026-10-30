@@ -18,7 +18,8 @@ export function isValidPackHost(host: string): boolean {
 export function mockClientPack(desk: Desk, host: string): ClientPack {
   const p = desk.profile
   const bitrateKbps = Math.min(500000, Math.max(500, p.bitrateKbps || suggestBitrateKbps(p.width, p.height, p.fps)))
-  const codec = p.codec ?? 'hevc'
+  // A desk without a codec lets Moonlight pick (older configs; the UI always sets one).
+  const codec: ClientPack['settings']['codec'] = (p.codec as ClientPack['settings']['codec'] | undefined) ?? 'auto'
   const address = `${host}:${desk.basePort}`
   return {
     desk: desk.id,
@@ -32,7 +33,7 @@ export function mockClientPack(desk: Desk, host: string): ClientPack {
       '--resolution', `${p.width}x${p.height}`,
       '--fps', String(p.fps),
       '--bitrate', String(bitrateKbps),
-      '--video-codec', codec === 'h264' ? 'H.264' : codec.toUpperCase(),
+      '--video-codec', codec === 'h264' ? 'H.264' : codec === 'auto' ? 'auto' : codec.toUpperCase(),
       '--video-decoder', 'hardware',
       '--display-mode', 'fullscreen',
       '--no-vsync',

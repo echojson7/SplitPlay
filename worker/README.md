@@ -43,6 +43,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0014` instant feedback | rumble, LED and motion requests and HDR metadata are sent as soon as they are queued: the producers ring a loopback "doorbell" datagram that the control thread's ENet intercept turns into a wake-up, instead of waiting up to ~100 ms for the next control loop cycle |
 | `0015` NVIDIA profile | the "prefer maximum performance" application profile (`PREFERRED_PSTATE`) is bound to the running executable's file name (`splitplay-worker.exe`) under the profile name "SplitPlay worker" instead of upstream's `sunshine.exe`/"SunshineStream"; `--restore-nvprefs-undo` also deletes that profile. See *NVIDIA driver settings* below |
 | `0016` input thread | input is injected on its own thread (`input_pool`, one thread, MMCSS "Games") instead of Sunshine's shared task-pool thread; key repeat, gamepads, rumble/LED callbacks and touch/pen repeat run there too, so ordering and the input state's synchronisation are upstream's. See *Scheduling* below |
+| `0017` mDNS per desk | the DNS-SD instance is named after `sunshine_name` instead of the host name every desk shares (`net::mdns_desk_instance_name`: ASCII punctuation and spaces become `-`, other UTF-8 is kept, at most 63 bytes on a character boundary; an ASCII fallback ending in the port if Windows refuses a non-ASCII name); `sunshine_name=` is also read from the UTF-8 command line, since the narrow `argv` is in the ANSI code page. See *mDNS* below |
 
 ### Changing a patch or adding one
 
@@ -103,7 +104,7 @@ SplitPlay.Service starts one worker per desk, inside the desk's RDP loopback ses
 ```
 splitplay-worker.exe --desk-dir C:\ProgramData\SplitPlay\desks\desk-1 ^
                      --pipe \\.\pipe\splitplay\worker-desk-1 --desk desk-1 port=48089 ^
-                     sunshine_name=HOST-desk-1 min_log_level=info ^
+                     sunshine_name=GAMEPC-desk-1 min_log_level=info ^
                      nvenc_preset=1 nvenc_twopass=disabled hevc_mode=0 av1_mode=0 gamepad=ds4
 ```
 
@@ -134,7 +135,7 @@ upstream options keep working.
 | Setting | Value | Why |
 |---|---|---|
 | `port` | desk base port `P` | ports P-5, P, P+9..P+11, P+21 ([`config.md`](../docs/contracts/config.md)) |
-| `sunshine_name` | `<HOST>-<desk-id>` | the name Moonlight and mDNS show; otherwise every desk is called after the host |
+| `sunshine_name` | `<PC name>-<desk name>` (`<PC name>-<desk-id>` without a name) | the name Moonlight shows and the mDNS instance is made from (patch 0017); otherwise every desk is called after the host |
 | `min_log_level` | `info` | first light: the log shows the session, output, adapter, encoder and audio endpoint; `warning` later (Duo lesson) |
 | `nvenc_preset` | `1` | P1, the fastest NVENC preset (also the built-in default) |
 | `nvenc_twopass` | `disabled` | single pass: lowest encode latency (upstream default is `quarter_res`) |
@@ -253,6 +254,24 @@ log); the encoder line in the log shows `dpb=N`. The profile wins over `fec_perc
 `name=value`. `fps`, size, bitrate and codec stay Moonlight's choice; `gpu_priority`, `gpu_luid` and `cpu_set` are
 not applied yet.
 
+### mDNS (patch 0017)
+
+Each desk is its own Moonlight host on the same PC: its own `uniqueid`, certificate and base port. Upstream registered
+the DNS-SD service `_nvstream._tcp.local` under the PC's host name, so all desks used the same instance name and only
+one of them could be found. The worker now registers `<instance>._nvstream._tcp.local` with the instance made from
+`sunshine_name` (`GAMEPC-Living-room`, `GAMEPC-Стол-девушки`), the SRV record pointing at `<host>.local` and the desk's
+HTTP port (its base port `P`), and logs `Registered Sunshine mDNS service "<instance>" on port <P>`.
+
+- moonlight-qt resolves each instance on its own and adds the host at the SRV record's address and port
+  (`MdnsPendingComputer` keeps `QMdnsEngine::Service::port()`), then asks its `serverinfo`; computers are keyed by
+  `uniqueid`, and a known one only gets its name and addresses updated. So a desk that was added by hand or renamed
+  keeps its pairing.
+- Instance names follow RFC 6763: ASCII letters and digits are kept, spaces, dashes and other ASCII punctuation
+  become one `-`, control characters and invalid UTF-8 are dropped, other UTF-8 is kept; at most 63 bytes, cut on a
+  character boundary. If Windows refuses a name with non-ASCII characters, an ASCII form ending in `-<P>` is tried.
+- Windows answers mDNS in the DNS Client service, so the built-in firewall rule "mDNS (UDP-In)" must allow it on the
+  network's profile; `GET /host/network` reports it and Settings shows "mDNS · Off" when it does not.
+
 ### Scheduling (patches 0012, 0016)
 
 At start-up the worker logs one line, for example `SplitPlay: scheduling: power throttling off (execution speed,
@@ -318,5 +337,5 @@ starts. Both settle once the service owns driver profiles (below).
 - Per-session gamepads: ViGEm pads are visible to every session; SplitPlay's isolated pad driver comes in Stage 4.
 - Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile from each worker (patch 0015);
   with several workers they should move to the service.
-- mDNS: every worker publishes itself; Moonlight's automatic discovery is not tested with several desks yet
-  (adding `HOST:port` by hand always works).
+- mDNS with several desks is not yet tested on hardware (lab B): each desk now publishes its own instance (patch
+  0017); adding `HOST:port` by hand always works.

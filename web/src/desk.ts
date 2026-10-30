@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Pure desk helpers shared by the library, the add-desk wizard and the desk page.
 
-import type { Desk, DeskConfig, DeskMetrics, DeskState, DeskStream } from './api/types'
+import type { Desk, DeskConfig, DeskMetrics, DeskProfile, DeskState, DeskStream } from './api/types'
 import { DESK_ID_RE } from './api/validate'
 import { fmtBitrate, fmtNumber, t } from './i18n'
 
@@ -34,6 +34,17 @@ export function suggestBitrateKbps(width: number, height: number, fps: number): 
   const scale = (width * height * fps) / (1920 * 1080 * 60)
   const kbps = Math.round((30000 * Math.sqrt(scale) * 1.15) / 5000) * 5000
   return Math.min(150000, Math.max(10000, kbps))
+}
+
+/**
+ * The profile after a quick resolution or FPS change: a bitrate that was the suggestion for the old picture follows
+ * the new one (it is what the Moonlight settings and launch scripts recommend); one the owner set stays.
+ */
+export function changeProfile<P extends Pick<DeskProfile, 'width' | 'height' | 'fps' | 'bitrateKbps'>>(profile: P, change: Partial<P>): P {
+  const next = { ...profile, ...change }
+  if (change.bitrateKbps === undefined && profile.bitrateKbps === suggestBitrateKbps(profile.width, profile.height, profile.fps))
+    next.bitrateKbps = suggestBitrateKbps(next.width, next.height, next.fps)
+  return next
 }
 
 const TRANSLIT: Record<string, string> = {
@@ -161,4 +172,25 @@ export function streamLine(stream: DeskStream, metrics: Partial<DeskMetrics>): s
   const parts = [deviceName(stream), t('unit.fps', { value: fmtNumber(metrics.fps ?? 0) })]
   if (metrics.rttMs != null) parts.push(fmtMs(metrics.rttMs, false))
   return parts.join(' · ')
+}
+
+const PORT_BUSY = /^Port (\d+) busy: (.+)$/
+const PORT_RESERVED = /^Port (\d+) reserved by Windows$/
+
+/** A desk's `lastError` in the UI language: the service's port messages are translated, others are shown as they are. */
+export function lastErrorText(error: string): string {
+  const busy = PORT_BUSY.exec(error)
+  if (busy) return t('error.portBusy', { port: busy[1]!, program: busy[2]! })
+  const reserved = PORT_RESERVED.exec(error)
+  if (reserved) return t('error.portReserved', { port: reserved[1]! })
+  return error
+}
+
+/** The error shown under a desk: any while it is Faulted; while Recovering only a busy port, which holds the restart. */
+export function deskError(desk: Pick<Desk, 'state' | 'lastError'>): string | null {
+  const error = desk.lastError
+  if (!error) return null
+  if (desk.state === 'Faulted') return lastErrorText(error)
+  if (desk.state === 'Recovering' && (PORT_BUSY.test(error) || PORT_RESERVED.test(error))) return lastErrorText(error)
+  return null
 }

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 using System.Net;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging.Console;
 using Microsoft.Extensions.Options;
 using SplitPlay.Core;
@@ -35,10 +36,16 @@ public static class ServiceHost
             WebRootPath = options.WebRoot ?? Path.Combine(AppContext.BaseDirectory, "wwwroot"),
         });
 
+        builder.Services.AddSingleton<PowerEvents>();
         if (!options.Console)
         {
             // No-op unless the process was started by the Service Control Manager.
             builder.Services.AddWindowsService(o => o.ServiceName = BuildInfo.ServiceName);
+            if (OperatingSystem.IsWindows() && WindowsServiceHelpers.IsWindowsService())
+            {
+                // The same lifetime plus sleep/resume notifications (SERVICE_CONTROL_POWEREVENT).
+                builder.Services.AddSingleton<IHostLifetime, SplitPlayServiceLifetime>();
+            }
         }
 
         // ---- logging
@@ -94,9 +101,37 @@ public static class ServiceHost
         builder.Services.AddHostedService(sp => sp.GetRequiredService<RequiredServicesStarter>());
         builder.Services.AddSingleton<DeskSupervisor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<DeskSupervisor>());
+        builder.Services.AddSingleton<FakePowerRequest>();
+        builder.Services.AddSingleton<IPowerRequest>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? new WindowsPowerRequest()
+                : sp.GetRequiredService<FakePowerRequest>());
+        builder.Services.AddSingleton<SleepGuard>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<SleepGuard>());
         builder.Services.AddSingleton<EventHub>();
         builder.Services.AddSingleton<AuthService>();
+        builder.Services.AddSingleton<LoginThrottle>();
+        builder.Services.Configure<AuthOptions>(builder.Configuration.GetSection(AuthOptions.Section));
+        builder.Services.AddSingleton<FakeAdminCallerCheck>();
+        builder.Services.AddSingleton<IAdminCallerCheck>(sp =>
+            sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch
+            {
+                "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsAdminCallerCheck>(sp),
+                _ => sp.GetRequiredService<FakeAdminCallerCheck>(),
+            });
+        builder.Services.AddSingleton<FakePeerInspector>();
+        builder.Services.AddSingleton<IPeerInspector>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? new WindowsPeerInspector()
+                : sp.GetRequiredService<FakePeerInspector>());
+        builder.Services.AddSingleton<AdminPipeServer>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<AdminPipeServer>());
         builder.Services.AddSingleton<GpuInventory>();
+        builder.Services.AddSingleton<FakeHostNetworkStatus>();
+        builder.Services.AddSingleton<IHostNetworkStatus>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? ActivatorUtilities.CreateInstance<WindowsHostNetworkStatus>(sp)
+                : sp.GetRequiredService<FakeHostNetworkStatus>());
         builder.Services.Configure<FirewallOptions>(builder.Configuration.GetSection(FirewallOptions.Section));
         builder.Services.AddSingleton<IFirewallRule, NetshFirewallRule>();
 
@@ -111,6 +146,11 @@ public static class ServiceHost
         if (loaded.MigratedFrom is int from)
         {
             logger.LogInformation("Migrated {File} from schema {From} to {To}", paths.ConfigFile, from, SplitPlayConfig.CurrentSchemaVersion);
+        }
+
+        if (loaded.DroppedWorkerSettings is { } dropped)
+        {
+            logger.LogWarning("Ignoring workerSettings a desk may not change (see config.md): {Settings}", string.Join(", ", dropped));
         }
 
         if (host.LanAccess)

@@ -13,7 +13,8 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
     "basePortStart": 48089,
     "basePortStride": 100,
     "composeIntervalMs": 4,
-    "logLevel": "info"
+    "logLevel": "info",
+    "keepAwake": true
   },
   "desks": [
     {
@@ -54,6 +55,13 @@ Rules:
   Desk passwords live DPAPI-protected in `secrets\desks\<id>.bin`, never in this file.
 - `disableBluetoothUserService` (default `true`) stops the per-user `BluetoothUserService_*` instance in the desk
   session so it does not compete with the console user's Bluetooth devices (issue #3).
+- `hideFromLogon` (optional) keeps the desk's account off the Windows sign-in screen: DWORD `<user>` = `0` under
+  `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon\SpecialAccounts\UserList`, applied when the desk is
+  provisioned or the setting changes. Left out, it is on for accounts SplitPlay created and off for any other: an
+  account SplitPlay did not create is hidden only when the owner sets `true` for that desk. The value before is
+  recorded in `desks\<id>\logon-hidden.json` and comes back when the setting goes off, the user changes, the desk is
+  deleted or SplitPlay is uninstalled (a value someone changed since is left alone). A request that leaves it out
+  keeps the current value unless the user changes.
 - `steamIsolation` (default `true`; a request that leaves it out keeps the current value) lets the desk user's Steam
   run next to the console user's Steam (Steam isolation research, 2026-10-28). Only the desk user's hive is changed, never the
   console user's and never machine-wide: `HKU\<sid>\Environment\steam_master_ipc_name_override` = `SplitPlay_<id>`
@@ -68,8 +76,31 @@ Rules:
   `"<InstallPath>\steam.exe" -master_ipc_name_override SplitPlay_<id> -gamepadui` (an owner's own "Steam" entry
   without the flag is kept). Changing the option requires a stopped desk.
 - `workerSettings`: extra Sunshine `name=value` settings passed to the worker after the service defaults (ipc.md);
-  names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters; `port` is reserved.
+  names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters. Only these may be set (Sunshine's `src/config.cpp` at
+  the commit in `worker/upstream.lock`), because the worker runs as SYSTEM:
+  - encoder and codec: `encoder`, `hevc_mode`, `av1_mode`, `qp`, `min_threads`, `sw_preset`, `sw_tune`, `nvenc_preset`,
+    `nvenc_vbv_increase`, `nvenc_spatial_aq`, `nvenc_twopass`, `nvenc_h264_cavlc`, `nvenc_split_encode`,
+    `nvenc_realtime_hags`, `nvenc_latency_over_power`, `qsv_preset`, `qsv_coder`, `qsv_slow_hevc`, `amd_quality`,
+    `amd_rc`, `amd_coder`, `amd_usage`, `amd_preanalysis`, `amd_vbaq`, `amd_enforce_hrd`;
+  - rate control and frame rate: `max_bitrate`, `minimum_fps_target`, `fec_percentage`;
+  - audio: `stream_audio`;
+  - input and gamepads: `gamepad`, `ds4_back_as_touchpad_click`, `motion_as_ds4`, `touchpad_as_ds4`, `mouse`,
+    `keyboard`, `controller`, `always_send_scancodes`, `high_resolution_scrolling`, `native_pen_touch`, `keybindings`,
+    `key_rightalt_to_key_win`, `back_button_timeout`, `key_repeat_frequency`, `key_repeat_delay`;
+  - `sunshine_name`, `min_log_level`.
+
+  Anything else (commands, files, certificates, network and UPnP, encryption modes, driver installs, capture, display
+  and audio devices, which follow the desk's session) gets a 400 naming the setting; a `config.json` that has them
+  loads without them (logged as a warning) and the worker launch drops them in any case. `port` is set by the service
+  from `basePort`, as are the defaults the service passes itself.
+- `name` (optional, up to 64 characters) is what Moonlight shows: the worker gets `sunshine_name=<PC name>-<name>`
+  (`<PC name>-<id>` without a name) and names its mDNS instance after it. Moonlight tells hosts apart by their
+  `uniqueid`, so renaming a desk (only while it is stopped) keeps its paired clients; they show the new name at the
+  next poll. A desk's `workerSettings.sunshine_name` overrides it.
 - `basePort` unique; if omitted the service picks `basePortStart + stride * k` with the lowest free `k ≥ 0`. A desk occupies `basePort-5 … basePort+21`.
+  The service creates the desk's inbound firewall rules for those ports (`SplitPlay desk <id> (TCP|UDP)`, the worker's
+  executable, private and domain profiles) and creates them again when the desk starts, or a worker restarts, and they
+  are missing, disabled or different. Before a worker starts the ports must be free (see `lastError` in web-api.md).
 - `gpu`: `"auto"` or an adapter LUID string `"0x…"`.
 - `profile` may also carry `gpuLuid` and `cpuSet` (array of logical CPU indices), passed to the worker as in ipc.md.
 - Desk port ranges may not overlap each other or contain `host.webPort`; `basePortStride` must be at least 27.
@@ -84,3 +115,8 @@ Rules:
   Wi-Fi client loses frames on large frames, raise it on 2.5 GbE and faster). In the web UI: Дополнительно → FEC,
   Минимальный FPS, Скорость отправки.
 - `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz).
+- `host.keepAwake` (default `true`; left out = `true`): while a Moonlight client streams from any desk the service holds
+  a system-required power request (`powercfg /requests` lists it), so Windows does not sleep on its own. Sleeping by
+  hand still works: before sleep every worker is shut down and its desk waits (state `Recovering`, not a failure, the
+  seat and session are kept); after resume each paused desk gets a new worker (NVENC and capture are recreated).
+  In the web UI: Settings → Power.

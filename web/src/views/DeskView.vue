@@ -7,11 +7,14 @@ import { api, ApiError, deskToConfig } from '../api/client'
 import type { DeskConfig, PairedClient } from '../api/types'
 import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import ConnectPack from '../components/ConnectPack.vue'
 import DeskSettings from '../components/DeskSettings.vue'
 import PinField from '../components/PinField.vue'
 import StateBadge from '../components/StateBadge.vue'
 import { canStart, copyText, errorText, isRunning, useLive } from '../composables'
 import {
+  changeProfile,
+  deskError,
   deskProgress,
   deviceName,
   fmtMs,
@@ -40,6 +43,7 @@ const clients = ref<PairedClient[]>([])
 const running = computed(() => (desk.value ? isRunning(desk.value) : false))
 const pairable = computed(() => desk.value?.state === 'Ready' || desk.value?.state === 'Streaming')
 const progress = computed(() => (desk.value ? deskProgress(desk.value.state) : null))
+const error = computed(() => (desk.value ? deskError(desk.value) : null))
 
 // ---- now: the connected device and live numbers (desk events and the 2 s metrics push)
 const stream = computed(() => (desk.value ? liveStream(desk.value) : null))
@@ -176,7 +180,7 @@ async function saveConfig(config: DeskConfig): Promise<boolean> {
 
 function saveProfile(change: Partial<DeskConfig['profile']>): Promise<boolean> {
   const config = deskToConfig(desk.value!)
-  config.profile = { ...config.profile, ...change }
+  config.profile = changeProfile(config.profile, change)
   return saveConfig(config)
 }
 
@@ -236,7 +240,7 @@ async function remove(): Promise<void> {
       </header>
 
       <div class="msgs">
-        <div v-if="desk.state === 'Faulted' && desk.lastError" class="inline-msg" role="alert">{{ desk.lastError }}</div>
+        <div v-if="error" class="inline-msg" role="alert">{{ error }}</div>
         <div v-if="desk.resolutionPendingRestart" class="inline-msg warn">
           <span class="spacer">{{ t('desk.pendingRestart') }}</span>
           <button type="button" :disabled="busy" @click="lifecycle('restart')">{{ t('desk.restart') }}</button>
@@ -374,6 +378,9 @@ async function remove(): Promise<void> {
           </div>
         </form>
       </div>
+
+      <h2 class="group-title">{{ t('pack.title') }}</h2>
+      <ConnectPack :desk="desk" :address="s.addresses?.[0] ?? ''" />
 
       <h2 class="group-title">{{ t('desk.devices') }}</h2>
       <div class="rows">

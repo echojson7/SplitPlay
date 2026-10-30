@@ -157,4 +157,18 @@ describe('DeskSettings', () => {
     expect(w.text()).toContain('От 0,5 до 1000 Мбит/с')
     expect(w.text()).toContain('Введите пароль')
   })
+
+  it('sends the sign-in screen choice only when it changes, also while the desk runs', async () => {
+    const own: Desk = { ...desk, state: 'Ready', userManaged: false, hideFromLogon: false }
+    const w = mount(DeskSettings, { props: { desk: own, running: true } })
+    const box = w.find('input[name="hideFromLogon"]')
+    expect((box.element as HTMLInputElement).checked).toBe(false)
+    expect(box.attributes('disabled')).toBeUndefined()
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![0]![0] as DeskConfig).hideFromLogon).toBeUndefined()
+    await box.setValue(true)
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![1]![0] as DeskConfig).hideFromLogon).toBe(true)
+    expect(w.text()).toContain('Скрыть с экрана входа')
+  })
 })

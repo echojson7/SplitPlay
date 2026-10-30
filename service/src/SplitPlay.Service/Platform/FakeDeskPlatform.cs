@@ -18,6 +18,7 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     private readonly ConcurrentQueue<string> _actions = new();
     private readonly ConcurrentDictionary<string, MemoryUserHive> _hives = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string, bool> _profiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<int, HostSession> _sessions = new();
     private readonly DataPaths _paths;
 
     public FakeDeskPlatform(DataPaths paths)
@@ -46,6 +47,24 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 
     public DeskSecretStore Secrets { get; }
 
+    /// <summary>The machine's HKLM as far as the sign-in screen list goes.</summary>
+    public MemoryUserHive Machine { get; } = new();
+
+    /// <summary>The <c>UserList</c> value of <paramref name="user"/> (0 = hidden), or null.</summary>
+    public string? UserListValue(string user) => Machine.Get(LogonListing.UserListKey, user)?.Data;
+
+    /// <summary>Adds a Windows session (e.g. one left over from before a service crash).</summary>
+    public void AddSession(int id, string? user, bool disconnected = true) => _sessions[id] = new HostSession(id, user, disconnected);
+
+    /// <summary>When set, <see cref="Sessions"/> blocks this long (a hung WTS call).</summary>
+    public TimeSpan SessionsDelay { get; set; }
+
+    /// <summary>When set, <see cref="Provision"/> blocks this long first (account calls that hang after an update).</summary>
+    public TimeSpan ProvisionDelay { get; set; }
+
+    /// <summary>When greater than zero, the next calls to <see cref="Provision"/> throw a transient error and count it down.</summary>
+    public int TransientProvisionErrors { get; set; }
+
     /// <summary>When set, <see cref="Provision"/> fails with this message (e.g. a host that is not prepared).</summary>
     public string? ProvisionError { get; set; }
 
@@ -62,6 +81,10 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     /// <summary>Accounts and their current state.</summary>
     public IReadOnlyDictionary<string, FakeAccount> Accounts => _accounts;
 
+    /// <summary>Adds an account that SplitPlay created earlier (e.g. before the service restarted).</summary>
+    public void AddManagedAccount(string user, string password = "managed") =>
+        _accounts[user] = new FakeAccount(password, CreatedBySplitPlay: true, PasswordNeverExpires: true, RemoteDesktopUser: true);
+
     /// <summary>Adds an account that SplitPlay did not create (the owner's own user).</summary>
     public void AddExistingAccount(string user, string password, bool passwordNeverExpires = false, bool hasProfile = true)
     {
@@ -72,8 +95,26 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         }
     }
 
+    /// <summary>Calls to <see cref="Provision"/> so far (counted on entry).</summary>
+    public int ProvisionCalls => _provisionCalls;
+
+    private int _provisionCalls;
+
     public DeskCredentials Provision(DeskConfig desk)
     {
+        Interlocked.Increment(ref _provisionCalls);
+        if (ProvisionDelay > TimeSpan.Zero)
+        {
+            Thread.Sleep(ProvisionDelay);
+        }
+
+        if (TransientProvisionErrors > 0)
+        {
+            TransientProvisionErrors--;
+            _actions.Enqueue($"provision-error {desk.Id}");
+            throw new InvalidOperationException("The RPC server is unavailable");
+        }
+
         var credentials = EnsureAccount(desk);
         if (desk.SteamIsolationEnabled)
         {
@@ -85,6 +126,7 @@ public sealed class FakeDeskPlatform : IDeskPlatform
             RevertSteamIsolation(desk.Id);
         }
 
+        UpdateLogonListing(desk);
         return credentials;
     }
 
@@ -158,6 +200,15 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 
     public void EnsureFirewallRules(DeskConfig desk) => _actions.Enqueue($"firewall+ {desk.Id} {desk.BasePort}");
 
+    /// <summary>What <see cref="FindPortConflict"/> answers for a desk id (another process on one of its ports).</summary>
+    public ConcurrentDictionary<string, PortConflict> PortConflicts { get; } = new(StringComparer.Ordinal);
+
+    public PortConflict? FindPortConflict(DeskConfig desk)
+    {
+        ArgumentNullException.ThrowIfNull(desk);
+        return PortConflicts.TryGetValue(desk.Id, out var conflict) ? conflict : null;
+    }
+
     public void RemoveFirewallRules(string deskId) => _actions.Enqueue($"firewall- {deskId}");
 
     public void DeleteDesk(DeskConfig desk, bool deleteUser)
@@ -169,6 +220,7 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         }
 
         RevertSteamIsolation(desk.Id);
+        LogonState(desk.Id).Show(Machine);
         Secrets.Delete(desk.Id);
         if (account is not null)
         {
@@ -177,6 +229,24 @@ public sealed class FakeDeskPlatform : IDeskPlatform
             _profiles.TryRemove(desk.User!, out _);
             _actions.Enqueue($"userdel {desk.User}");
         }
+    }
+
+    public void DeleteManagedAccount(string user)
+    {
+        if (!_accounts.TryGetValue(user, out var account))
+        {
+            return;
+        }
+
+        if (!account.CreatedBySplitPlay)
+        {
+            throw new DeskUserNotManagedException($"Windows account '{user}' was not created by SplitPlay");
+        }
+
+        _accounts.TryRemove(user, out _);
+        _hives.TryRemove(user, out _);
+        _profiles.TryRemove(user, out _);
+        _actions.Enqueue($"userdel {user}");
     }
 
     public bool OnSessionLogon(DeskConfig desk, int sessionId, string deskDirectory)
@@ -250,6 +320,37 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         _actions.Enqueue($"steam- {deskId} {user}");
     }
 
+    private LogonListing LogonState(string deskId) => new(Path.Combine(_paths.DeskDirectory(deskId), LogonListing.StateFileName));
+
+    public void UpdateLogonListing(DeskConfig desk)
+    {
+        var listing = LogonState(desk.Id);
+        if (desk.User is { } user && _accounts.TryGetValue(user, out var account) && desk.HidesFromLogon(account.CreatedBySplitPlay))
+        {
+            if (listing.Hide(Machine, user))
+            {
+                _actions.Enqueue($"hide {user}");
+            }
+        }
+        else if (listing.RecordedUser() is { } recorded && listing.Show(Machine))
+        {
+            _actions.Enqueue($"show {recorded}");
+        }
+        else
+        {
+            listing.Forget();
+        }
+    }
+
+    public void ShowOnLogon(string deskId)
+    {
+        var listing = LogonState(deskId);
+        if (listing.RecordedUser() is { } recorded && listing.Show(Machine))
+        {
+            _actions.Enqueue($"show {recorded}");
+        }
+    }
+
     public string? SteamExecutable() => SteamExe;
 
     public IReadOnlyList<string> StopBluetoothUserService(int sessionId)
@@ -264,8 +365,16 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 
     public string? ConsoleUserName() => ConsoleUser;
 
-    public DeskAccount? FindAccount(string user) =>
-        _accounts.TryGetValue(user, out var account) ? new DeskAccount(user, account.CreatedBySplitPlay) : null;
+    private int _findAccountCalls;
+
+    /// <summary>How often <see cref="FindAccount"/> was asked.</summary>
+    public int FindAccountCalls => Volatile.Read(ref _findAccountCalls);
+
+    public DeskAccount? FindAccount(string user)
+    {
+        Interlocked.Increment(ref _findAccountCalls);
+        return _accounts.TryGetValue(user, out var account) ? new DeskAccount(user, account.CreatedBySplitPlay) : null;
+    }
 
     public bool VerifyPassword(string user, string password) =>
         _accounts.TryGetValue(user, out var account) && account.Password == password;
@@ -279,6 +388,37 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     public void ForgetPassword(string deskId) => Secrets.Delete(deskId);
 
     public bool HasPassword(string deskId) => Secrets.Exists(deskId);
+
+    public IReadOnlyList<HostSession> Sessions()
+    {
+        if (SessionsDelay > TimeSpan.Zero)
+        {
+            Thread.Sleep(SessionsDelay);
+        }
+
+        return [.. _sessions.Values.OrderBy(s => s.Id)];
+    }
+
+    /// <summary>When set, <see cref="SessionUser"/> fails (a WTS query that does not work).</summary>
+    public bool SessionQueryFails { get; set; }
+
+    private int _sessionUserCalls;
+
+    /// <summary>How often <see cref="SessionUser"/> was asked.</summary>
+    public int SessionUserCalls => Volatile.Read(ref _sessionUserCalls);
+
+    public string? SessionUser(int sessionId)
+    {
+        Interlocked.Increment(ref _sessionUserCalls);
+        return SessionQueryFails ? throw new System.ComponentModel.Win32Exception("simulated WTS failure")
+            : _sessions.TryGetValue(sessionId, out var s) ? s.User : null;
+    }
+
+    public void LogoffSession(int sessionId)
+    {
+        _sessions.TryRemove(sessionId, out _);
+        _actions.Enqueue($"logoff {sessionId}");
+    }
 
     public IReadOnlyList<HostUserDto> ListUsers() =>
         _accounts.Keys.Concat(ConsoleUser is null ? [] : [ConsoleUser]).Distinct(StringComparer.OrdinalIgnoreCase)

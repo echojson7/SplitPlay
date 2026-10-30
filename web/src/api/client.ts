@@ -4,6 +4,8 @@
 import type {
   ApiErrorBody,
   AuthSession,
+  ClientPack,
+  ClientPlatform,
   Desk,
   DeskConfig,
   DeskProfile,
@@ -250,6 +252,16 @@ export class ApiClient {
     })
   }
 
+  /** Moonlight settings and launch scripts for a desk; `address` picks the host address (default: the first LAN one). */
+  clientPack(id: string, address?: string): Promise<ClientPack> {
+    return this.request('GET', `/desks/${encodeURIComponent(id)}/client-pack`, { query: { address } })
+  }
+
+  /** The launch script for one platform (.cmd for Windows, .sh for Linux). */
+  clientScript(id: string, platform: ClientPlatform, address?: string): Promise<Blob> {
+    return this.request('GET', `/desks/${encodeURIComponent(id)}/client-pack/${platform}`, { query: { address }, expect: 'blob' })
+  }
+
   // --- host --------------------------------------------------------------------------------
 
   async metrics(): Promise<MetricsSnapshot> {
@@ -274,8 +286,18 @@ export class ApiClient {
 
   /** LAN IPv4 addresses of the host: a desk is added in Moonlight as `<address>:<basePort>`. */
   async hostAddresses(): Promise<string[]> {
+    return (await this.hostNetwork()).addresses
+  }
+
+  /** LAN addresses, network profile and mDNS state of the host; unknown or malformed fields become empty or null. */
+  async hostNetwork(): Promise<HostNetwork> {
     const raw = await this.request<Partial<HostNetwork> | undefined>('GET', '/host/network')
-    return Array.isArray(raw?.addresses) ? raw.addresses.filter((a): a is string => typeof a === 'string') : []
+    const profile = raw?.profile
+    return {
+      addresses: Array.isArray(raw?.addresses) ? raw.addresses.filter((a): a is string => typeof a === 'string') : [],
+      profile: profile === 'Public' || profile === 'Private' || profile === 'Domain' ? profile : null,
+      mdnsAllowed: typeof raw?.mdnsAllowed === 'boolean' ? raw.mdnsAllowed : null,
+    }
   }
 
   /** The Windows services SplitPlay depends on, with their state. */

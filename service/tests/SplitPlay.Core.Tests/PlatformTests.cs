@@ -65,19 +65,43 @@ public sealed class PlatformTests
         Assert.Contains(ConfigValidator.ValidateDesk(new DeskConfig { Id = "d", WorkerSettings = new() { ["port"] = "1" } }, host),
             e => e.Path.EndsWith("port", StringComparison.Ordinal));
         Assert.NotEmpty(ConfigValidator.ValidateDesk(new DeskConfig { Id = "d", WorkerSettings = new() { ["bad name"] = "x" } }, host));
-        Assert.NotEmpty(ConfigValidator.ValidateDesk(new DeskConfig { Id = "d", WorkerSettings = new() { ["x"] = "line\nbreak" } }, host));
+        Assert.NotEmpty(ConfigValidator.ValidateDesk(new DeskConfig { Id = "d", WorkerSettings = new() { ["qp"] = "line\nbreak" } }, host));
+        Assert.Contains(ConfigValidator.ValidateDesk(new DeskConfig { Id = "d", WorkerSettings = new() { ["upnp"] = "enabled" } }, host),
+            e => e.Message.Contains("'upnp'", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void A_config_file_with_settings_a_desk_may_not_change_loads_without_them()
+    {
+        var loaded = ConfigStore.Parse("""{"schemaVersion":1,"desks":[{"id":"a","workerSettings":{"qp":"20","global_prep_cmd":"[]","upnp":"on"}}]}""");
+        Assert.Equal(["a.global_prep_cmd", "a.upnp"], loaded.DroppedWorkerSettings!.Order(StringComparer.Ordinal));
+        Assert.Equal(new Dictionary<string, string> { ["qp"] = "20" }, loaded.Config.Desks[0].WorkerSettings);
+        Assert.Null(ConfigStore.Parse("""{"schemaVersion":1,"desks":[{"id":"a","workerSettings":{"qp":"20"}}]}""").DroppedWorkerSettings);
+    }
+
+    [Fact]
+    public void Every_allowed_worker_setting_is_one_sunshine_reads()
+    {
+        // Checked against src/config.cpp at worker/upstream.lock; none of them runs a command, names a file or opens the network.
+        Assert.DoesNotContain("port", ConfigValidator.AllowedWorkerSettings);
+        foreach (var name in ConfigValidator.AllowedWorkerSettings)
+        {
+            Assert.DoesNotContain("cmd", name, StringComparison.Ordinal);
+            Assert.False(name.EndsWith("_file", StringComparison.Ordinal) || name.EndsWith("_path", StringComparison.Ordinal), name);
+            Assert.True(ConfigValidator.IsAllowedWorkerSetting(name.ToUpperInvariant()), name);
+        }
     }
 
     [Fact]
     public void Desk_defaults_and_round_trip()
     {
-        var parsed = ConfigStore.Parse("""{"schemaVersion":1,"desks":[{"id":"a"},{"id":"b","disableBluetoothUserService":false,"workerSettings":{"k":"v w"}}]}""").Config;
+        var parsed = ConfigStore.Parse("""{"schemaVersion":1,"desks":[{"id":"a"},{"id":"b","disableBluetoothUserService":false,"workerSettings":{"sw_tune":"v w"}}]}""").Config;
         Assert.True(parsed.Desks[0].DisableBluetoothUserService);
         Assert.Null(parsed.Desks[0].WorkerSettings);
         Assert.False(parsed.Desks[1].DisableBluetoothUserService);
-        Assert.Equal("v w", parsed.Desks[1].WorkerSettings!["k"]);
+        Assert.Equal("v w", parsed.Desks[1].WorkerSettings!["sw_tune"]);
         var again = ConfigStore.Parse(ConfigStore.Serialize(parsed)).Config;
-        Assert.Equal("v w", again.Desks[1].WorkerSettings!["k"]);
+        Assert.Equal("v w", again.Desks[1].WorkerSettings!["sw_tune"]);
     }
 
     [Fact]

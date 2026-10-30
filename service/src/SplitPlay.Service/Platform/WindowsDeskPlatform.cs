@@ -72,6 +72,7 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         }
 
         CheckHost();
+        UpdateLogonListing(desk);
         if (desk.SteamIsolationEnabled)
         {
             // Before the session logs on, so that explorer, Steam's autostart and steam:// already see the desk's values.
@@ -196,6 +197,7 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         }
 
         RevertSteamIsolation(desk.Id);
+        ShowOnLogon(desk.Id);
         _secrets.Delete(desk.Id);
         if (account is null || desk.User is null)
         {
@@ -215,6 +217,32 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         _logger.LogInformation("Deleted Windows account {User} of desk {Desk}", desk.User, desk.Id);
     }
 
+    public void DeleteManagedAccount(string user)
+    {
+        var account = LocalAccounts.Get(user);
+        if (account is null)
+        {
+            return;
+        }
+
+        if (!account.CreatedBySplitPlay)
+        {
+            throw new DeskUserNotManagedException($"Windows account '{user}' was not created by SplitPlay; it is never deleted by SplitPlay");
+        }
+
+        SecurityIdentifier? sid = null;
+        try
+        {
+            sid = LocalAccounts.SidOf(user);
+        }
+        catch (IdentityNotMappedException)
+        {
+        }
+
+        LocalAccounts.Delete(user, sid);
+        _logger.LogInformation("Deleted Windows account {User}", user);
+    }
+
     // ------------------------------------------------------------------ firewall
 
     public static string FirewallRuleName(string deskId, string protocol) => $"SplitPlay desk {deskId} ({protocol})";
@@ -227,14 +255,40 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
             return;
         }
 
-        RemoveFirewallRules(desk.Id);
         var program = _supervisor.Value.ResolveWorkerExecutable();
+        var stored = WindowsFirewallStore.LocalRules();
+        if (stored is not null)
+        {
+            var tcpState = FirewallRules.DeskRule(stored, FirewallRuleName(desk.Id, "TCP"), FirewallRules.Tcp, BasePortAllocator.TcpPorts(b), program);
+            var udpState = FirewallRules.DeskRule(stored, FirewallRuleName(desk.Id, "UDP"), FirewallRules.Udp, BasePortAllocator.UdpPorts(b), program);
+            if (tcpState == FirewallRules.DeskRuleState.Match && udpState == FirewallRules.DeskRuleState.Match)
+            {
+                return;
+            }
+
+            if (tcpState == FirewallRules.DeskRuleState.Missing || udpState == FirewallRules.DeskRuleState.Missing)
+            {
+                _logger.LogInformation("Desk {Desk}: firewall rules missing (TCP {Tcp}, UDP {Udp}); creating them", desk.Id, tcpState, udpState);
+            }
+            else
+            {
+                _logger.LogInformation("Desk {Desk}: firewall rules changed or disabled; creating them again", desk.Id);
+            }
+        }
+
+        RemoveFirewallRules(desk.Id);
         var tcp = string.Join(',', BasePortAllocator.TcpPorts(b));
         var udp = string.Join(',', BasePortAllocator.UdpPorts(b));
         Netsh($"advfirewall firewall add rule name=\"{FirewallRuleName(desk.Id, "TCP")}\" dir=in action=allow protocol=TCP localport={tcp} " +
               $"profile=private,domain program=\"{program}\" enable=yes description=\"SplitPlay desk {desk.Id}: Moonlight (HTTPS, HTTP, RTSP)\"");
         Netsh($"advfirewall firewall add rule name=\"{FirewallRuleName(desk.Id, "UDP")}\" dir=in action=allow protocol=UDP localport={udp} " +
               $"profile=private,domain program=\"{program}\" enable=yes description=\"SplitPlay desk {desk.Id}: Moonlight (video, control, audio)\"");
+    }
+
+    public PortConflict? FindPortConflict(DeskConfig desk)
+    {
+        ArgumentNullException.ThrowIfNull(desk);
+        return desk.BasePort is int b ? WindowsPortCheck.Find(b) : null;
     }
 
     public void RemoveFirewallRules(string deskId)
@@ -310,6 +364,52 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         }
 
         return copied || steam;
+    }
+
+    // ------------------------------------------------------------------ sign-in screen
+
+    private LogonListing LogonState(string deskId) => new(Path.Combine(_paths.DeskDirectory(deskId), LogonListing.StateFileName));
+
+    public void UpdateLogonListing(DeskConfig desk)
+    {
+        ArgumentNullException.ThrowIfNull(desk);
+        try
+        {
+            var listing = LogonState(desk.Id);
+            var account = desk.User is null ? null : LocalAccounts.Get(desk.User);
+            if (account is not null && desk.HidesFromLogon(account.CreatedBySplitPlay))
+            {
+                if (listing.Hide(new WindowsHostRegistry(), account.Name))
+                {
+                    _logger.LogInformation("Desk {Desk}: {User} is hidden from the sign-in screen", desk.Id, account.Name);
+                }
+            }
+            else
+            {
+                ShowOnLogon(desk.Id);
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException or Win32Exception)
+        {
+            _logger.LogWarning("Desk {Desk}: could not update the sign-in screen entry: {Message}", desk.Id, ex.Message);
+        }
+    }
+
+    public void ShowOnLogon(string deskId)
+    {
+        try
+        {
+            var listing = LogonState(deskId);
+            var user = listing.RecordedUser();
+            if (listing.Show(new WindowsHostRegistry()))
+            {
+                _logger.LogInformation("Desk {Desk}: {User} is shown on the sign-in screen again", deskId, user);
+            }
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException)
+        {
+            _logger.LogWarning("Desk {Desk}: could not restore the sign-in screen entry: {Message}", deskId, ex.Message);
+        }
     }
 
     // ------------------------------------------------------------------ Steam isolation
@@ -529,6 +629,37 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
             .ToList();
     }
 
+    public IReadOnlyList<HostSession> Sessions() =>
+        Wts.EnumerateSessions()
+            .Where(s => s.Id != 0)
+            .Select(s =>
+            {
+                var user = Wts.QueryString(s.Id, Wts.WTSUserName);
+                var domain = Wts.QueryString(s.Id, Wts.WTSDomainName);
+                var local = !string.IsNullOrEmpty(user)
+                            && (string.IsNullOrEmpty(domain) || string.Equals(domain, Environment.MachineName, StringComparison.OrdinalIgnoreCase));
+                return new HostSession(s.Id, local ? user : null, s.State == Wts.WTSDisconnected);
+            })
+            .ToList();
+
+    public string? SessionUser(int sessionId)
+    {
+        var user = Wts.QueryString(sessionId, Wts.WTSUserName) ?? throw new Win32Exception($"WTSQuerySessionInformation({sessionId}) failed");
+        var domain = Wts.QueryString(sessionId, Wts.WTSDomainName);
+        return user.Length > 0 && (string.IsNullOrEmpty(domain) || string.Equals(domain, Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+            ? user
+            : null;
+    }
+
+    public void LogoffSession(int sessionId)
+    {
+        if (!Wts.Logoff(sessionId))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, $"WTSLogoffSession({sessionId}) failed ({error})");
+        }
+    }
+
     [DllImport("kernel32.dll")]
     private static extern uint WTSGetActiveConsoleSessionId();
 
@@ -542,6 +673,51 @@ internal static class Wts
 {
     public const int WTSUserName = 5;
     public const int WTSDomainName = 7;
+    public const int WTSDisconnected = 4;
+
+    /// <summary>All sessions (id and WTS_CONNECTSTATE_CLASS).</summary>
+    public static IReadOnlyList<(int Id, int State)> EnumerateSessions()
+    {
+        if (!WTSEnumerateSessionsW(IntPtr.Zero, 0, 1, out var buffer, out var count))
+        {
+            var error = Marshal.GetLastWin32Error();
+            throw new Win32Exception(error, $"WTSEnumerateSessions failed ({error})");
+        }
+
+        try
+        {
+            var size = Marshal.SizeOf<WtsSessionInfo>();
+            var result = new List<(int, int)>(count);
+            for (var i = 0; i < count; i++)
+            {
+                var info = Marshal.PtrToStructure<WtsSessionInfo>(buffer + (i * size));
+                result.Add((info.SessionId, info.State));
+            }
+
+            return result;
+        }
+        finally
+        {
+            WTSFreeMemory(buffer);
+        }
+    }
+
+    /// <summary>WTSLogoffSession without waiting.</summary>
+    public static bool Logoff(int session) => WTSLogoffSession(IntPtr.Zero, session, false);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WtsSessionInfo
+    {
+        public int SessionId;
+        public IntPtr WinStationName;
+        public int State;
+    }
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    private static extern bool WTSEnumerateSessionsW(IntPtr server, int reserved, int version, out IntPtr sessions, out int count);
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    private static extern bool WTSLogoffSession(IntPtr server, int sessionId, bool wait);
 
     public static string? QueryString(int session, int infoClass)
     {

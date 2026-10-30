@@ -16,6 +16,9 @@ public sealed record DeskCredentials(string User, string Domain, string Password
 /// <summary>An existing local account (<see cref="IDeskPlatform.FindAccount"/>).</summary>
 public sealed record DeskAccount(string Name, bool CreatedBySplitPlay);
 
+/// <summary>A Windows session: its id, the local account signed in (null: nobody, or a domain account) and whether it is disconnected.</summary>
+public sealed record HostSession(int Id, string? User, bool Disconnected);
+
 /// <summary><c>deleteUser=true</c> for an account SplitPlay did not create (API: 409).</summary>
 public sealed class DeskUserNotManagedException(string message) : Exception(message);
 
@@ -43,14 +46,31 @@ public interface IDeskPlatform
     /// <summary>The RDP-Tcp listener port (registry, default 3389).</summary>
     int RdpPort();
 
-    /// <summary>Creates or refreshes the desk's inbound firewall rules for its Moonlight ports.</summary>
+    /// <summary>
+    /// Makes sure the desk's inbound firewall rules for its Moonlight ports exist as SplitPlay creates them: rules that
+    /// are missing (someone deleted them), disabled or different (another base port) are created again; matching rules
+    /// are left alone. Called when the desk starts, before every worker start and when its config changes.
+    /// </summary>
     void EnsureFirewallRules(DeskConfig desk);
+
+    /// <summary>
+    /// The first of the desk's Moonlight ports that another process holds or Windows refuses (an excluded port range),
+    /// or null when all are free or the desk has no base port. Checked before the worker starts.
+    /// </summary>
+    PortConflict? FindPortConflict(DeskConfig desk);
 
     /// <summary>Removes the desk's firewall rules (desk deleted).</summary>
     void RemoveFirewallRules(string deskId);
 
-    /// <summary>Removes the stored password and, with <paramref name="deleteUser"/>, the Windows account and its profile.</summary>
+    /// <summary>
+    /// Removes the stored password, shows the account on the sign-in screen again if the desk hid it and, with
+    /// <paramref name="deleteUser"/>, deletes the Windows account and its profile.
+    /// </summary>
     void DeleteDesk(DeskConfig desk, bool deleteUser);
+
+    /// <summary>Deletes a Windows account SplitPlay created, with its profile (no-op when it does not exist).</summary>
+    /// <exception cref="DeskUserNotManagedException">The account was not created by SplitPlay; it is never deleted.</exception>
+    void DeleteManagedAccount(string user);
 
     /// <summary>
     /// Runs once the desk session is logged on. Returns true if something was changed that only applies at the next
@@ -64,6 +84,16 @@ public interface IDeskPlatform
     /// to: recorded previous values are restored. No-op when nothing is recorded. Best effort: failures are logged.
     /// </summary>
     void RevertSteamIsolation(string deskId);
+
+    /// <summary>
+    /// Hides the desk's account from the sign-in screen, or shows it again, as <see cref="DeskConfig.HidesFromLogon"/>
+    /// says (an account SplitPlay did not create only when the desk asks for it). A user hidden earlier for this desk
+    /// that is no longer its user is shown again. Best effort: failures are logged.
+    /// </summary>
+    void UpdateLogonListing(DeskConfig desk);
+
+    /// <summary>Shows the account the desk hid on the sign-in screen again (no-op when it hid none). Best effort.</summary>
+    void ShowOnLogon(string deskId);
 
     /// <summary>The machine's <c>steam.exe</c> (from <c>HKLM\SOFTWARE\WOW6432Node\Valve\Steam\InstallPath</c>), or null.</summary>
     string? SteamExecutable();
@@ -97,4 +127,14 @@ public interface IDeskPlatform
 
     /// <summary>Enabled local accounts a desk can use (built-in accounts left out).</summary>
     IReadOnlyList<HostUserDto> ListUsers();
+
+    /// <summary>The sessions on this PC (WTSEnumerateSessions).</summary>
+    IReadOnlyList<HostSession> Sessions();
+
+    /// <summary>The local account signed in to <paramref name="sessionId"/>, or null (nobody, or a domain account).</summary>
+    /// <exception cref="System.ComponentModel.Win32Exception">The session cannot be queried.</exception>
+    string? SessionUser(int sessionId);
+
+    /// <summary>Logs session <paramref name="sessionId"/> off without waiting for it (WTSLogoffSession).</summary>
+    void LogoffSession(int sessionId);
 }

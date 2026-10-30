@@ -64,6 +64,12 @@ internal sealed class DeskRuntime
     /// <summary>The seat reported <c>session_lost</c> and has not reported <c>session_restored</c> yet.</summary>
     public bool SessionLost { get; set; }
 
+    /// <summary>Counts <c>session_lost</c> reports, so that a timer started for one loss ignores later ones.</summary>
+    public int SessionLosses { get; set; }
+
+    /// <summary>The last provisioning call; one that timed out may still be running and blocks the next.</summary>
+    public Task? ProvisionCall { get; set; }
+
     /// <summary>The one-time relogon after the first keyboard layout copy has been done in this run.</summary>
     public bool RelogonDone { get; set; }
 
@@ -109,6 +115,7 @@ internal sealed class DeskRuntime
                 Profile = Config.Profile,
                 DisableBluetoothUserService = Config.DisableBluetoothUserService,
                 SteamIsolation = Config.SteamIsolationEnabled,
+                HideFromLogon = Config.HidesFromLogon(Config.UserManaged != false),
                 WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,
                 Stream = Streams.Count > 0 ? ToStreamDto(Streams[0]) : null,

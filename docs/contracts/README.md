@@ -44,3 +44,4 @@ docs/                   architecture, research, contracts
 - Windows service name: `SplitPlay`, display name `SplitPlay Host Service`.
 - Data root: `%ProgramData%\SplitPlay` (`config.json`, `desks\<id>\`, `logs\`).
 - Kernel object names: `Global\SplitPlay.<kind>.<desk-id>`; pipes: `\\.\pipe\splitplay\<role>-<desk-id>`.
+  The admin token pipe is `\\.\pipe\splitplay\admin` (web-api.md "Authentication").

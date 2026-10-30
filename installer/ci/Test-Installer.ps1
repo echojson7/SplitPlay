@@ -189,7 +189,7 @@ function New-DeskRule {
     New-NetFirewallRule -DisplayName 'SplitPlay desk ci-1 (TCP)' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 48084, 48089, 48110 -Profile Private | Out-Null
 }
 
-function Test-Removed([string] $label, [bool] $dataKept, $vigemRecord = $null) {
+function Test-Removed([string] $label, [bool] $dataKept, $vigemRecord = $null, [string] $cleanup = 'cleanup') {
     Write-Host "== $label"
     Wait-Until { -not (Test-Path $app) }
     Check 'no ViGEmBus record left in HKLM\Software\SplitPlay' ($null -eq (Get-ViGEmRecord))
@@ -203,6 +203,8 @@ function Test-Removed([string] $label, [bool] $dataKept, $vigemRecord = $null) {
         # With the real CLI the revert itself is checked by Test-EndToEnd.ps1.
         $calls = @(Get-StubCalls)
         Check 'uninstaller ran "splitplay host revert"' (@($calls | Where-Object { $_ -eq 'splitplay.exe host revert' }).Count -eq 1)
+        Check "uninstaller ran ""SplitPlay.Service.exe $cleanup"" after removing the service" (
+            [array]::IndexOf($calls, "SplitPlay.Service.exe $cleanup") -gt [array]::IndexOf($calls, 'splitplay.exe service uninstall'))
     }
     Test-TermServiceUntouched
     Check 'service removed' ($null -eq (Get-Service -Name SplitPlay -ErrorAction SilentlyContinue))
@@ -266,8 +268,8 @@ Check 'install over kept data exit code 0' ((Invoke-Silent $Setup 'install2.log'
 Test-Installed 'after install over kept data (core only)' $false
 New-DeskRule
 $vigemRecord = Get-ViGEmRecord
-Check 'uninstall /PurgeData=1 exit code 0' ((Invoke-Silent $uninstaller 'uninstall2.log' '/PurgeData=1') -eq 0)
-Test-Removed 'after uninstall (purge)' $false $vigemRecord
+Check 'uninstall /PurgeData=1 /DeleteDeskAccounts=1 exit code 0' ((Invoke-Silent $uninstaller 'uninstall2.log' '/PurgeData=1 /DeleteDeskAccounts=1') -eq 0)
+Test-Removed 'after uninstall (purge, delete desk accounts)' $false $vigemRecord 'cleanup --delete-accounts'
 if (-not $vigemRecord) {
     Check 'uninstaller did not run msiexec (no ViGEmBus installed by setup)' (
         $null -eq (Select-String -Path (Join-Path $LogDir 'uninstall2.log') -SimpleMatch 'msiexec.exe'))

@@ -1,0 +1,344 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 02:15:32 +0000
+Subject: [PATCH] splitplay: name the mDNS instance after the desk
+ (sunshine_name)
+
+On Windows upstream names the DNS-SD instance after the host name
+(net::mdns_instance_name(platf::get_host_name())). Every desk of a PC
+shares that name, so the desks' registrations collided and Moonlight's
+list showed at most one of them.
+
+The instance is now named after sunshine_name, which SplitPlay.Service
+sets to "<PC>-<desk>": net::mdns_desk_instance_name() keeps ASCII letters
+and digits, turns spaces, dashes and other ASCII punctuation into one
+"-", drops control characters and invalid UTF-8, keeps other UTF-8 (RFC
+6763 4.1.1 allows it), trims "-" at both ends and cuts the result to 63
+bytes on a character boundary (RFC 6763 7.2). A name with non-ASCII
+characters gets an ASCII fallback ending in the desk's HTTP port, tried
+when the registration refuses the first one; an unusable sunshine_name
+falls back to upstream's host-name-based name. The SRV record keeps
+upstream's port, the desk's own HTTP port (base port), which moonlight-qt
+uses (MdnsPendingComputer takes QMdnsEngine::Service::port()); hosts are
+told apart by their uniqueid, not by the instance name. The log names the
+registered instance and port.
+
+Sunshine reads sunshine_name from the narrow argv, which Windows passes
+in the ANSI code page, so a desk name outside it (Cyrillic on a non-
+Russian system, or any character on a UTF-8-less code page) reached
+Moonlight garbled. The SplitPlay options now also pick sunshine_name=
+from the UTF-8 command line (trimmed and cut at "#" like upstream's
+parser, last one wins, empty ignored) and main() applies it after
+config::parse().
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/src/main.cpp b/src/main.cpp
+index e1d1148b01c13a02b98628ec63dbcbab42cb6258..ccb5f01a0421fc61f04b583dd5e0f2febffc8510 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -225,6 +225,12 @@ int main(int argc, char *argv[]) {
+     return 0;
+   }
+ 
++  // SplitPlay: the narrow argv is in the ANSI code page; take sunshine_name from the UTF-8 command line so that a desk
++  // name outside that code page reaches Moonlight (serverinfo hostname) and the mDNS instance name intact.
++  if (const auto &name = splitplay::options().sunshine_name) {
++    config::nvhttp.sunshine_name = *name;
++  }
++
+   auto log_deinit_guard = logging::init(config::sunshine.min_log_level, config::sunshine.log_file);
+   if (!log_deinit_guard) {
+     BOOST_LOG(error) << "Logging failed to initialize"sv;
+diff --git a/src/network.cpp b/src/network.cpp
+index 2a78b2f954b66fe4b72977e213bbd291aa32c1cd..3d48cc8547d09391e15823249b06501de4682e5e 100644
+--- a/src/network.cpp
++++ b/src/network.cpp
+@@ -260,4 +260,101 @@ namespace net {
+ 
+     return !instancename.empty() ? instancename : "Sunshine";
+   }
++
++  namespace {
++    /**
++     * @brief Length of the valid, printable UTF-8 sequence that starts at `text[i]` (2-4), or 0.
++     * Overlong forms, surrogates, code points above U+10FFFF and the C1 controls (U+0080-U+009F) give 0.
++     */
++    std::size_t utf8_sequence_length(const std::string_view &text, std::size_t i) {
++      const auto lead = static_cast<unsigned char>(text[i]);
++      std::size_t length = 0;
++      unsigned char low = 0x80, high = 0xBF;  // allowed range of the second byte
++      if (lead >= 0xC2 && lead <= 0xDF) {
++        length = 2;
++        if (lead == 0xC2) {
++          low = 0xA0;  // U+0080-U+009F are C1 control characters
++        }
++      } else if (lead >= 0xE0 && lead <= 0xEF) {
++        length = 3;
++        if (lead == 0xE0) {
++          low = 0xA0;
++        } else if (lead == 0xED) {
++          high = 0x9F;
++        }
++      } else if (lead >= 0xF0 && lead <= 0xF4) {
++        length = 4;
++        if (lead == 0xF0) {
++          low = 0x90;
++        } else if (lead == 0xF4) {
++          high = 0x8F;
++        }
++      } else {
++        return 0;
++      }
++      if (i + length > text.size()) {
++        return 0;
++      }
++      for (std::size_t k = 1; k < length; ++k) {
++        const auto c = static_cast<unsigned char>(text[i + k]);
++        const auto min = k == 1 ? low : static_cast<unsigned char>(0x80);
++        const auto max = k == 1 ? high : static_cast<unsigned char>(0xBF);
++        if (c < min || c > max) {
++          return 0;
++        }
++      }
++      return length;
++    }
++  }  // namespace
++
++  std::string mdns_desk_instance_name(const std::string_view &name, bool ascii_only, std::size_t max_bytes) {
++    std::string out;
++    out.reserve(name.size());
++    const auto separator = [&out]() {
++      if (!out.empty() && out.back() != '-') {
++        out.push_back('-');
++      }
++    };
++
++    for (std::size_t i = 0; i < name.size();) {
++      const auto c = static_cast<unsigned char>(name[i]);
++      if (c < 0x80) {
++        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
++          out.push_back(static_cast<char>(c));
++        } else if (c >= 0x20 && c != 0x7F) {
++          // Spaces, dashes and other ASCII punctuation (dots and backslashes would need escaping in the full
++          // service name) become one dash.
++          separator();
++        }
++        // ASCII control characters are dropped.
++        ++i;
++        continue;
++      }
++
++      const auto length = utf8_sequence_length(name, i);
++      if (length == 0) {
++        ++i;  // not UTF-8: dropped
++      } else {
++        if (ascii_only) {
++          separator();
++        } else {
++          out.append(name.substr(i, length));
++        }
++        i += length;
++      }
++    }
++
++    // RFC 6763 section 7.2: at most 63 bytes. Never cut a UTF-8 sequence in half.
++    if (out.size() > max_bytes) {
++      auto cut = max_bytes;
++      while (cut > 0 && (static_cast<unsigned char>(out[cut]) & 0xC0) == 0x80) {
++        --cut;
++      }
++      out.resize(cut);
++    }
++    while (!out.empty() && out.back() == '-') {
++      out.pop_back();
++    }
++    return out;
++  }
+ }  // namespace net
+diff --git a/src/network.h b/src/network.h
+index 679f35b8abed3fdd78a2cc4189efa3c01dc0e72a..c6b7d6a90aad7baedca7eca54b6706c158ea954f 100644
+--- a/src/network.h
++++ b/src/network.h
+@@ -155,4 +155,18 @@ namespace net {
+    * @return Hostname-based instance name or "Sunshine" if hostname is invalid.
+    */
+   std::string mdns_instance_name(const std::string_view &hostname);
++
++  /**
++   * @brief SplitPlay: the DNS-SD instance name of a desk, made from its `sunshine_name` (`<PC>-<desk>`).
++   * Every desk of a PC shares the host name, so the upstream name made from it collides between desks.
++   * ASCII letters and digits are kept; spaces, dashes and other ASCII punctuation become one `-`; ASCII control
++   * characters and invalid UTF-8 are dropped; other UTF-8 (RFC 6763 section 4.1.1 allows it) is kept, or with
++   * `ascii_only` becomes a `-` as well. The result is cut to `max_bytes` (RFC 6763 section 7.2: 63) on a character
++   * boundary and has no leading or trailing `-`.
++   * @param name The name to convert, UTF-8.
++   * @param ascii_only Replace every non-ASCII character with `-`.
++   * @param max_bytes Maximum length in bytes.
++   * @return The instance name; empty when nothing usable is left.
++   */
++  std::string mdns_desk_instance_name(const std::string_view &name, bool ascii_only = false, std::size_t max_bytes = 63);
+ }  // namespace net
+diff --git a/src/platform/windows/publish.cpp b/src/platform/windows/publish.cpp
+index f4a954d0379cc8e9c1abf361439ee2be9c8bc16c..f0abfc0ea637e71cae4dbe595bf301ab44c351a3 100644
+--- a/src/platform/windows/publish.cpp
++++ b/src/platform/windows/publish.cpp
+@@ -2,6 +2,11 @@
+  * @file src/platform/windows/publish.cpp
+  * @brief Definitions for Windows mDNS service registration.
+  */
++// standard includes
++#include <algorithm>
++#include <string>
++#include <vector>
++
+ // platform includes
+ // WinSock2.h must be included before Windows.h
+ // clang-format off
+@@ -148,13 +153,48 @@ namespace platf::publish {
+     alarm->ring(pInstance);
+   }
+ 
+-  static int service(bool enable, PDNS_SERVICE_INSTANCE &existing_instance) {
++  /**
++   * @brief SplitPlay: the instance names to try, in order.
++   *
++   * Upstream names the instance after the host name, which every desk of a PC shares, so the desks replaced each
++   * other in Moonlight's list. The instance is named after `sunshine_name` (`<PC>-<desk>`, set by SplitPlay.Service)
++   * instead; its SRV record carries the desk's own HTTP port. A name with non-ASCII characters (a Cyrillic desk name)
++   * gets an ASCII fallback that ends in the port, which is unique per desk, in case the registration refuses it.
++   *
++   * @return One or two instance names; the upstream host-name-based name when `sunshine_name` leaves nothing usable.
++   */
++  static std::vector<std::string> instance_names() {
++    std::vector<std::string> names;
++    const auto &desk_name = config::nvhttp.sunshine_name;
++    auto primary = net::mdns_desk_instance_name(desk_name);
++    if (primary.empty()) {
++      names.push_back(net::mdns_instance_name(platf::get_host_name()));
++      return names;
++    }
++
++    const bool ascii = std::all_of(primary.begin(), primary.end(), [](char c) {
++      return static_cast<unsigned char>(c) < 0x80;
++    });
++    names.push_back(std::move(primary));
++    if (!ascii) {
++      const auto suffix = "-"s + std::to_string(net::map_port(nvhttp::PORT_HTTP));
++      auto fallback = net::mdns_desk_instance_name(desk_name, true, 63 - suffix.size());
++      if (fallback.empty()) {
++        fallback = net::mdns_desk_instance_name(platf::get_host_name(), true, 63 - suffix.size());
++      }
++      names.push_back((fallback.empty() ? "SplitPlay"s : fallback) + suffix);
++    }
++    return names;
++  }
++
++  static int service(bool enable, PDNS_SERVICE_INSTANCE &existing_instance, const std::string &instance_name = {}) {
+     auto alarm = safe::make_alarm<PDNS_SERVICE_INSTANCE>();
+ 
+     std::wstring domain = utf_utils::from_utf8(SERVICE_TYPE_DOMAIN);
+ 
+     auto hostname = platf::get_host_name();
+-    auto name = utf_utils::from_utf8(net::mdns_instance_name(hostname) + '.') + domain;
++    // SplitPlay: the desk's instance name (instance_names()); deregistration passes the registered instance instead.
++    auto name = utf_utils::from_utf8(instance_name + '.') + domain;
+     auto host = utf_utils::from_utf8(hostname + ".local");
+ 
+     DNS_SERVICE_INSTANCE instance {};
+@@ -221,12 +261,16 @@ namespace platf::publish {
+   public:
+     mdns_registration_t():
+         existing_instance(nullptr) {
+-      if (service(true, existing_instance)) {
+-        BOOST_LOG(error) << "Unable to register Sunshine mDNS service"sv;
+-        return;
++      for (const auto &name : instance_names()) {
++        if (!service(true, existing_instance, name)) {
++          BOOST_LOG(info) << "Registered Sunshine mDNS service \""sv << name << "\" on port "sv << net::map_port(nvhttp::PORT_HTTP);
++          return;
++        }
++
++        BOOST_LOG(warning) << "mDNS registration of \""sv << name << "\" failed"sv;
+       }
+ 
+-      BOOST_LOG(info) << "Registered Sunshine mDNS service"sv;
++      BOOST_LOG(error) << "Unable to register Sunshine mDNS service"sv;
+     }
+ 
+     ~mdns_registration_t() override {
+diff --git a/src/splitplay/options.cpp b/src/splitplay/options.cpp
+index 38e5847f634207d230c59b027d8c57d16af25e06..333f3c9a2da4f37d031ddd407eb479521676a283 100644
+--- a/src/splitplay/options.cpp
++++ b/src/splitplay/options.cpp
+@@ -103,6 +103,32 @@ namespace splitplay {
+              });
+     }
+ 
++    /**
++     * @brief The value of an upstream `sunshine_name = value` argument, trimmed and cut at `#` like upstream's
++     * parse_option(); nullopt for any other argument or an empty value.
++     */
++    std::optional<std::string> sunshine_name_value(std::string_view arg) {
++      constexpr auto blank = " \t"sv;
++      constexpr auto key = "sunshine_name"sv;
++      const auto start = arg.find_first_not_of(blank);
++      if (start == std::string_view::npos || arg.substr(start, key.size()) != key) {
++        return std::nullopt;
++      }
++      auto rest = arg.substr(start + key.size());
++      rest.remove_prefix(std::min(rest.size(), rest.find_first_not_of(blank)));
++      if (rest.empty() || rest.front() != '=') {
++        return std::nullopt;
++      }
++      rest.remove_prefix(1);
++      rest = rest.substr(0, rest.find('#'));
++      const auto first = rest.find_first_not_of(blank);
++      if (first == std::string_view::npos) {
++        return std::nullopt;
++      }
++      rest = rest.substr(first, rest.find_last_not_of(blank) - first + 1);
++      return std::string {rest};
++    }
++
+     options_t parse(const std::vector<std::string> &args) {
+       options_t opts;
+       for (std::size_t i = 1; i < args.size(); ++i) {
+@@ -115,6 +141,10 @@ namespace splitplay {
+           opts.help = true;
+           continue;
+         }
++        if (auto name = sunshine_name_value(arg)) {
++          opts.sunshine_name = std::move(name);
++          continue;
++        }
+ 
+         std::string_view name, inline_value;
+         bool has_inline = false;
+diff --git a/src/splitplay/options.h b/src/splitplay/options.h
+index 89729aab76fc4d940b34c1759f6db9b490ca0a9a..8ca0c8afa9e1239e8ad1a725e66393c47d0d962d 100644
+--- a/src/splitplay/options.h
++++ b/src/splitplay/options.h
+@@ -7,6 +7,7 @@
+ 
+ // standard includes
+ #include <filesystem>
++#include <optional>
+ #include <ostream>
+ #include <string>
+ 
+@@ -22,6 +23,13 @@ namespace splitplay {
+     bool version = false;  ///< `--version` was given.
+     bool help = false;  ///< `--help` was given.
+     std::string error;  ///< Non-empty when the command line is invalid.
++    /**
++     * The upstream `sunshine_name=<value>` setting as given on the command line, in UTF-8 (the last one wins, an empty
++     * value is ignored, as upstream does). Sunshine's own parser reads the narrow `argv`, which Windows passes in the
++     * ANSI code page, so a desk name outside that code page would reach Moonlight garbled; `main` applies this value
++     * after the upstream parser instead. The setting stays in `argv` and is not removed by strip_args().
++     */
++    std::optional<std::string> sunshine_name;
+   };
+ 
+   /**

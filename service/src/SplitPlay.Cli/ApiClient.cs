@@ -7,6 +7,7 @@ using System.Text.Json.Serialization.Metadata;
 using SplitPlay.Core;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Json;
 
 namespace SplitPlay.Cli;
@@ -22,10 +23,23 @@ internal sealed class ApiCallException(HttpStatusCode status, string code, strin
 /// <summary>The service could not be reached.</summary>
 internal sealed class ServiceUnreachableException(string message, Exception inner) : Exception(message, inner);
 
-/// <summary>Thin client for the loopback Web API (docs/contracts/web-api.md).</summary>
+/// <summary>
+/// Thin client for the loopback Web API (docs/contracts/web-api.md). Every request but <c>/health</c> carries a bearer
+/// token: <c>SPLITPLAY_TOKEN</c> when set, otherwise one from the service's admin pipe (granted to an administrator at
+/// the console or in an elevated prompt). At the console the pipe's token is kept in a per-user cache
+/// (<see cref="CliTokenCache"/>) while it is still accepted, so that scripts calling the CLI in a loop do not hit the
+/// pipe's rate limit.
+/// </summary>
 internal sealed class ApiClient : IDisposable
 {
+    /// <summary>Environment variable with a bearer token to use instead of asking the admin pipe.</summary>
+    public const string TokenVariable = "SPLITPLAY_TOKEN";
+
     private readonly HttpClient _http;
+    private readonly SemaphoreSlim _tokenGate = new(1, 1);
+    private string? _token = Environment.GetEnvironmentVariable(TokenVariable) is { Length: > 0 } t ? t : null;
+    private bool _tokenTried;
+    private string? _tokenProblem;
 
     public ApiClient(Uri baseUri, TimeSpan? timeout = null)
     {
@@ -137,9 +151,93 @@ internal sealed class ApiClient : IDisposable
                ?? throw new ApiCallException(response.StatusCode, "bad_response", "empty response");
     }
 
+    /// <summary>A bearer token from the admin pipe; throws <see cref="ApiCallException"/> when there is none.</summary>
+    public async Task<string> TokenAsync()
+    {
+        // For scripts: a fresh token (its whole lifetime), never the cached one.
+        await EnsureTokenAsync(useCache: false).ConfigureAwait(false);
+        return _token ?? throw new ApiCallException(HttpStatusCode.Unauthorized, ApiErrorCodes.Unauthorized,
+            _tokenProblem ?? "no token: the SplitPlay service's admin pipe did not answer");
+    }
+
+    private async Task EnsureTokenAsync(bool useCache = true)
+    {
+        await _tokenGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_token is not null || _tokenTried)
+            {
+                return;
+            }
+
+            _tokenTried = true;
+            var cache = CliTokenCache.Open();
+            if (useCache && cache?.Read() is { } cached)
+            {
+                if (await AcceptedAsync(cached).ConfigureAwait(false))
+                {
+                    _token = cached;
+                    return;
+                }
+
+                cache.Clear();
+            }
+
+            try
+            {
+                var granted = await AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "cli", TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+                _token = granted?.Token;
+                if (granted is not null)
+                {
+                    cache?.Write(granted);
+                }
+            }
+            catch (AdminPipeException ex)
+            {
+                _tokenProblem = ex.Message;
+            }
+        }
+        finally
+        {
+            _tokenGate.Release();
+        }
+    }
+
+    /// <summary>True when the service still takes <paramref name="token"/> (the service may have restarted since).</summary>
+    private async Task<bool> AcceptedAsync(string token)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "auth/session");
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+            using var response = await _http.SendAsync(request).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            var session = await JsonSerializer.DeserializeAsync(await response.Content.ReadAsStreamAsync().ConfigureAwait(false),
+                SplitPlayJsonContext.Default.AuthSessionDto).ConfigureAwait(false);
+            return session?.Authenticated == true;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+        {
+            return false;
+        }
+    }
+
     private async Task<HttpResponseMessage> SendRawAsync(HttpMethod method, string path, HttpContent? content)
     {
         using var request = new HttpRequestMessage(method, path) { Content = content };
+        if (path != "health")
+        {
+            await EnsureTokenAsync().ConfigureAwait(false);
+            if (_token is not null)
+            {
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _token);
+            }
+        }
+
         HttpResponseMessage response;
         try
         {
@@ -167,7 +265,9 @@ internal sealed class ApiClient : IDisposable
                 var error = JsonSerializer.Deserialize(body, SplitPlayJsonContext.Default.ApiErrorResponse);
                 if (error?.Error is { } e)
                 {
-                    throw new ApiCallException(response.StatusCode, e.Code, e.Message);
+                    // Say why there was no token ("only an administrator signed in at this PC ... can manage SplitPlay").
+                    var message = response.StatusCode == HttpStatusCode.Unauthorized && _tokenProblem is not null ? _tokenProblem : e.Message;
+                    throw new ApiCallException(response.StatusCode, e.Code, message);
                 }
             }
             catch (JsonException)
@@ -178,5 +278,9 @@ internal sealed class ApiClient : IDisposable
         }
     }
 
-    public void Dispose() => _http.Dispose();
+    public void Dispose()
+    {
+        _http.Dispose();
+        _tokenGate.Dispose();
+    }
 }

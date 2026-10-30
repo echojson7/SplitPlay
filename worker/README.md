@@ -41,6 +41,9 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0012` scheduler protection | the process opts out of power throttling (EcoQoS and ignored timer-resolution requests, `SetProcessInformation(ProcessPowerThrottling)`) and runs ABOVE_NORMAL when idle (upstream's HIGH while streaming is kept); capture, encode, video send and control receive threads run under MMCSS "Games" at normal priority. See *Scheduling* below |
 | `0013` stream profile | `welcome` and `set_profile` apply the Profile's `fec_percent`, `min_fps`, `pacing_mbps` (live) and `dpb_frames` (next stream, opt-in); pacing replaces upstream's fixed 800 Mbit/s, the DPB upstream's 5 (H.264/HEVC) or 8 (AV1) reference frames. See *Stream profile* below |
 | `0014` instant feedback | rumble, LED and motion requests and HDR metadata are sent as soon as they are queued: the producers ring a loopback "doorbell" datagram that the control thread's ENet intercept turns into a wake-up, instead of waiting up to ~100 ms for the next control loop cycle |
+| `0015` NVIDIA profile | the "prefer maximum performance" application profile (`PREFERRED_PSTATE`) is bound to the running executable's file name (`splitplay-worker.exe`) under the profile name "SplitPlay worker" instead of upstream's `sunshine.exe`/"SunshineStream"; `--restore-nvprefs-undo` also deletes that profile. See *NVIDIA driver settings* below |
+| `0016` input thread | input is injected on its own thread (`input_pool`, one thread, MMCSS "Games") instead of Sunshine's shared task-pool thread; key repeat, gamepads, rumble/LED callbacks and touch/pen repeat run there too, so ordering and the input state's synchronisation are upstream's. See *Scheduling* below |
+| `0017` mDNS per desk | the DNS-SD instance is named after `sunshine_name` instead of the host name every desk shares (`net::mdns_desk_instance_name`: ASCII punctuation and spaces become `-`, other UTF-8 is kept, at most 63 bytes on a character boundary; an ASCII fallback ending in the port if Windows refuses a non-ASCII name); `sunshine_name=` is also read from the UTF-8 command line, since the narrow `argv` is in the ANSI code page. See *mDNS* below |
 
 ### Changing a patch or adding one
 
@@ -101,7 +104,7 @@ SplitPlay.Service starts one worker per desk, inside the desk's RDP loopback ses
 ```
 splitplay-worker.exe --desk-dir C:\ProgramData\SplitPlay\desks\desk-1 ^
                      --pipe \\.\pipe\splitplay\worker-desk-1 --desk desk-1 port=48089 ^
-                     sunshine_name=HOST-desk-1 min_log_level=info ^
+                     sunshine_name=GAMEPC-desk-1 min_log_level=info ^
                      nvenc_preset=1 nvenc_twopass=disabled hevc_mode=0 av1_mode=0 gamepad=ds4
 ```
 
@@ -132,7 +135,7 @@ upstream options keep working.
 | Setting | Value | Why |
 |---|---|---|
 | `port` | desk base port `P` | ports P-5, P, P+9..P+11, P+21 ([`config.md`](../docs/contracts/config.md)) |
-| `sunshine_name` | `<HOST>-<desk-id>` | the name Moonlight and mDNS show; otherwise every desk is called after the host |
+| `sunshine_name` | `<PC name>-<desk name>` (`<PC name>-<desk-id>` without a name) | the name Moonlight shows and the mDNS instance is made from (patch 0017); otherwise every desk is called after the host |
 | `min_log_level` | `info` | first light: the log shows the session, output, adapter, encoder and audio endpoint; `warning` later (Duo lesson) |
 | `nvenc_preset` | `1` | P1, the fastest NVENC preset (also the built-in default) |
 | `nvenc_twopass` | `disabled` | single pass: lowest encode latency (upstream default is `quarter_res`) |
@@ -251,7 +254,25 @@ log); the encoder line in the log shows `dpb=N`. The profile wins over `fec_perc
 `name=value`. `fps`, size, bitrate and codec stay Moonlight's choice; `gpu_priority`, `gpu_luid` and `cpu_set` are
 not applied yet.
 
-### Scheduling (patch 0012)
+### mDNS (patch 0017)
+
+Each desk is its own Moonlight host on the same PC: its own `uniqueid`, certificate and base port. Upstream registered
+the DNS-SD service `_nvstream._tcp.local` under the PC's host name, so all desks used the same instance name and only
+one of them could be found. The worker now registers `<instance>._nvstream._tcp.local` with the instance made from
+`sunshine_name` (`GAMEPC-Living-room`, `GAMEPC-Стол-девушки`), the SRV record pointing at `<host>.local` and the desk's
+HTTP port (its base port `P`), and logs `Registered Sunshine mDNS service "<instance>" on port <P>`.
+
+- moonlight-qt resolves each instance on its own and adds the host at the SRV record's address and port
+  (`MdnsPendingComputer` keeps `QMdnsEngine::Service::port()`), then asks its `serverinfo`; computers are keyed by
+  `uniqueid`, and a known one only gets its name and addresses updated. So a desk that was added by hand or renamed
+  keeps its pairing.
+- Instance names follow RFC 6763: ASCII letters and digits are kept, spaces, dashes and other ASCII punctuation
+  become one `-`, control characters and invalid UTF-8 are dropped, other UTF-8 is kept; at most 63 bytes, cut on a
+  character boundary. If Windows refuses a name with non-ASCII characters, an ASCII form ending in `-<P>` is tried.
+- Windows answers mDNS in the DNS Client service, so the built-in firewall rule "mDNS (UDP-In)" must allow it on the
+  network's profile; `GET /host/network` reports it and Settings shows "mDNS · Off" when it does not.
+
+### Scheduling (patches 0012, 0016)
 
 At start-up the worker logs one line, for example `SplitPlay: scheduling: power throttling off (execution speed,
 timer resolution), priority class above normal (high while streaming), MMCSS "Games" for ...`, and one
@@ -266,26 +287,55 @@ timer resolution), priority class above normal (high while streaming), MMCSS "Ga
   almost nothing, but its heartbeats and the next stream's start-up must not queue behind other desks' games.
   HIGH keeps the threads that are not under MMCSS (audio send, RTSP) above every normal-class game thread except
   TIME_CRITICAL. REALTIME is never used.
-- **MMCSS.** `video::capture`, the encode thread, `video::capture_sync`, `stream::videoBroadcast` and
-  `stream::controlBroadcast` (receives input) join the task "Games" with `AVRT_PRIORITY_NORMAL`. The default task
-  definitions put "Games" (task priority 2) and "Audio" (task priority 6) in scheduling category Medium (real-time
-  range 16-22, above every normal-class game thread, at most 15) and "Pro Audio" (Sunshine's audio capture) in High.
+- **MMCSS.** `video::capture`, the encode thread, `video::capture_sync`, `stream::videoBroadcast`,
+  `stream::controlBroadcast` (receives input) and `input::inject` (patch 0016) join the task "Games" with
+  `AVRT_PRIORITY_NORMAL`. The default task definitions put "Games" (task priority 2) and "Audio" (task priority 6)
+  in scheduling category Medium (real-time range 16-22, above every normal-class game thread, at most 15) and "Pro Audio" (Sunshine's audio capture) in High.
   "Games" at normal priority is the most modest registration that lifts these threads above the games and asks for
   nothing above the audio engine's "Audio" task. MMCSS keeps a share of each period for other threads
   (`SystemResponsiveness`, 20 %): a registered thread that overruns it drops to the Exhausted category (1-7), below
   normal threads, until the next period, so a busy worker cannot starve the PC; whether that ever happens with
   several desks is a lab item.
-- **Input injection** runs on Sunshine's single task-pool thread, which also runs every other pool task, so it is not
-  registered with MMCSS: it runs at the process class (HIGH while streaming, base 13, above normal-class game threads
-  except TIME_CRITICAL ones). A dedicated input thread under MMCSS is a follow-up.
+- **Input injection** (patch 0016) has a thread of its own, `input::inject`, registered with MMCSS "Games" at normal
+  priority like the threads above. Upstream injects on its single task-pool thread, which also runs every other pool
+  task, so input could wait behind unrelated work and the thread could not be registered. The control thread queues
+  each input packet as before; the input thread takes them in order (upstream's batching of mouse moves and the like is
+  unchanged). Everything else that touches the injected input state runs on the same thread, so it needs no locks
+  beyond upstream's: key repeat, the delayed left button, the Home emulation, `input::reset()` at the end of a stream,
+  virtual gamepad allocation and removal, the ViGEm rumble and LED callbacks (which ring the doorbell of patch 0014),
+  the DualShock 4 report timer, touch and pen repeat. At shutdown the thread runs what is still queued and ends before
+  the input backend is released.
+
+### NVIDIA driver settings (patch 0015)
+
+With an NVIDIA driver, every worker start (and every stream start) checks two driver settings through NvAPI DRS, as
+upstream Sunshine does:
+
+| Setting | Where | Option (default) | Undone |
+|---|---|---|---|
+| `PREFERRED_PSTATE` = prefer maximum performance | application profile "SplitPlay worker" for `splitplay-worker.exe` | `nvenc_latency_over_power` (on; `disabled` removes it) | the profile is deleted by `--restore-nvprefs-undo` |
+| `OGL_CPL_PREFER_DXPRESENT` = prefer layered on DXGI swapchain (Vulkan/OpenGL present method) | **global** base profile | `nvenc_opengl_vulkan_on_dxgi` (on; `disabled` leaves it alone) | the previous value is written to `%ProgramData%\Sunshine\nvprefs_undo.json` before the change and restored from it |
+
+The global value is restored when the worker that changed it exits, at the next worker start when a worker was killed
+before it could restore it, and by `splitplay-worker.exe --restore-nvprefs-undo`, which also deletes the application
+profile. The SplitPlay uninstaller runs that command once the service and every worker have stopped, so uninstalling
+leaves the driver database as it was found (a value someone changed after the worker set it is left alone, as
+upstream does). The undo file is upstream's, so a co-installed Sunshine and the workers keep one record of the original
+value.
+
+All desks share both settings. The first worker to change the global value owns the undo file and restores the value
+when it exits, even if other desks still run; another desk sets it again (with a new undo file) at its next stream
+start. A worker that finds the undo file held by a running worker logs that as info and leaves it alone; when
+two workers create the profile at the same time, the second reloads the driver settings and retries once. A desk
+with `nvenc_latency_over_power=disabled` removes the profile's setting for every desk until another desk
+starts. Both settle once the service owns driver profiles (below).
 
 ## Not done yet
 
 - Frame tracing, the IDD capture ring and the input ring (the contract headers are already on the include path);
   the profile's `gpu_priority`, `gpu_luid` and `cpu_set`.
 - Per-session gamepads: ViGEm pads are visible to every session; SplitPlay's isolated pad driver comes in Stage 4.
-- Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile; with several workers they
-  should move to the service. Their "prefer maximum performance" application profile is bound to `sunshine.exe`, so
-  `splitplay-worker.exe` does not get it yet.
-- mDNS: every worker publishes itself; Moonlight's automatic discovery is not tested with several desks yet
-  (adding `HOST:port` by hand always works).
+- Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile from each worker (patch 0015);
+  with several workers they should move to the service.
+- mDNS with several desks is not yet tested on hardware (lab B): each desk now publishes its own instance (patch
+  0017); adding `HOST:port` by hand always works.

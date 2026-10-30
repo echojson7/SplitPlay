@@ -20,7 +20,8 @@ describe('app smoke', () => {
   const errors: unknown[] = []
 
   beforeAll(() => {
-    vi.stubGlobal('fetch', mockFetch(new MockBackend({ stepMs: 10 })))
+    // A plain browser: the admin password is set and it has to log in.
+    vi.stubGlobal('fetch', mockFetch(new MockBackend({ stepMs: 10, password: 'a-long-password' })))
     // No WebSocket in the mock: the store falls back to polling.
     vi.stubGlobal('WebSocket', undefined)
     vi.spyOn(console, 'error').mockImplementation((...args) => errors.push(args))
@@ -32,16 +33,16 @@ describe('app smoke', () => {
     vi.unstubAllGlobals()
   })
 
-  it('walks through setup, the wizard and every page without errors', async () => {
+  it('walks through login, the wizard and every page without errors', async () => {
     const router = createAppRouter()
     const w = mount(App, { global: { plugins: [router] }, attachTo: document.body })
     await router.push('/')
     await settle()
 
-    // First start: no password, redirected to setup.
-    expect(router.currentRoute.value.name).toBe('setup')
+    // Not signed in: the login page.
+    expect(router.currentRoute.value.name).toBe('login')
+    expect(w.find('[data-use-tray]').exists()).toBe(false)
     await w.find('input#pw').setValue('a-long-password')
-    await w.find('input#pw2').setValue('a-long-password')
     await w.find('form').trigger('submit')
     await settle()
     expect(router.currentRoute.value.name).toBe('library')

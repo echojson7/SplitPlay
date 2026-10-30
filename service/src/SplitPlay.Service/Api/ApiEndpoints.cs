@@ -30,7 +30,7 @@ public static partial class ApiEndpoints
     [GeneratedRegex("^[0-9]{4}$", RegexOptions.CultureInvariant)]
     private static partial Regex PinRegex();
 
-    /// <summary>Error handling and the loopback guard for <c>/api</c>.</summary>
+    /// <summary>Error handling, the loopback and origin guards and the admin check for <c>/api</c>.</summary>
     public static IApplicationBuilder UseApiErrorHandling(this IApplicationBuilder app) => app.Use(async (context, next) =>
     {
         if (!context.Request.Path.StartsWithSegments("/api", StringComparison.OrdinalIgnoreCase))
@@ -39,7 +39,7 @@ public static partial class ApiEndpoints
             return;
         }
 
-        // Stage 2 skeleton: no admin password exists yet, so only loopback callers are served (web-api.md).
+        // LAN access (HTTPS) is not implemented yet: only loopback callers are served (web-api.md).
         var remote = context.Connection.RemoteIpAddress;
         if (remote is not null && !IPAddress.IsLoopback(remote))
         {
@@ -66,10 +66,29 @@ public static partial class ApiEndpoints
             return;
         }
 
-        // A browser session must echo its CSRF token on state-changing requests.
+        // Desk users are other people: a process in a desk session gets nothing but /health, token or not.
+        var isHealth = IsRoute(context, "GET", "/health");
+        var auth = context.RequestServices.GetRequiredService<AuthService>();
+        if (!isHealth && PeerProblem(context, auth) is { } peerProblem)
+        {
+            await WriteErrorAsync(context, StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden, peerProblem).ConfigureAwait(false);
+            return;
+        }
+
+        // Everything but health and the sign-in endpoints needs the admin: a session (password login, or the tray's
+        // from the admin pipe) or a bearer token from the admin pipe (CLI).
+        if (!isHealth && !IsAuthRoute(context) && !auth.IsAdmin(context))
+        {
+            await WriteErrorAsync(context, StatusCodes.Status401Unauthorized, ApiErrorCodes.Unauthorized,
+                "sign in with the admin password, or open SplitPlay from the tray").ConfigureAwait(false);
+            return;
+        }
+
+        // A browser session must echo its CSRF token on state-changing requests (a bearer token is no ambient credential).
         if (changesState
-            && !context.Request.Path.StartsWithSegments(BuildInfo.ApiPrefix + "/auth/login", StringComparison.OrdinalIgnoreCase)
-            && context.RequestServices.GetRequiredService<AuthService>().Current(context) is { } session
+            && !IsRoute(context, "POST", "/auth/login")
+            && !auth.HasValidBearer(context)
+            && auth.Current(context) is { } session
             && context.Request.Headers[AuthService.CsrfHeader] != session.CsrfToken)
         {
             await WriteErrorAsync(context, StatusCodes.Status403Forbidden, ApiErrorCodes.CsrfFailed,
@@ -99,6 +118,61 @@ public static partial class ApiEndpoints
             await WriteErrorAsync(context, StatusCodes.Status500InternalServerError, ApiErrorCodes.Internal, ex.Message).ConfigureAwait(false);
         }
     });
+
+    private static bool IsRoute(HttpContext context, string method, string path) =>
+        string.Equals(context.Request.Method, method, StringComparison.OrdinalIgnoreCase)
+        && string.Equals(context.Request.Path.Value?.TrimEnd('/'), BuildInfo.ApiPrefix + path, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>The sign-in endpoints, open without a session (<c>/auth/password</c> checks the caller itself).</summary>
+    private static bool IsAuthRoute(HttpContext context) =>
+        IsRoute(context, "GET", "/auth/session") || IsRoute(context, "POST", "/auth/login")
+        || IsRoute(context, "POST", "/auth/logout") || IsRoute(context, "POST", "/auth/password");
+
+    /// <summary>
+    /// Why the TCP peer is refused (Auth:PeerCheck), or null: a process in a desk session; or a loopback peer whose
+    /// process cannot be found, unless the request carries a credential only the admin pipe hands out (the tray, the CLI).
+    /// </summary>
+    private static string? PeerProblem(HttpContext context, AuthService auth)
+    {
+        if (!context.RequestServices.GetRequiredService<Microsoft.Extensions.Options.IOptions<AuthOptions>>().Value.PeerCheck)
+        {
+            return null;
+        }
+
+        var peer = context.RequestServices.GetRequiredService<IPeerInspector>().PeerSession(context);
+        return peer.Kind switch
+        {
+            PeerLookupKind.Found when context.RequestServices.GetRequiredService<DeskSupervisor>().IsDeskSession(peer.Session) =>
+                "requests from a desk session are not accepted",
+            PeerLookupKind.Failed when !auth.HasPipeCredential(context) => "the calling process could not be identified",
+            _ => null,
+        };
+    }
+
+    /// <summary>The key login attempts are counted under: the caller's session when known, else its address.</summary>
+    private static string PeerKey(HttpContext context)
+    {
+        var peer = context.RequestServices.GetRequiredService<IPeerInspector>().PeerSession(context);
+        return peer.Kind == PeerLookupKind.Found ? $"session:{peer.Session}" : $"ip:{context.Connection.RemoteIpAddress}";
+    }
+
+    /// <summary>
+    /// Checks a password through <see cref="LoginThrottle"/>: 429 while the caller is locked out or already has a check
+    /// running; the outcome is counted.
+    /// </summary>
+    private static async Task<bool> VerifyThrottledAsync(HttpContext context, AuthService auth, LoginThrottle throttle, string? password)
+    {
+        var attempt = await throttle.AttemptAsync(PeerKey(context), () => auth.Verify(password), context.RequestAborted).ConfigureAwait(false);
+        if (attempt.Outcome == LoginOutcome.Throttled)
+        {
+            var seconds = Math.Max(1, (int)Math.Ceiling(attempt.RetryAfter.TotalSeconds));
+            context.Response.Headers.RetryAfter = seconds.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            throw new ApiException(StatusCodes.Status429TooManyRequests, ApiErrorCodes.TooManyAttempts,
+                $"too many password attempts; try again in {seconds} s");
+        }
+
+        return attempt.Outcome == LoginOutcome.Ok;
+    }
 
     /// <summary>
     /// Why a state-changing request is refused as cross-origin, or null: <c>Sec-Fetch-Site: cross-site</c>, or an
@@ -158,12 +232,12 @@ public static partial class ApiEndpoints
         // ---- auth
         api.MapGet("/auth/session", (HttpContext context, AuthService auth) =>
         {
+            // setupRequired: no admin password yet (only the tray, the CLI or an elevated prompt can manage the host).
             var session = auth.Current(context);
-            var setupRequired = !auth.HasPassword;
-            return Results.Json(new AuthSessionDto(setupRequired, session is not null || setupRequired, session?.CsrfToken), Ctx.AuthSessionDto);
+            return Results.Json(new AuthSessionDto(!auth.HasPassword, auth.IsAdmin(context), session?.CsrfToken), Ctx.AuthSessionDto);
         });
 
-        api.MapPost("/auth/login", async (HttpContext context, AuthService auth) =>
+        api.MapPost("/auth/login", async (HttpContext context, AuthService auth, LoginThrottle throttle) =>
         {
             var body = await ReadBodyAsync(context.Request, Ctx.LoginRequest).ConfigureAwait(false);
             if (!auth.HasPassword)
@@ -171,7 +245,7 @@ public static partial class ApiEndpoints
                 throw ApiException.Conflict(ApiErrorCodes.InvalidState, "no admin password is set yet; use POST /auth/password");
             }
 
-            if (!auth.Verify(body.Password))
+            if (!await VerifyThrottledAsync(context, auth, throttle, body.Password).ConfigureAwait(false))
             {
                 throw new ApiException(StatusCodes.Status401Unauthorized, ApiErrorCodes.InvalidPassword, "wrong password");
             }
@@ -185,7 +259,7 @@ public static partial class ApiEndpoints
             return Results.NoContent();
         });
 
-        api.MapPost("/auth/password", async (HttpContext context, AuthService auth) =>
+        api.MapPost("/auth/password", async (HttpContext context, AuthService auth, LoginThrottle throttle) =>
         {
             var body = await ReadBodyAsync(context.Request, Ctx.PasswordRequest).ConfigureAwait(false);
             if (body.NewPassword is null || body.NewPassword.Length < AuthService.MinPasswordLength)
@@ -193,7 +267,14 @@ public static partial class ApiEndpoints
                 throw ApiException.Validation($"newPassword: must be at least {AuthService.MinPasswordLength} characters");
             }
 
-            if (auth.HasPassword && !auth.Verify(body.CurrentPassword))
+            if (!auth.HasPassword && !auth.IsAdmin(context))
+            {
+                // Otherwise anybody on this PC (a desk user) could set the first password and take the host over.
+                throw new ApiException(StatusCodes.Status401Unauthorized, ApiErrorCodes.Unauthorized,
+                    "the first admin password can only be set from the tray, the CLI or an elevated prompt");
+            }
+
+            if (auth.HasPassword && !await VerifyThrottledAsync(context, auth, throttle, body.CurrentPassword).ConfigureAwait(false))
             {
                 throw new ApiException(StatusCodes.Status401Unauthorized, ApiErrorCodes.InvalidPassword, "currentPassword is wrong");
             }
@@ -206,7 +287,8 @@ public static partial class ApiEndpoints
         // ---- host settings (the "host" object of config.json)
         api.MapGet("/host", (ConfigService config) => Results.Json(config.Snapshot().Host, Ctx.HostConfig));
 
-        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, IDeskPlatform platform, ILoggerFactory loggers) =>
+        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, IDeskPlatform platform, SleepGuard sleepGuard,
+            ILoggerFactory loggers) =>
         {
             var host = await ReadBodyAsync(request, Ctx.HostConfig).ConfigureAwait(false);
             var before = config.Snapshot().Host;
@@ -233,6 +315,7 @@ public static partial class ApiEndpoints
                 }
             }
 
+            sleepGuard.Refresh();
             if (saved.LanAccess != before.LanAccess)
             {
                 await firewall.SetWebUiRuleEnabledAsync(saved.LanAccess).ConfigureAwait(false);
@@ -339,7 +422,8 @@ public static partial class ApiEndpoints
             return Results.File(buffer.ToArray(), "application/zip", name);
         });
 
-        api.MapPost("/config/import", async (HttpRequest request, DeskSupervisor s, ConfigService config, IFirewallRule firewall) =>
+        api.MapPost("/config/import", async (HttpRequest request, DeskSupervisor s, ConfigService config, IFirewallRule firewall,
+            SleepGuard sleepGuard) =>
         {
             var lanBefore = config.Snapshot().Host.LanAccess;
             var bytes = await ReadUploadAsync(request).ConfigureAwait(false);
@@ -359,6 +443,7 @@ public static partial class ApiEndpoints
 
             var parsed = ConfigStore.Parse(json);
             var desks = s.Import(parsed.Config).ToList();
+            sleepGuard.Refresh();
             if (parsed.Config.Host.LanAccess != lanBefore)
             {
                 await firewall.SetWebUiRuleEnabledAsync(parsed.Config.Host.LanAccess).ConfigureAwait(false);
@@ -373,6 +458,12 @@ public static partial class ApiEndpoints
             if (!context.WebSockets.IsWebSocketRequest)
             {
                 throw ApiException.BadRequest("expected a WebSocket upgrade");
+            }
+
+            // Cross-site WebSocket hijacking: another site's page may open the socket too.
+            if (CrossOriginProblem(context.Request) is { } crossOrigin)
+            {
+                throw new ApiException(StatusCodes.Status403Forbidden, ApiErrorCodes.Forbidden, crossOrigin);
             }
 
             using var socket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);

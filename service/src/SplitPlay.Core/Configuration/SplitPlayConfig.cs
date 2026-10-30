@@ -40,6 +40,9 @@ public sealed class HostConfig
     public int ComposeIntervalMs { get; set; } = 4;
 
     public string LogLevel { get; set; } = "info";
+
+    /// <summary>Keep the PC from sleeping on its own while a Moonlight client streams from any desk (default true).</summary>
+    public bool KeepAwake { get; set; } = true;
 }
 
 /// <summary>One desk (an isolated Windows session streamed to Moonlight).</summary>
@@ -91,6 +94,17 @@ public sealed class DeskConfig
     /// <summary>The effective <see cref="SteamIsolation"/>.</summary>
     [JsonIgnore]
     public bool SteamIsolationEnabled => SteamIsolation ?? true;
+
+    /// <summary>
+    /// Keep the desk's account off the Windows sign-in screen (<see cref="Platform.LogonListing"/>). Null: on for an
+    /// account SplitPlay created, off for any other; an account SplitPlay did not create is hidden only when this is
+    /// set to true for the desk. A request that leaves it out keeps the current value unless the user changes.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? HideFromLogon { get; set; }
+
+    /// <summary>The effective <see cref="HideFromLogon"/> for an account that SplitPlay did (or did not) create.</summary>
+    public bool HidesFromLogon(bool createdBySplitPlay) => HideFromLogon ?? (createdBySplitPlay && UserManaged != false);
 
     /// <summary>
     /// Extra Sunshine settings passed verbatim to the worker as trailing <c>name=value</c> arguments (after

@@ -31,6 +31,7 @@ public static class ApiErrorCodes
     public const string Unauthorized = "unauthorized";
     public const string InvalidPassword = "invalid_password";
     public const string CsrfFailed = "csrf_failed";
+    public const string TooManyAttempts = "too_many_attempts";
     public const string NotImplemented = "not_implemented";
     public const string ChildUnavailable = "child_unavailable";
 
@@ -138,6 +139,9 @@ public sealed class DeskDto
 
     /// <summary>See <see cref="DeskConfig.SteamIsolation"/>; always set in responses.</summary>
     public bool SteamIsolation { get; set; } = true;
+
+    /// <summary>See <see cref="DeskConfig.HideFromLogon"/>; the effective value, always set in responses.</summary>
+    public bool HideFromLogon { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, string>? WorkerSettings { get; set; }

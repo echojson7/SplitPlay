@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 using System.Diagnostics;
+using System.Text.Json;
 using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.WinForms;
 using Microsoft.Win32;
+using SplitPlay.Core.Ipc;
 
 namespace SplitPlay.Tray;
 
@@ -15,6 +17,12 @@ namespace SplitPlay.Tray;
 /// user may not start it): a service the user stopped later stays stopped until they press Start. When the API answers
 /// but the UI itself does not load (an HTTP error), the page shows the error and waits for Retry.
 /// The WebView stays hidden while the UI loads, so its own error page is never seen.
+/// </para>
+/// <para>
+/// Sign-in: before each load of the UI the tray asks the service's admin pipe for a session and puts it into the
+/// WebView as the HttpOnly session cookie, so the owner never sees a login. The UI posts <c>auth</c> when the API
+/// answers 401 (session expired, service restarted); the tray then gets a new session and reloads. A user the
+/// service refuses (not an administrator at the console) gets the UI's password login.
 /// </para>
 /// </summary>
 internal sealed class DashboardForm : Form
@@ -50,6 +58,12 @@ internal sealed class DashboardForm : Form
     private string? _uiError;
     private string _status = "unknown";
     private DateTime? _runningSince;
+
+    /// <summary>The service's uptime at the last health check: a smaller one means it restarted (sessions are gone).</summary>
+    private long? _uptime;
+    private bool _restarted;
+    private readonly TraySignInGate _signInGate = new(TimeProvider.System);
+    private int _signInRetries;
 
     public DashboardForm(Uri url)
     {
@@ -130,14 +144,81 @@ internal sealed class DashboardForm : Form
         Uri.TryCreate(uri, UriKind.Absolute, out var u) && u.Scheme is "http" or "https"
         && string.Equals(u.Authority, _url.Authority, StringComparison.OrdinalIgnoreCase);
 
-    private void NavigateToUi()
+    private void NavigateToUi() => _ = SafeAsync(NavigateToUiAsync);
+
+    private async Task NavigateToUiAsync()
     {
         _fallback = false;
         _uiError = null;
+        _restarted = false;
         _retry.Stop();
         _misses = 0;
         _monitor.Start();
+        _signInGate.Reset();
+        var signedIn = await SignInAsync();
+        if (signedIn)
+        {
+            _signInGate.Reloaded();
+        }
+
         _webView.CoreWebView2.Navigate(_url.ToString());
+        if (!signedIn)
+        {
+            // The service may still be starting its pipe: keep trying for a minute so that the console owner does not
+            // stay on the password page (the page also asks again through the "auth" message).
+            var run = ++_signInRetries;
+            _ = SafeAsync(() => RetrySignInAsync(run));
+        }
+    }
+
+    private async Task RetrySignInAsync(int run)
+    {
+        for (var attempt = 0; attempt < 12 && run == _signInRetries && !_fallback && !IsDisposed; attempt++)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5));
+            if (run != _signInRetries || _fallback || IsDisposed)
+            {
+                return;
+            }
+
+            if (await SignInAsync())
+            {
+                _signInGate.Reloaded();
+                _webView.CoreWebView2.Reload();
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Gets a session from the admin pipe and stores it as the WebView's session cookie. Without one (pipe refused,
+    /// older service) the UI shows its password login.
+    /// </summary>
+    private async Task<bool> SignInAsync()
+    {
+        AdminToken? session;
+        try
+        {
+            session = await Task.Run(() => AdminPipe.RequestAsync(AdminPipe.Kinds.Session, "tray", TimeSpan.FromSeconds(3)));
+        }
+        catch (AdminPipeException ex)
+        {
+            Debug.WriteLine($"SplitPlay: no session from the admin pipe: {ex.Message}");
+            return false;
+        }
+
+        if (session is null || _webView.CoreWebView2 is not { } core)
+        {
+            return false;
+        }
+
+        var cookie = core.CookieManager.CreateCookie(AdminPipe.SessionCookie, session.Token, _url.Host, "/");
+        cookie.IsHttpOnly = true;
+        cookie.SameSite = CoreWebView2CookieSameSiteKind.Strict;
+        cookie.IsSecure = _url.Scheme == Uri.UriSchemeHttps;
+        cookie.Expires = session.ExpiresAt.LocalDateTime;
+        core.CookieManager.AddOrUpdateCookie(cookie);
+        return true;
     }
 
     private void OnNavigationStarting(object? sender, CoreWebView2NavigationStartingEventArgs e)
@@ -189,6 +270,20 @@ internal sealed class DashboardForm : Form
     {
         if (!_fallback)
         {
+            // The UI is not signed in: sign in again and reload, at most every 10 s. When the API keeps rejecting what the
+            // pipe grants, the gate stops after a few reloads and the page stays on its password login.
+            if (IsUi(e.Source) && e.TryGetWebMessageAsString() == "auth" && _signInGate.ShouldSignIn())
+            {
+                await SafeAsync(async () =>
+                {
+                    if (await SignInAsync())
+                    {
+                        _signInGate.Reloaded();
+                        _webView.CoreWebView2.Reload();
+                    }
+                });
+            }
+
             return;
         }
 
@@ -334,6 +429,13 @@ internal sealed class DashboardForm : Form
             _probing = false;
         }
 
+        // The service restarted between two checks: its sessions are gone, so sign in again and reload the UI.
+        if (_restarted && !_fallback)
+        {
+            NavigateToUi();
+            return;
+        }
+
         // Two misses in a row: the service stopped (for example from the Services panel). No automatic start here.
         if (_misses >= 2 && !_fallback)
         {
@@ -380,7 +482,25 @@ internal sealed class DashboardForm : Form
         try
         {
             using var response = await _http.GetAsync(_health);
-            return response.IsSuccessStatusCode;
+            if (!response.IsSuccessStatusCode)
+            {
+                return false;
+            }
+
+            try
+            {
+                using var health = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                if (health.RootElement.TryGetProperty("uptimeSeconds", out var u) && u.TryGetInt64(out var uptime))
+                {
+                    _restarted |= _uptime is long before && uptime + 5 < before;
+                    _uptime = uptime;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+
+            return true;
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {

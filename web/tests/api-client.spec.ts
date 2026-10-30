@@ -30,8 +30,12 @@ describe('ApiClient', () => {
   })
 
   it('reports setupRequired when no password is set', async () => {
-    const { client } = setup()
-    expect(await client.session()).toEqual({ setupRequired: true, authenticated: false, csrfToken: undefined })
+    // The tray is signed in through the admin pipe; a plain browser is not and cannot set the first password.
+    expect(await setup().client.session()).toEqual({ setupRequired: true, authenticated: true, csrfToken: undefined })
+    const browser = setup({ trusted: false }).client
+    expect(await browser.session()).toEqual({ setupRequired: true, authenticated: false, csrfToken: undefined })
+    await expect(browser.listDesks()).rejects.toMatchObject({ status: 401 })
+    await expect(browser.setPassword('a-long-password')).rejects.toMatchObject({ status: 401 })
   })
 
   it('lists desks with live state', async () => {

@@ -25,6 +25,7 @@ const form = reactive({
   autostart: d.autostart,
   bluetooth: d.disableBluetoothUserService ?? true,
   steam: d.steamIsolation ?? true,
+  hideFromLogon: d.hideFromLogon ?? d.userManaged !== false,
   basePort: String(d.basePort),
   fecPercent: d.profile.fecPercent === undefined ? '' : String(d.profile.fecPercent),
   minFps: d.profile.minFps === undefined ? '' : String(d.profile.minFps),
@@ -80,6 +81,9 @@ function toConfig(): DeskConfig {
   if (form.gpuPriority) profile.gpuPriority = form.gpuPriority
   else delete profile.gpuPriority
   const config: DeskConfig = { ...base, profile }
+  // Sent only when changed: an account SplitPlay did not create is hidden only on the owner's explicit request.
+  if (form.hideFromLogon !== (props.desk.hideFromLogon ?? props.desk.userManaged !== false))
+    config.hideFromLogon = form.hideFromLogon
   if (!props.running) {
     config.name = form.name.trim()
     config.user = form.user.trim()
@@ -249,6 +253,10 @@ const gpuOptions = computed(() => {
       <label class="switch">
         <input v-model="form.steam" type="checkbox" name="steam" :disabled="running" />
         {{ t('adv.steam') }}
+      </label>
+      <label class="switch">
+        <input v-model="form.hideFromLogon" type="checkbox" name="hideFromLogon" />
+        {{ t('adv.hideFromLogon') }}
       </label>
     </div>
 

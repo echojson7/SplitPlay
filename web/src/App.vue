@@ -5,6 +5,7 @@ import { RouterLink, RouterView, useRoute, useRouter } from 'vue-router'
 import { api } from './api/client'
 import AppIcon from './components/AppIcon.vue'
 import BrandMark from './components/BrandMark.vue'
+import { trayHost } from './host'
 import ServicesFlyout from './components/ServicesFlyout.vue'
 import ToastHost from './components/ToastHost.vue'
 import { t } from './i18n'
@@ -15,6 +16,8 @@ const router = useRouter()
 const bare = computed(() => route.meta.public === true)
 const section = computed(() => route.meta.section ?? 'library')
 const s = store.state
+// The tray signs in on its own: a password only matters for other browsers, so it does not ask for one.
+const inTray = trayHost() !== undefined
 
 let healthTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
@@ -69,7 +72,7 @@ async function logout(): Promise<void> {
 
     <main :class="{ page: !bare }">
       <div v-if="!s.online" class="inline-msg strip" role="alert">{{ t('app.offline') }}</div>
-      <div v-else-if="!bare && s.session?.setupRequired" class="inline-msg warn strip">
+      <div v-else-if="!bare && !inTray && s.session?.setupRequired" class="inline-msg warn strip">
         <span class="spacer">{{ t('app.noPassword') }}</span>
         <RouterLink to="/settings" class="btn">{{ t('app.setPassword') }}</RouterLink>
       </div>

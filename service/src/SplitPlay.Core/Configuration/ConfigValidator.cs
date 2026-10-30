@@ -38,6 +38,46 @@ public static partial class ConfigValidator
     /// <summary>Worker settings the service sets itself (from other desk fields); they cannot be overridden.</summary>
     public static readonly IReadOnlySet<string> ReservedWorkerSettings = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "port" };
 
+    /// <summary>
+    /// The Sunshine settings a desk may set (<c>workerSettings</c>), from <c>src/config.cpp</c> at the pinned worker
+    /// commit (worker/upstream.lock): encoder, codec, quality and rate control, frame rate, audio on/off, input and
+    /// gamepads, the name and the log level. Everything else is refused (API 400) and dropped (config.json, worker launch):
+    /// the worker runs as SYSTEM, so settings that run commands, name files, open the network (UPnP, bind address,
+    /// external IP, encryption modes), install drivers, or move capture, display or audio away from the desk's session
+    /// are not the owner's to set per desk. The service's own settings (<see cref="ReservedWorkerSettings"/> and the
+    /// defaults it passes) do not go through this list.
+    /// </summary>
+    public static readonly IReadOnlySet<string> AllowedWorkerSettings = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        // Encoder and codec
+        "encoder", "hevc_mode", "av1_mode", "qp", "min_threads", "sw_preset", "sw_tune",
+        "nvenc_preset", "nvenc_vbv_increase", "nvenc_spatial_aq", "nvenc_twopass", "nvenc_h264_cavlc", "nvenc_split_encode",
+        "nvenc_realtime_hags", "nvenc_latency_over_power",
+        "qsv_preset", "qsv_coder", "qsv_slow_hevc",
+        "amd_quality", "amd_rc", "amd_coder", "amd_usage", "amd_preanalysis", "amd_vbaq", "amd_enforce_hrd",
+
+        // Rate control and frame rate
+        "max_bitrate", "minimum_fps_target", "fec_percentage",
+
+        // Audio
+        "stream_audio",
+
+        // Input and gamepads
+        "gamepad", "ds4_back_as_touchpad_click", "motion_as_ds4", "touchpad_as_ds4",
+        "mouse", "keyboard", "controller", "always_send_scancodes", "high_resolution_scrolling", "native_pen_touch",
+        "keybindings", "key_rightalt_to_key_win", "back_button_timeout", "key_repeat_frequency", "key_repeat_delay",
+
+        // Identity and logging
+        "sunshine_name", "min_log_level",
+    };
+
+    /// <summary>True for a setting a desk's <c>workerSettings</c> may carry (see <see cref="AllowedWorkerSettings"/>).</summary>
+    public static bool IsAllowedWorkerSetting(string name)
+    {
+        ArgumentNullException.ThrowIfNull(name);
+        return AllowedWorkerSettings.Contains(name) && !ReservedWorkerSettings.Contains(name);
+    }
+
     /// <summary>True if <paramref name="id"/> is a valid desk id (<c>[a-z0-9-]{1,32}</c>).</summary>
     public static bool IsValidDeskId(string? id) => id is not null && DeskIdRegex().IsMatch(id);
 
@@ -217,6 +257,10 @@ public static partial class ConfigValidator
                 else if (ReservedWorkerSettings.Contains(name!))
                 {
                     errors.Add(new($"{path}.workerSettings.{name}", "is set by the service (from basePort) and cannot be overridden"));
+                }
+                else if (!IsAllowedWorkerSetting(name!))
+                {
+                    errors.Add(new($"{path}.workerSettings.{name}", $"'{name}' is not a setting a desk may change (see config.md, workerSettings)"));
                 }
 
                 if (value is null || value.Length > 1024 || value.Any(char.IsControl))

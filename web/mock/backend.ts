@@ -36,6 +36,11 @@ export interface MockBackendOptions {
   now?: () => number
   /** Admin password already set (default: none, so `setupRequired` is true). */
   password?: string
+  /**
+   * The caller is the tray (signed in through the admin pipe, no cookie or CSRF token needed). Default: true while no
+   * password is set (then only the tray can manage the host), false otherwise (a plain browser that logs in).
+   */
+  trusted?: boolean
   /** Delay between lifecycle steps after start/stop, in ms. */
   stepMs?: number
 }
@@ -173,6 +178,7 @@ export class MockBackend {
   private readonly stepMs: number
   private readonly startedAt: number
   private password: string | undefined
+  private readonly trusted: boolean
   private readonly sessions = new Map<string, string>() // session id -> csrf token
   private readonly desks = new Map<string, DeskEntry>()
   private host: HostSettings = {
@@ -182,6 +188,7 @@ export class MockBackend {
     basePortStride: 100,
     composeIntervalMs: 4,
     logLevel: 'info',
+    keepAwake: true,
   }
   private clientSeq = 1
   private readonly services = new Map<string, ServiceEntry>()
@@ -190,6 +197,7 @@ export class MockBackend {
     this.now = opts.now ?? (() => Date.now())
     this.stepMs = opts.stepMs ?? 700
     this.password = opts.password
+    this.trusted = opts.trusted ?? opts.password === undefined
     this.startedAt = this.now()
     for (const s of MOCK_SERVICES) this.services.set(s.name.toLowerCase(), { service: clone(s), doneAt: 0 })
     this.seed()
@@ -326,8 +334,8 @@ export class MockBackend {
 
   /** Returns null when the request may pass, otherwise the error response. */
   private authorize(req: MockRequest, path: string): MockResponse | null {
-    if (path === '/health' || path === '/auth/session' || path === '/auth/login') return null
-    if (this.password === undefined) return null // Stage 2: no password yet, loopback passes.
+    if (path === '/health' || path.startsWith('/auth/')) return null
+    if (this.trusted) return null // The tray's own session.
     const auth = req.headers?.['authorization']
     if (auth?.startsWith('Bearer ')) return null // Tray/CLI token; not validated by the mock.
     const sid = parseCookies(req.headers?.['cookie'])[SESSION_COOKIE]
@@ -349,10 +357,11 @@ export class MockBackend {
       return ok({ status: 'ok', version: VERSION, uptimeSeconds: Math.floor((this.now() - this.startedAt) / 1000) })
     }
     if (path === '/auth/session' && method === 'GET') {
-      if (this.password === undefined) return ok({ setupRequired: true, authenticated: false })
+      const setupRequired = this.password === undefined
       const sid = parseCookies(req.headers?.['cookie'])[SESSION_COOKIE]
       const csrf = sid ? this.sessions.get(sid) : undefined
-      return ok(csrf ? { setupRequired: false, authenticated: true, csrfToken: csrf } : { setupRequired: false, authenticated: false })
+      if (csrf) return ok({ setupRequired, authenticated: true, csrfToken: csrf })
+      return ok({ setupRequired, authenticated: this.trusted })
     }
     if (path === '/auth/login' && method === 'POST') {
       const pw = (req.body as { password?: unknown } | undefined)?.password
@@ -369,6 +378,8 @@ export class MockBackend {
       const b = (req.body ?? {}) as { currentPassword?: unknown; newPassword?: unknown }
       if (typeof b.newPassword !== 'string' || b.newPassword.length < 8)
         return err(400, 'weak_password', 'Password must have at least 8 characters')
+      if (this.password === undefined && !this.trusted)
+        return err(401, 'unauthorized', 'The first admin password can only be set from the tray')
       if (this.password !== undefined && b.currentPassword !== this.password)
         return err(403, 'bad_password', 'Current password is wrong')
       const first = this.password === undefined
@@ -406,6 +417,7 @@ export class MockBackend {
       e.desk.state = 'Stopped'
       e.desk.hasPassword = taken.password !== undefined
       e.desk.userManaged = !MOCK_USERS.some((u) => u.name === c.user.toLowerCase() && !u.managed)
+      e.desk.hideFromLogon = c.hideFromLogon ?? e.desk.userManaged
       return ok(clone(e.desk), 201)
     }
 
@@ -430,7 +442,8 @@ export class MockBackend {
           const c = req.body as DeskConfig
           if (c.id !== id) return err(400, 'invalid_config', 'id cannot be changed')
           if (running) {
-            const { profile: _p, ...rest } = c
+            // The sign-in screen entry may change while the desk runs.
+            const { profile: _p, hideFromLogon: _h, ...rest } = c
             const { profile: _q, ...cur } = deskConfigOf(e.desk)
             if (JSON.stringify(rest) !== JSON.stringify(cur))
               return err(409, 'desk_running', 'Only the profile can change while the desk runs')
@@ -441,6 +454,7 @@ export class MockBackend {
           if (taken.password !== undefined) e.desk.hasPassword = true
           else if (userChanged) e.desk.hasPassword = false
           if (userChanged) e.desk.userManaged = !MOCK_USERS.some((u) => u.name === c.user.toLowerCase())
+          if (userChanged && c.hideFromLogon === undefined) e.desk.hideFromLogon = e.desk.userManaged
           // The mock seat cannot resize a running session.
           if (running && resized) e.desk.resolutionPendingRestart = true
           return ok(clone(e.desk))

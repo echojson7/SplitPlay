@@ -11,7 +11,10 @@ namespace SplitPlay.Core.Configuration;
 /// <param name="Config">The validated configuration (already migrated and with defaults applied).</param>
 /// <param name="MigratedFrom">The schema version on disk when it was older than the current one, otherwise null.</param>
 /// <param name="DefaultsApplied">True when missing values (base ports, user names) were filled in.</param>
-public sealed record ConfigLoadResult(SplitPlayConfig Config, int? MigratedFrom, bool DefaultsApplied)
+/// <param name="DroppedWorkerSettings">Desk <c>workerSettings</c> left out because a desk may not set them
+/// (<c>desk-id.name</c>); the file keeps them until it is next saved.</param>
+public sealed record ConfigLoadResult(SplitPlayConfig Config, int? MigratedFrom, bool DefaultsApplied,
+    IReadOnlyList<string>? DroppedWorkerSettings = null)
 {
     /// <summary>True when the file on disk should be rewritten.</summary>
     public bool NeedsRewrite => MigratedFrom is not null || DefaultsApplied;
@@ -55,12 +58,41 @@ public static class ConfigStore
             throw new ConfigException(ConfigException.Codes.Malformed, $"config has a wrong value type: {ex.Message}", inner: ex);
         }
 
+        // A setting a desk may not change (older files, hand edits) is left out rather than failing the whole file.
+        var dropped = DropDisallowedWorkerSettings(config);
+
         // Validate before filling defaults so that an explicit bad value is reported as such.
         ThrowIfInvalid(config);
         var defaultsApplied = ApplyDefaults(config);
         ThrowIfInvalid(config);
 
-        return new ConfigLoadResult(config, original < SplitPlayConfig.CurrentSchemaVersion ? original : null, defaultsApplied);
+        return new ConfigLoadResult(config, original < SplitPlayConfig.CurrentSchemaVersion ? original : null, defaultsApplied,
+            dropped.Count > 0 ? dropped : null);
+    }
+
+    /// <summary>Removes desk worker settings that are well-formed but not allowed; returns them as <c>desk-id.name</c>.</summary>
+    public static List<string> DropDisallowedWorkerSettings(SplitPlayConfig config)
+    {
+        ArgumentNullException.ThrowIfNull(config);
+        var dropped = new List<string>();
+        foreach (var desk in config.Desks)
+        {
+            if (desk.WorkerSettings is not { } settings)
+            {
+                continue;
+            }
+
+            foreach (var name in settings.Keys.ToList())
+            {
+                if (name is not null && !ConfigValidator.IsAllowedWorkerSetting(name) && !ConfigValidator.ReservedWorkerSettings.Contains(name))
+                {
+                    settings.Remove(name);
+                    dropped.Add($"{desk.Id}.{name}");
+                }
+            }
+        }
+
+        return dropped;
     }
 
     /// <summary>

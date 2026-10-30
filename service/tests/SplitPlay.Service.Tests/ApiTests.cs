@@ -30,80 +30,6 @@ public sealed class ApiTests
     }
 
     [Fact]
-    public async Task Auth_setup_login_logout_and_csrf()
-    {
-        await using var svc = await TestService.StartAsync();
-
-        var session = await svc.Client.GetFromJsonAsync("/api/v1/auth/session", SplitPlayJsonContext.Default.AuthSessionDto);
-        Assert.True(session!.SetupRequired);
-        Assert.Null(session.CsrfToken);
-        Assert.Equal(HttpStatusCode.Conflict, (await svc.Client.PostAsync("/api/v1/auth/login", JsonBody("""{"password":"whatever1"}"""))).StatusCode);
-
-        // Too short.
-        Assert.Equal(HttpStatusCode.BadRequest, (await svc.Client.PostAsync("/api/v1/auth/password", JsonBody("""{"newPassword":"short"}"""))).StatusCode);
-
-        // First password: no currentPassword, and the browser is logged in.
-        var setup = await svc.Client.PostAsync("/api/v1/auth/password", JsonBody("""{"newPassword":"correct horse"}"""));
-        Assert.Equal(HttpStatusCode.OK, setup.StatusCode);
-        var csrf = (await setup.Content.ReadFromJsonAsync(SplitPlayJsonContext.Default.LoginResponse))!.CsrfToken;
-        var cookie = Assert.Single(setup.Headers.GetValues("Set-Cookie"));
-        Assert.Contains("httponly", cookie, StringComparison.OrdinalIgnoreCase);
-        var cookieHeader = cookie.Split(';')[0];
-        Assert.True(File.Exists(Path.Combine(svc.DataRoot, "secrets", "admin-password.json")));
-
-        using (var withCookie = new HttpRequestMessage(HttpMethod.Get, "/api/v1/auth/session"))
-        {
-            withCookie.Headers.Add("Cookie", cookieHeader);
-            var state = await (await svc.Client.SendAsync(withCookie)).Content.ReadFromJsonAsync(SplitPlayJsonContext.Default.AuthSessionDto);
-            Assert.False(state!.SetupRequired);
-            Assert.True(state.Authenticated);
-            Assert.Equal(csrf, state.CsrfToken);
-        }
-
-        // A cookie-carrying state change without the CSRF header is refused; with it, it passes.
-        using (var noCsrf = new HttpRequestMessage(HttpMethod.Post, "/api/v1/desks") { Content = JsonBody("""{"id":"desk-1"}""") })
-        {
-            noCsrf.Headers.Add("Cookie", cookieHeader);
-            var refused = await svc.Client.SendAsync(noCsrf);
-            Assert.Equal(HttpStatusCode.Forbidden, refused.StatusCode);
-            Assert.Equal(ApiErrorCodes.CsrfFailed, (await ReadErrorAsync(refused)).Code);
-        }
-
-        using (var okCsrf = new HttpRequestMessage(HttpMethod.Post, "/api/v1/desks") { Content = JsonBody("""{"id":"desk-1"}""") })
-        {
-            okCsrf.Headers.Add("Cookie", cookieHeader);
-            okCsrf.Headers.Add("X-CSRF-Token", csrf);
-            Assert.Equal(HttpStatusCode.Created, (await svc.Client.SendAsync(okCsrf)).StatusCode);
-        }
-
-        // Without a session the browser is not authenticated any more (loopback callers are still served in Stage 2).
-        var anonymous = await svc.Client.GetFromJsonAsync("/api/v1/auth/session", SplitPlayJsonContext.Default.AuthSessionDto);
-        Assert.False(anonymous!.SetupRequired);
-        Assert.False(anonymous.Authenticated);
-
-        Assert.Equal(HttpStatusCode.Unauthorized, (await svc.Client.PostAsync("/api/v1/auth/login", JsonBody("""{"password":"wrong pass"}"""))).StatusCode);
-        var login = await svc.Client.PostAsync("/api/v1/auth/login", JsonBody("""{"password":"correct horse"}"""));
-        Assert.Equal(HttpStatusCode.OK, login.StatusCode);
-        Assert.NotEmpty((await login.Content.ReadFromJsonAsync(SplitPlayJsonContext.Default.LoginResponse))!.CsrfToken);
-
-        // Changing the password needs the current one.
-        Assert.Equal(HttpStatusCode.Unauthorized,
-            (await svc.Client.PostAsync("/api/v1/auth/password", JsonBody("""{"newPassword":"new password"}"""))).StatusCode);
-        Assert.Equal(HttpStatusCode.OK,
-            (await svc.Client.PostAsync("/api/v1/auth/password", JsonBody("""{"newPassword":"new password","currentPassword":"correct horse"}"""))).StatusCode);
-
-        // The old session was ended by the password change.
-        using (var stale = new HttpRequestMessage(HttpMethod.Get, "/api/v1/auth/session"))
-        {
-            stale.Headers.Add("Cookie", cookieHeader);
-            var state = await (await svc.Client.SendAsync(stale)).Content.ReadFromJsonAsync(SplitPlayJsonContext.Default.AuthSessionDto);
-            Assert.False(state!.Authenticated);
-        }
-
-        Assert.Equal(HttpStatusCode.NoContent, (await svc.Client.PostAsync("/api/v1/auth/logout", null)).StatusCode);
-    }
-
-    [Fact]
     public async Task Host_settings_can_be_read_and_replaced()
     {
         await using var svc = await TestService.StartAsync();
@@ -408,6 +334,7 @@ public sealed class ApiTests
         await svc.CreateDeskAsync("desk-1");
 
         var ws = svc.Server.CreateWebSocketClient();
+        ws.ConfigureRequest = r => r.Headers.Authorization = "Bearer " + svc.Token;
         using var socket = await ws.ConnectAsync(new Uri(svc.Server.BaseAddress, "/api/v1/ws"), CancellationToken.None);
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(15));
 

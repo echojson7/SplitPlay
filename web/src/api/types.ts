@@ -53,6 +53,11 @@ export interface DeskConfig {
   disableBluetoothUserService?: boolean
   /** Give the desk user's Steam its own IPC name so it runs next to the console user's Steam (default true). */
   steamIsolation?: boolean
+  /**
+   * Keep the account off the Windows sign-in screen. Responses always carry the effective value (on for accounts
+   * SplitPlay created); a request that leaves it out keeps the current one.
+   */
+  hideFromLogon?: boolean
   /** Extra Sunshine settings passed to the worker verbatim. */
   workerSettings?: Record<string, string>
   /**
@@ -232,6 +237,8 @@ export interface HostSettings {
   basePortStride: number
   composeIntervalMs: number
   logLevel: string
+  /** Keep the PC from sleeping while a client streams (default true; older services leave it out). */
+  keepAwake?: boolean
 }
 
 /** Events pushed over GET /ws. */

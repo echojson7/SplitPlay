@@ -238,6 +238,8 @@ function Set-ServiceEnvironment([string[]]$values) {
 
 $fDenyBefore = (Get-ItemProperty -Path $tsKey -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections
 Write-Host "fDenyTSConnections before: $fDenyBefore"
+$planBefore = "$(& powercfg.exe /getactivescheme)"
+Write-Host "power plan before: $planBefore"
 
 # --------------------------------------------------------------------------- host preparation
 Step 'host prepare --skip-termwrap'
@@ -249,6 +251,7 @@ if ((Get-ItemProperty -Path $tsKey).fDenyTSConnections -ne 0) { throw 'fDenyTSCo
 if ((Get-ItemProperty "$tsKey\WinStations\RDP-Tcp").UserAuthentication -ne 1) { throw 'NLA is not required after prepare' }
 if ((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Services\TermService\Parameters').ServiceDll -ne $dllBefore) { throw 'ServiceDll changed despite --skip-termwrap' }
 if (-not (Test-Path (Join-Path $programData 'host-tuning.json'))) { throw 'host-tuning.json not written' }
+Write-Host "power plan after prepare: $(& powercfg.exe /getactivescheme)"
 
 try {
     # ----------------------------------------------------------------------- console mode
@@ -566,6 +569,8 @@ try {
 }
 $fDenyAfter = (Get-ItemProperty -Path $tsKey -Name fDenyTSConnections -ErrorAction SilentlyContinue).fDenyTSConnections
 if ("$fDenyAfter" -ne "$fDenyBefore") { throw "host revert did not restore fDenyTSConnections ($fDenyBefore -> $fDenyAfter)" }
+$planAfter = "$(& powercfg.exe /getactivescheme)"
+if ($planAfter -ne $planBefore) { throw "host revert did not restore the power plan ($planBefore -> $planAfter)" }
 # After revert the host is no longer prepared: status says so with exit code 1.
 $statusJson = (& $cli host status --json) -join "`n"
 $statusExit = $LASTEXITCODE

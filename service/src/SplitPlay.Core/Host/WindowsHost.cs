@@ -101,6 +101,148 @@ public sealed class WindowsHostRegistry : IUserHive
     }
 }
 
+/// <summary><see cref="IHostPower"/> through powrprof.dll and <c>powercfg.exe</c>.</summary>
+[SupportedOSPlatform("windows")]
+public sealed class WindowsHostPower : IHostPower
+{
+    private const uint AccessScheme = 16; // ACCESS_SCHEME
+    private const uint ErrorNoMoreItems = 259;
+    private const uint ErrorMoreData = 234;
+
+    public Guid? ActiveScheme()
+    {
+        if (PowerGetActiveScheme(IntPtr.Zero, out var pointer) != 0 || pointer == IntPtr.Zero)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Marshal.PtrToStructure<Guid>(pointer);
+        }
+        finally
+        {
+            LocalFree(pointer);
+        }
+    }
+
+    public IReadOnlyList<Guid> Schemes()
+    {
+        var schemes = new List<Guid>();
+        for (uint index = 0; ; index++)
+        {
+            var buffer = new byte[16];
+            var size = (uint)buffer.Length;
+            var error = PowerEnumerate(IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, AccessScheme, index, buffer, ref size);
+            if (error == ErrorNoMoreItems)
+            {
+                return schemes;
+            }
+
+            if (error != 0)
+            {
+                throw new Win32Exception((int)error, "PowerEnumerate");
+            }
+
+            schemes.Add(new Guid(buffer));
+        }
+    }
+
+    public void SetActiveScheme(Guid scheme)
+    {
+        var error = PowerSetActiveScheme(IntPtr.Zero, ref scheme);
+        if (error != 0)
+        {
+            throw new Win32Exception((int)error, $"PowerSetActiveScheme({scheme})");
+        }
+    }
+
+    public string? SchemeName(Guid scheme)
+    {
+        uint size = 0;
+        var error = PowerReadFriendlyName(IntPtr.Zero, ref scheme, IntPtr.Zero, IntPtr.Zero, null, ref size);
+        if ((error != 0 && error != ErrorMoreData) || size < 2)
+        {
+            return null;
+        }
+
+        var buffer = new byte[size];
+        if (PowerReadFriendlyName(IntPtr.Zero, ref scheme, IntPtr.Zero, IntPtr.Zero, buffer, ref size) != 0)
+        {
+            return null;
+        }
+
+        return System.Text.Encoding.Unicode.GetString(buffer).TrimEnd('\0');
+    }
+
+    public void SetPowerThrottling(string executable, bool exempt)
+    {
+        var verb = exempt ? "disable" : "reset";
+        var (exitCode, text) = Powercfg("/powerthrottling", verb, "/path", executable);
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException($"powercfg /powerthrottling {verb} exited with {exitCode}: {text}");
+        }
+    }
+
+    public bool? IsPowerThrottlingDisabled(string executable)
+    {
+        try
+        {
+            // The listed paths are not localised; the words around them are.
+            var (exitCode, text) = Powercfg("/powerthrottling", "list");
+            return exitCode == 0 ? text.Contains(executable, StringComparison.OrdinalIgnoreCase) : null;
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or TimeoutException)
+        {
+            return null;
+        }
+    }
+
+    private static (int ExitCode, string Output) Powercfg(params string[] args)
+    {
+        var start = new System.Diagnostics.ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "powercfg.exe"))
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+        foreach (var arg in args)
+        {
+            start.ArgumentList.Add(arg);
+        }
+
+        using var process = System.Diagnostics.Process.Start(start) ?? throw new InvalidOperationException("powercfg did not start");
+        var output = process.StandardOutput.ReadToEndAsync();
+        var errors = process.StandardError.ReadToEndAsync();
+        if (!process.WaitForExit(15_000))
+        {
+            process.Kill();
+            throw new TimeoutException($"powercfg {string.Join(' ', args)} did not finish within 15 s");
+        }
+
+        return (process.ExitCode, (output.Result + " " + errors.Result).Trim());
+    }
+
+    [DllImport("powrprof.dll")]
+    private static extern uint PowerGetActiveScheme(IntPtr userRootPowerKey, out IntPtr activePolicyGuid);
+
+    [DllImport("powrprof.dll")]
+    private static extern uint PowerSetActiveScheme(IntPtr userRootPowerKey, ref Guid schemeGuid);
+
+    [DllImport("powrprof.dll")]
+    private static extern uint PowerEnumerate(IntPtr rootPowerKey, IntPtr schemeGuid, IntPtr subGroupOfPowerSettingsGuid,
+        uint accessFlags, uint index, byte[] buffer, ref uint bufferSize);
+
+    [DllImport("powrprof.dll")]
+    private static extern uint PowerReadFriendlyName(IntPtr rootPowerKey, ref Guid schemeGuid, IntPtr subGroupOfPowerSettingsGuid,
+        IntPtr powerSettingGuid, byte[]? buffer, ref uint bufferSize);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr LocalFree(IntPtr memory);
+}
+
 /// <summary><see cref="IHostServices"/> through the Service Control Manager.</summary>
 [SupportedOSPlatform("windows")]
 public sealed class WindowsHostServices : IHostServices

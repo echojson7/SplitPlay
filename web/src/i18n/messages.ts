@@ -133,6 +133,7 @@ export const en = {
   'adv.basePort': 'Base port',
   'adv.fec': 'FEC, %',
   'adv.minFps': 'Minimum FPS',
+  'adv.pacing': 'Send rate, Mbit/s',
   'adv.gpuPriority': 'GPU priority',
   'adv.workerSettings': 'Sunshine settings',
   'adv.workerSettingsHint': 'key=value, one per line',
@@ -169,6 +170,7 @@ export const en = {
   'form.err.bitrate': '0.5–1000 Mbit/s',
   'form.err.fec': '0–100 %',
   'form.err.minFps': '1 – desk FPS',
+  'form.err.pacing': '1–100,000 Mbit/s',
   'form.err.passwordRequired': 'Enter the password',
 
   'settings.title': 'Settings',
@@ -378,6 +380,7 @@ export const ru: Partial<Messages> = {
   'adv.basePort': 'Базовый порт',
   'adv.fec': 'FEC, %',
   'adv.minFps': 'Минимальный FPS',
+  'adv.pacing': 'Скорость отправки, Мбит/с',
   'adv.gpuPriority': 'Приоритет GPU',
   'adv.workerSettings': 'Параметры Sunshine',
   'adv.workerSettingsHint': 'ключ=значение, по одному в строке',
@@ -414,6 +417,7 @@ export const ru: Partial<Messages> = {
   'form.err.bitrate': 'От 0,5 до 1000 Мбит/с',
   'form.err.fec': 'От 0 до 100 %',
   'form.err.minFps': 'От 1 до FPS стола',
+  'form.err.pacing': 'От 1 до 100 000 Мбит/с',
   'form.err.passwordRequired': 'Введите пароль',
 
   'settings.title': 'Настройки',

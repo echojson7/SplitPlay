@@ -346,7 +346,11 @@ internal sealed class DeskRuntime
         return dto;
     }
 
-    /// <summary>Converts the configuration profile to the pipe's snake_case profile object.</summary>
+    /// <summary>
+    /// Converts the configuration profile to the pipe's snake_case profile object. The stream settings the worker
+    /// applies (FEC, minimum fps, DPB, pacing) are always sent, with the service defaults where the desk sets none, so
+    /// that clearing a value of a running desk restores the default instead of keeping the old value.
+    /// </summary>
     public static IpcProfile ToIpcProfile(ProfileConfig p) => new()
     {
         Fps = p.Fps,
@@ -354,10 +358,10 @@ internal sealed class DeskRuntime
         Height = p.Height,
         BitrateKbps = p.BitrateKbps,
         Codec = p.Codec,
-        FecPercent = p.FecPercent,
-        MinFps = p.MinFps,
-        DpbFrames = p.DpbFrames,
-        PacingMbps = p.PacingMbps,
+        FecPercent = p.FecPercent ?? ProfileConfig.DefaultFecPercent,
+        MinFps = p.MinFps ?? Math.Min(ProfileConfig.DefaultMinFps, p.Fps ?? ProfileConfig.DefaultMinFps),
+        DpbFrames = p.DpbFrames ?? ProfileConfig.DefaultDpbFrames,
+        PacingMbps = p.PacingMbps ?? ProfileConfig.DefaultPacingMbps,
         GpuPriority = p.GpuPriority,
         GpuLuid = p.GpuLuid,
         CpuSet = p.CpuSet,

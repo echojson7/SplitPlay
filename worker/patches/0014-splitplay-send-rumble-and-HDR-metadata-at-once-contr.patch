@@ -1,0 +1,396 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Thu, 29 Oct 2026 13:02:00 +0000
+Subject: [PATCH] splitplay: send rumble and HDR metadata at once (control
+ doorbell)
+
+controlBroadcastThread drains the gamepad feedback queue (rumble,
+trigger rumble, LEDs, motion event requests) and the HDR queue once per
+loop and then waits in enet_host_service() for up to 150 ms. Without
+input from the client only Moonlight's 100 ms ping wakes it, so rumble
+reached the client up to ~100 ms (on average ~50 ms) after the game set
+it, and HDR metadata likewise. ENet is not thread-safe, so the threads
+that produce feedback (ViGEm notification callbacks, the encoder thread)
+cannot send it themselves.
+
+New module src/splitplay/doorbell.{h,cpp}: the control thread arms it
+with the control port once its ENet host exists (the bind address, or
+loopback for the wildcard; IPv6 loopback for a dual-stack host) and a
+random 16-byte per-process token. ring(), called right after each
+feedback_queue->raise() in platform/windows/input.cpp and after each HDR
+raise in video.cpp, sends the token to that port once (an atomic flag
+suppresses further datagrams until the control thread has woken; the
+loop clears it before draining, so no wake-up is lost and a lost
+datagram costs at most one upstream cycle). The ENet host's intercept
+callback recognises the token, consumes the datagram and reports an
+event without a peer, which ends enet_host_service(); iterate() returns
+on such an event and the loop drains and sends the queues as upstream
+does, on the control thread. Every other datagram goes to ENet as
+before.
+
+Rumble now leaves the host within the control thread's wake-up time
+(well under 1 ms) instead of up to ~100 ms. One loopback datagram per
+change of rumble or LED state; the loop itself is unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index 89758ee7546078f115551f33028a0924be96b530..1ace173bd7e3729a8ee9c7d68beb7a20d3f61e96 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -175,6 +175,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/stat_trackers.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/control_client.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/control_client.h"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/doorbell.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/doorbell.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
+diff --git a/src/platform/windows/input.cpp b/src/platform/windows/input.cpp
+index af400a16ec4a34337b52aa7950f4906b1f664345..4dbcfa19b8d08b3cefcb55cc060b534af2d0ffd7 100644
+--- a/src/platform/windows/input.cpp
++++ b/src/platform/windows/input.cpp
+@@ -31,6 +31,7 @@
+ #include "src/globals.h"
+ #include "src/logging.h"
+ #include "src/platform/common.h"
++#include "src/splitplay/doorbell.h"
+ 
+ namespace platf {
+   using namespace std::literals;
+@@ -322,6 +323,7 @@ namespace platf {
+         // Request motion events from the client at 100 Hz
+         feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_ACCEL, 100));
+         feedback_queue->raise(gamepad_feedback_msg_t::make_motion_event_state(gamepad.client_relative_index, LI_MOTION_TYPE_GYRO, 100));
++        splitplay::doorbell::ring();  // SplitPlay: send now, not on the next control loop cycle
+ 
+         // We support pointer index 0 and 1
+         gamepad.available_pointers = 0x3;
+@@ -409,6 +411,7 @@ namespace platf {
+               normalizedSmallMotor
+             );
+             gamepad.feedback_queue->raise(msg);
++            splitplay::doorbell::ring();  // SplitPlay: send now, not on the next control loop cycle
+             gamepad.last_rumble = msg;
+           }
+           return;
+@@ -433,6 +436,7 @@ namespace platf {
+             // We have to use the client-relative index when communicating back to the client
+             gamepad_feedback_msg_t msg = gamepad_feedback_msg_t::make_rgb_led(gamepad.client_relative_index, r, g, b);
+             gamepad.feedback_queue->raise(msg);
++            splitplay::doorbell::ring();  // SplitPlay: send now, not on the next control loop cycle
+             gamepad.last_rgb_led = msg;
+           }
+           return;
+diff --git a/src/splitplay/doorbell.cpp b/src/splitplay/doorbell.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..512ed0afec200fe10f0d8cc0a31fdcc3f79c9eac
+--- /dev/null
++++ b/src/splitplay/doorbell.cpp
+@@ -0,0 +1,141 @@
++/**
++ * @file src/splitplay/doorbell.cpp
++ * @brief Wakes the control stream thread for queued feedback (see doorbell.h).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++// standard includes
++#include <array>
++#include <atomic>
++#include <cstring>
++#include <mutex>
++#include <random>
++
++// local includes
++#include "doorbell.h"
++#include "src/logging.h"
++
++#ifdef _WIN32
++  // platform includes
++  #include <winsock2.h>
++  #include <ws2tcpip.h>
++#endif
++
++using namespace std::literals;
++
++namespace splitplay::doorbell {
++  namespace {
++    /// Written by arm() before it sets `armed`; read by ring() under the mutex and by the control thread.
++    std::array<std::uint8_t, 16> token {};
++    std::atomic_bool armed {false};
++    std::atomic_bool rung {false};  ///< A datagram is on its way and the control thread has not drained yet.
++
++#ifdef _WIN32
++    std::mutex socket_mutex;  ///< Guards the socket and the target (ring() runs on any thread).
++    SOCKET socket_handle = INVALID_SOCKET;
++    sockaddr_storage target {};
++    int target_size = 0;
++    std::string target_text;
++
++    /**
++     * @brief The address the ENet host can be reached at: its bind address, or loopback for the wildcard.
++     */
++    void resolve_target(std::uint16_t port, const std::string &bind_address, bool ipv6) {
++      target = {};
++      in_addr v4 {};
++      in6_addr v6 {};
++      if (inet_pton(AF_INET, bind_address.c_str(), &v4) == 1 && v4.s_addr != htonl(INADDR_ANY)) {
++        auto &a = reinterpret_cast<sockaddr_in &>(target);
++        a.sin_family = AF_INET;
++        a.sin_addr = v4;
++        a.sin_port = htons(port);
++        target_size = sizeof(sockaddr_in);
++        target_text = bind_address;
++      } else if (inet_pton(AF_INET6, bind_address.c_str(), &v6) == 1 && std::memcmp(&v6, &in6addr_any, sizeof(v6)) != 0) {
++        auto &a = reinterpret_cast<sockaddr_in6 &>(target);
++        a.sin6_family = AF_INET6;
++        a.sin6_addr = v6;
++        a.sin6_port = htons(port);
++        target_size = sizeof(sockaddr_in6);
++        target_text = '[' + bind_address + ']';
++      } else if (ipv6) {
++        auto &a = reinterpret_cast<sockaddr_in6 &>(target);
++        a.sin6_family = AF_INET6;
++        a.sin6_addr = in6addr_loopback;
++        a.sin6_port = htons(port);
++        target_size = sizeof(sockaddr_in6);
++        target_text = "[::1]";
++      } else {
++        auto &a = reinterpret_cast<sockaddr_in &>(target);
++        a.sin_family = AF_INET;
++        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++        a.sin_port = htons(port);
++        target_size = sizeof(sockaddr_in);
++        target_text = "127.0.0.1";
++      }
++      target_text += ':' + std::to_string(port);
++    }
++#endif
++  }  // namespace
++
++#ifdef _WIN32
++  void arm(std::uint16_t port, const std::string &bind_address, bool ipv6) {
++    std::lock_guard lg {socket_mutex};
++    if (socket_handle != INVALID_SOCKET) {
++      closesocket(socket_handle);
++      socket_handle = INVALID_SOCKET;
++    }
++    resolve_target(port, bind_address, ipv6);
++    socket_handle = ::socket(target.ss_family, SOCK_DGRAM, IPPROTO_UDP);
++    if (socket_handle == INVALID_SOCKET) {
++      BOOST_LOG(warning) << "SplitPlay: no control doorbell [error "sv << WSAGetLastError() << "], rumble waits for the control loop"sv;
++      return;
++    }
++
++    std::random_device random;
++    for (auto &byte : token) {
++      byte = static_cast<std::uint8_t>(random());
++    }
++    rung = false;
++    armed = true;
++    BOOST_LOG(info) << "SplitPlay: rumble and HDR metadata are sent at once (control doorbell to "sv << target_text << ')';
++  }
++
++  void disarm() {
++    armed = false;
++    std::lock_guard lg {socket_mutex};
++    if (socket_handle != INVALID_SOCKET) {
++      closesocket(socket_handle);
++      socket_handle = INVALID_SOCKET;
++    }
++  }
++
++  void ring() {
++    if (!armed.load(std::memory_order_acquire) || rung.exchange(true, std::memory_order_acq_rel)) {
++      return;
++    }
++    std::lock_guard lg {socket_mutex};
++    if (socket_handle == INVALID_SOCKET ||
++        sendto(socket_handle, reinterpret_cast<const char *>(token.data()), static_cast<int>(token.size()), 0, reinterpret_cast<const sockaddr *>(&target), target_size) == SOCKET_ERROR) {
++      // The control loop still drains on its own cycle; the next ring tries again.
++      rung = false;
++    }
++  }
++#else
++  void arm(std::uint16_t, const std::string &, bool) {
++  }
++
++  void disarm() {
++  }
++
++  void ring() {
++  }
++#endif
++
++  void rearm() {
++    rung.store(false, std::memory_order_release);
++  }
++
++  bool is_ring(const void *data, std::size_t size) {
++    return size == token.size() && armed.load(std::memory_order_acquire) && std::memcmp(data, token.data(), size) == 0;
++  }
++}  // namespace splitplay::doorbell
+diff --git a/src/splitplay/doorbell.h b/src/splitplay/doorbell.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..d97c0c03e381bda60e7f979546ca6a242a768d7b
+--- /dev/null
++++ b/src/splitplay/doorbell.h
+@@ -0,0 +1,52 @@
++/**
++ * @file src/splitplay/doorbell.h
++ * @brief Wakes the control stream thread when gamepad feedback (rumble, LEDs, motion requests) or HDR metadata is
++ * queued, so that it goes to the client at once.
++ *
++ * Upstream sends these from controlBroadcastThread, which drains its queues once per loop and otherwise waits in
++ * enet_host_service() for up to 150 ms; without input from the client only Moonlight's 100 ms ping woke it, so rumble
++ * reached the client up to ~100 ms late. ENet is not thread-safe, so the producers cannot send themselves. Instead
++ * they send one small datagram to the control socket over loopback; the ENet intercept recognises it (a random
++ * per-process token), makes enet_host_service() return, and the loop sends the queued messages right away.
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++#pragma once
++
++// standard includes
++#include <cstddef>
++#include <cstdint>
++#include <string>
++
++namespace splitplay::doorbell {
++  /**
++   * @brief Start answering rings. Called by the control thread once its ENet host is bound.
++   *
++   * @param port The control port.
++   * @param bind_address The address the ENet host is bound to; the wildcard address means loopback.
++   * @param ipv6 The ENet host is an IPv6 (dual-stack) socket.
++   */
++  void arm(std::uint16_t port, const std::string &bind_address, bool ipv6);
++
++  /**
++   * @brief Stop answering rings (the control thread is ending).
++   */
++  void disarm();
++
++  /**
++   * @brief Ask the control thread to send what was queued. Any thread; one datagram until the thread has woken.
++   */
++  void ring();
++
++  /**
++   * @brief Called by the control thread before it drains its queues: rings from now on send a new datagram.
++   */
++  void rearm();
++
++  /**
++   * @brief True when a datagram the ENet host received is the doorbell (ENet must then ignore it).
++   *
++   * @param data Datagram payload.
++   * @param size Payload size in bytes.
++   */
++  bool is_ring(const void *data, std::size_t size);
++}  // namespace splitplay::doorbell
+diff --git a/src/stream.cpp b/src/stream.cpp
+index f61f97a87fe6691dc8aa16a2906f20ca74ec3b25..16c76a226706e367a77c9af70d02d58b83b18b71 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -32,6 +32,7 @@ extern "C" {
+ #include "sync.h"
+ #include "system_tray.h"
+ #include "thread_safe.h"
++#include "splitplay/doorbell.h"
+ #include "splitplay/live_stats.h"
+ #include "splitplay/profile.h"
+ #include "splitplay/scheduling.h"
+@@ -715,10 +716,36 @@ namespace stream {
+     }
+   }
+ 
++  /**
++   * @brief SplitPlay: ENet intercept that turns the control doorbell (src/splitplay/doorbell.h) into a wake-up.
++   *
++   * @param host The control server's ENet host; the received datagram is in receivedData.
++   * @param event The event enet_host_service() will return.
++   * @return 1 for the doorbell (consumed, enet_host_service() returns), 0 for an ENet datagram.
++   */
++  static int ENET_CALLBACK splitplay_doorbell_intercept(ENetHost *host, ENetEvent *event) {
++    if (!splitplay::doorbell::is_ring(host->receivedData, host->receivedDataLength)) {
++      return 0;
++    }
++    if (event) {
++      // Any event type but NONE ends enet_host_service(); iterate() recognises this one by its missing peer.
++      event->type = ENET_EVENT_TYPE_RECEIVE;
++      event->peer = nullptr;
++      event->packet = nullptr;
++      event->data = 0;
++    }
++    return 1;
++  }
++
+   void control_server_t::iterate(std::chrono::milliseconds timeout) {
+     ENetEvent event;
+     auto res = enet_host_service(_host.get(), &event, (enet_uint32) timeout.count());
+ 
++    if (res > 0 && !event.peer) {
++      // SplitPlay: the control doorbell; the caller's loop sends the queued feedback now
++      return;
++    }
++
+     if (res > 0) {
+       auto session = get_session(event.peer, event.data);
+       if (!session) {
+@@ -1263,6 +1290,17 @@ namespace stream {
+     platf::adjust_thread_priority(platf::thread_priority_e::critical);
+     splitplay::scheduling::mmcss_t mmcss {"stream::controlBroadcast (input receive)"};  // SplitPlay
+ 
++    // SplitPlay: gamepad feedback and HDR metadata ring the doorbell, which ends the wait in iterate() below, so they
++    // go out at once instead of on the next ping or input packet (up to ~100 ms later)
++    server->_host.get()->intercept = splitplay_doorbell_intercept;
++    {
++      const auto af = net::af_from_enum_string(config::sunshine.address_family);
++      splitplay::doorbell::arm(net::map_port(CONTROL_PORT), net::get_bind_address(af), af != net::IPV4);
++    }
++    auto doorbell_guard = util::fail_guard([]() {
++      splitplay::doorbell::disarm();
++    });
++
+     // Check for both the full shutdown event and the shutdown event for this
+     // broadcast to ensure we can inform connected clients of our graceful
+     // termination when we shut down.
+@@ -1271,6 +1309,9 @@ namespace stream {
+     while (!shutdown_event->peek() && !broadcast_shutdown_event->peek()) {
+       bool has_session_awaiting_peer = false;
+ 
++      // SplitPlay: whatever is queued from here on is drained below or rings again
++      splitplay::doorbell::rearm();
++
+       {
+         auto lg = server->_sessions.lock();
+ 
+diff --git a/src/video.cpp b/src/video.cpp
+index 99f7909e0c817692a4e4842dc0013a43e00e71ff..ceac8891ef6b5e04545623c1e7d0884a13fb9919 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -32,6 +32,7 @@ extern "C" {
+ #include "logging.h"
+ #include "nvenc/nvenc_encoder.h"
+ #include "platform/common.h"
++#include "splitplay/doorbell.h"
+ #include "splitplay/profile.h"
+ #include "splitplay/scheduling.h"
+ #include "sync.h"
+@@ -2618,6 +2619,7 @@ namespace video {
+       }
+     }
+     ctx.hdr_events->raise(std::move(hdr_info));
++    splitplay::doorbell::ring();  // SplitPlay: send now, not on the next control loop cycle
+ 
+     auto session = make_encode_session(disp, encoder, ctx.config, img.width, img.height, std::move(encode_device));
+     if (!session) {
+@@ -2905,6 +2907,7 @@ namespace video {
+         }
+       }
+       hdr_event->raise(std::move(hdr_info));
++      splitplay::doorbell::ring();  // SplitPlay: send now, not on the next control loop cycle
+ 
+       encode_run(
+         frame_nr,

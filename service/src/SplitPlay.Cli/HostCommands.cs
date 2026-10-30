@@ -25,10 +25,11 @@ internal static class HostCommands
             TermWrapDirectory = Path.GetFullPath(args.Option("termwrap-dir") ?? DefaultTermWrapDirectory()),
             SkipTermWrap = args.Flag("skip-termwrap"),
             ComposeIntervalMs = args.IntOption("compose-interval-ms") ?? ComposeIntervalFromConfig(root),
+            WorkerExecutable = Path.GetFullPath(args.Option("worker-exe") ?? DefaultWorkerExecutable()),
         };
         args.EnsureNoUnknownOptions();
 
-        var tuner = new HostTuner(new WindowsHostRegistry(), new WindowsHostServices(), HostTuner.StateFileIn(root));
+        var tuner = new HostTuner(new WindowsHostRegistry(), new WindowsHostServices(), HostTuner.StateFileIn(root), power: new WindowsHostPower());
         try
         {
             switch (verb)
@@ -52,6 +53,9 @@ internal static class HostCommands
 
     /// <summary><c>{app}\termwrap</c> for the installed CLI (<c>{app}\service\splitplay.exe</c>).</summary>
     private static string DefaultTermWrapDirectory() => Path.Combine(AppContext.BaseDirectory, "..", "termwrap");
+
+    /// <summary><c>{app}\worker\splitplay-worker.exe</c> for the installed CLI.</summary>
+    private static string DefaultWorkerExecutable() => Path.Combine(AppContext.BaseDirectory, "..", "worker", "splitplay-worker.exe");
 
     private static int ComposeIntervalFromConfig(string root)
     {
@@ -112,7 +116,10 @@ internal static class HostCommands
             {
                 var current = item.Current?.ToString() ?? "(missing)";
                 var desired = item.Desired is null ? "" : $" (want {item.Desired})";
-                Console.WriteLine($"  {item.State,-8} {item.Id,-24} {current}{(item.IsOk && item.State != HostItemStatus.Skipped ? "" : desired)}");
+                var shown = item.State is HostItemStatus.Ok or HostItemStatus.NotApplicable ? "" : desired;
+                var tuning = item.Optional && item.State == HostItemStatus.Differs ? " (performance only, desks still start)" : "";
+                var name = item.Id == "PowerThrottling" ? $"{item.Id} {item.Name}" : item.Id;
+                Console.WriteLine($"  {item.State,-8} {name,-24} {current}{shown}{tuning}");
             }
 
             foreach (var note in status.Notes)

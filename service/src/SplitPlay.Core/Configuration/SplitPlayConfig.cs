@@ -103,6 +103,25 @@ public sealed class DeskConfig
 /// <summary>Streaming profile. All fields optional; absent means "keep current / use default".</summary>
 public sealed class ProfileConfig
 {
+    /// <summary>FEC share the service sends when <see cref="FecPercent"/> is not set (Sunshine's default).</summary>
+    public const int DefaultFecPercent = 20;
+
+    /// <summary>
+    /// Idle frame rate the service sends when <see cref="MinFps"/> is not set (capped at the desk's fps): a desktop
+    /// that does not change is re-encoded 20 times a second instead of at half the stream rate (Sunshine's rule).
+    /// </summary>
+    public const int DefaultMinFps = 20;
+
+    /// <summary>
+    /// What the service sends when <see cref="DpbFrames"/> is not set: 0, the codec's default DPB (Sunshine: 5 reference
+    /// frames, AV1 8). A larger DPB is opt-in: more references than the codec level allows for the resolution make
+    /// NVENC signal a higher level, which a client decoder may refuse, and each costs VRAM.
+    /// </summary>
+    public const int DefaultDpbFrames = 0;
+
+    /// <summary>Send pacing per stream the service sends when <see cref="PacingMbps"/> is not set (Sunshine's fixed 800).</summary>
+    public const int DefaultPacingMbps = 800;
+
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Fps { get; set; }
 

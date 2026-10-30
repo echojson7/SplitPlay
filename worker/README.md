@@ -42,6 +42,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0013` stream profile | `welcome` and `set_profile` apply the Profile's `fec_percent`, `min_fps`, `pacing_mbps` (live) and `dpb_frames` (next stream, opt-in); pacing replaces upstream's fixed 800 Mbit/s, the DPB upstream's 5 (H.264/HEVC) or 8 (AV1) reference frames. See *Stream profile* below |
 | `0014` instant feedback | rumble, LED and motion requests and HDR metadata are sent as soon as they are queued: the producers ring a loopback "doorbell" datagram that the control thread's ENet intercept turns into a wake-up, instead of waiting up to ~100 ms for the next control loop cycle |
 | `0015` NVIDIA profile | the "prefer maximum performance" application profile (`PREFERRED_PSTATE`) is bound to the running executable's file name (`splitplay-worker.exe`) under the profile name "SplitPlay worker" instead of upstream's `sunshine.exe`/"SunshineStream"; `--restore-nvprefs-undo` also deletes that profile. See *NVIDIA driver settings* below |
+| `0016` input thread | input is injected on its own thread (`input_pool`, one thread, MMCSS "Games") instead of Sunshine's shared task-pool thread; key repeat, gamepads, rumble/LED callbacks and touch/pen repeat run there too, so ordering and the input state's synchronisation are upstream's. See *Scheduling* below |
 
 ### Changing a patch or adding one
 
@@ -252,7 +253,7 @@ log); the encoder line in the log shows `dpb=N`. The profile wins over `fec_perc
 `name=value`. `fps`, size, bitrate and codec stay Moonlight's choice; `gpu_priority`, `gpu_luid` and `cpu_set` are
 not applied yet.
 
-### Scheduling (patch 0012)
+### Scheduling (patches 0012, 0016)
 
 At start-up the worker logs one line, for example `SplitPlay: scheduling: power throttling off (execution speed,
 timer resolution), priority class above normal (high while streaming), MMCSS "Games" for ...`, and one
@@ -267,18 +268,24 @@ timer resolution), priority class above normal (high while streaming), MMCSS "Ga
   almost nothing, but its heartbeats and the next stream's start-up must not queue behind other desks' games.
   HIGH keeps the threads that are not under MMCSS (audio send, RTSP) above every normal-class game thread except
   TIME_CRITICAL. REALTIME is never used.
-- **MMCSS.** `video::capture`, the encode thread, `video::capture_sync`, `stream::videoBroadcast` and
-  `stream::controlBroadcast` (receives input) join the task "Games" with `AVRT_PRIORITY_NORMAL`. The default task
-  definitions put "Games" (task priority 2) and "Audio" (task priority 6) in scheduling category Medium (real-time
-  range 16-22, above every normal-class game thread, at most 15) and "Pro Audio" (Sunshine's audio capture) in High.
+- **MMCSS.** `video::capture`, the encode thread, `video::capture_sync`, `stream::videoBroadcast`,
+  `stream::controlBroadcast` (receives input) and `input::inject` (patch 0016) join the task "Games" with
+  `AVRT_PRIORITY_NORMAL`. The default task definitions put "Games" (task priority 2) and "Audio" (task priority 6)
+  in scheduling category Medium (real-time range 16-22, above every normal-class game thread, at most 15) and "Pro Audio" (Sunshine's audio capture) in High.
   "Games" at normal priority is the most modest registration that lifts these threads above the games and asks for
   nothing above the audio engine's "Audio" task. MMCSS keeps a share of each period for other threads
   (`SystemResponsiveness`, 20 %): a registered thread that overruns it drops to the Exhausted category (1-7), below
   normal threads, until the next period, so a busy worker cannot starve the PC; whether that ever happens with
   several desks is a lab item.
-- **Input injection** runs on Sunshine's single task-pool thread, which also runs every other pool task, so it is not
-  registered with MMCSS: it runs at the process class (HIGH while streaming, base 13, above normal-class game threads
-  except TIME_CRITICAL ones). A dedicated input thread under MMCSS is a follow-up.
+- **Input injection** (patch 0016) has a thread of its own, `input::inject`, registered with MMCSS "Games" at normal
+  priority like the threads above. Upstream injects on its single task-pool thread, which also runs every other pool
+  task, so input could wait behind unrelated work and the thread could not be registered. The control thread queues
+  each input packet as before; the input thread takes them in order (upstream's batching of mouse moves and the like is
+  unchanged). Everything else that touches the injected input state runs on the same thread, so it needs no locks
+  beyond upstream's: key repeat, the delayed left button, the Home emulation, `input::reset()` at the end of a stream,
+  virtual gamepad allocation and removal, the ViGEm rumble and LED callbacks (which ring the doorbell of patch 0014),
+  the DualShock 4 report timer, touch and pen repeat. At shutdown the thread runs what is still queued and ends before
+  the input backend is released.
 
 ### NVIDIA driver settings (patch 0015)
 

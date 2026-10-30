@@ -14,6 +14,12 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
   changes state (POST, PUT, DELETE) must send `X-CSRF-Token`, otherwise it gets 403 `csrf_failed`.
 - Stage 2 skeleton: the admin token pipe is not implemented yet, so loopback requests are served without a session.
   The service listens on loopback only until LAN access (HTTPS) is implemented.
+- Browser checks in front of every `/api` route (403 `forbidden`):
+  - a POST, PUT or DELETE with `Sec-Fetch-Site: cross-site`, or with an `Origin` that is not the request's own
+    scheme://host:port (`Origin: null` included), is refused: another site's page could otherwise post a form here,
+    and it carries no `SameSite=Strict` cookie, so the CSRF check would not apply. Requests without these headers (CLI,
+    scripts) and the UI itself (same origin, on loopback or on the LAN host) pass;
+  - on a loopback connection the `Host` header must be `localhost` or an IP address (DNS rebinding).
 
 | Request | Body | Answer |
 |---|---|---|
@@ -32,6 +38,8 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 | GET, PUT | `/host` | read or replace the `host` object of config.md; validated and saved; a `webPort` change applies after a service restart; a `lanAccess` change toggles the firewall rule `SplitPlay Web UI` |
 | GET | `/host/users` | local accounts that can be a desk user: `[{"name","fullName","isAdmin","isConsoleUser","createdBySplitPlay"}]` (built-in accounts left out) |
 | GET | `/host/network` | LAN addresses of the host for Moonlight: `{"addresses":["192.168.1.20"]}`: IPv4 addresses of interfaces that are up, without loopback and link-local (169.254/16), those of interfaces with a default gateway first; empty when none. A desk is added in Moonlight as `<address>:<basePort>` |
+| GET | `/host/services` | the Windows services SplitPlay depends on, see [Host services](#host-services) |
+| POST | `/host/services/{name}/start`, `/host/services/{name}/stop` | start or stop one of those services; 202 with its entry. `{name}` outside the list → 404 `not_found`; a service that cannot be started or stopped now (already running, disabled, not installed, a driver) → 409 `invalid_state`; the SCM refusing → 500 `internal` with its message |
 | GET | `/desks` | array of desks with live state |
 | POST | `/desks` | create a desk (body = desk config, see config.md, plus optional `password`: the Windows password of `user`, verified when the account exists, used for a new account otherwise) |
 | GET | `/desks/{id}` | one desk with live state |
@@ -46,6 +54,37 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 | GET | `/config/export` | zip download (secrets excluded unless `?includeSecrets=true&password=...`) |
 | POST | `/config/import` | zip upload |
 | GET | `/ws` | WebSocket: a `desk` event per desk on connect and on every change (including `stream`), `metrics` every 2 s |
+
+## Host services
+
+`GET /host/services` returns an array, in this order, of the services desks rely on:
+
+| `name` | Why |
+|---|---|
+| `SplitPlay` | this service |
+| `TermService` | Remote Desktop Services: every desk is an RDP session |
+| `UmRdpService` | Remote Desktop UserMode Port Redirector (UmWrap patches it on Home and Server editions) |
+| `ViGEmBus` | gamepad driver (kernel driver service; often `missing`) |
+| `Audiosrv` | Windows Audio |
+| `Steam Client Service` | only listed when installed |
+
+```json
+{"name":"TermService","displayName":"Remote Desktop Services","status":"running","startType":"manual","canStart":false,"canStop":true}
+```
+
+- `displayName` is the Windows display name (localized by Windows; the English name when the service is missing).
+  The UI shows its own label for each `name`.
+- `status`: `running`, `stopped`, `starting`, `stopping` or `missing` (not installed).
+- `startType`: `automatic`, `automaticDelayed`, `manual`, `disabled`, `boot` or `system`; `null` when missing.
+- `canStart`: stopped, not disabled and not a driver. `canStop`: running, accepts a stop control and not a driver.
+- Only these names can be started or stopped; names are matched case-insensitively and URL-encoded
+  (`Steam%20Client%20Service`).
+- Stop answers 202 at once with `status: "stopping"`; the stop runs in the background and stops running dependents
+  first (stopping `TermService` stops `UmRdpService` and ends every desk session, so the UI asks first).
+- Stopping `SplitPlay` answers 202, then stops this service through the SCM after 0.5 s: the web UI goes away until
+  the service is started again (the tray app offers that).
+- When the service starts it also starts `TermService` and `UmRdpService` if they are stopped and not disabled
+  (logged; a failure does not stop start-up).
 
 ## Desk object (response)
 
@@ -129,7 +168,7 @@ The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}`
 | `validation_failed` | 400 | the body breaks a rule of config.md |
 | `unauthorized` | 401 | no valid session |
 | `invalid_password` | 401 | wrong admin password |
-| `csrf_failed`, `forbidden` | 403 | missing or wrong `X-CSRF-Token`; not allowed |
+| `csrf_failed`, `forbidden` | 403 | missing or wrong `X-CSRF-Token`; not allowed (non-loopback caller, cross-origin state change, unexpected `Host`) |
 | `not_found` | 404 | unknown desk or client |
 | `already_exists` | 409 | desk id, user or base port taken |
 | `console_user` | 409 | the desk's user is the one signed in at the console |

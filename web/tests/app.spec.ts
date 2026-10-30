@@ -48,6 +48,8 @@ describe('app smoke', () => {
     expect(store.state.session).toMatchObject({ authenticated: true, setupRequired: false })
 
     expect(w.find('nav.nav').text()).toContain('Столы')
+    // The Services button sits on the app name row of the nav pane.
+    expect(w.find('.navpane .approw [data-services-button]').text()).toBe('Службы')
     expect(w.findAll('article[data-desk]')).toHaveLength(2)
     expect(w.text()).toContain('Аня')
 

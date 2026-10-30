@@ -25,7 +25,8 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
   `credentials\`, `apps.json`, `sunshine.log`); trailing `name=value` pairs are Sunshine settings and override `sunshine.conf`.
   The worker resolves `assets\` next to its executable. See `worker/README.md`.
 - The service passes the worker's recommended settings by default (`sunshine_name=<HOST>-<id>`, `min_log_level=info`,
-  `nvenc_preset=1`, `nvenc_twopass=disabled`, `hevc_mode=0`, `av1_mode=0`); a desk's `workerSettings` (config.md)
+  `nvenc_preset=1`, `nvenc_twopass=disabled`, `hevc_mode=0`, `av1_mode=0`, `gamepad=ds4`: XInput gives an emulated
+  Xbox 360 pad's buttons only to the console's foreground window); a desk's `workerSettings` (config.md)
   override or extend them. `port` is always set by the service.
 - The worker runs as SYSTEM with `TokenSessionId` = the desk session, `lpDesktop` `winsta0\default`,
   `CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT`, in the desk's job object. Diagnostics only:

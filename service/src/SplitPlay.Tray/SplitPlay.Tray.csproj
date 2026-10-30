@@ -19,6 +19,11 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="FallbackPage.html" LogicalName="SplitPlay.Tray.FallbackPage.html" />
   </ItemGroup>
 
   <ItemGroup>

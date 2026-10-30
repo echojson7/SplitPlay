@@ -107,7 +107,10 @@ repository's `LICENSE` and `NOTICE.md` are added by the script.
    nothing is recorded. On Windows Server the step is skipped: the ViGEmBus 1.22.0 MSI has a launch condition that
    refuses 64-bit Windows Server, and on the windows-2022 runner its setup never returned.
 9. Runs `splitplay.exe service install` (only if the service is not registered yet) and starts the service.
-   On upgrade the service is stopped before files are replaced and started again afterwards.
+   On upgrade the service is stopped before files are replaced and started again afterwards. Every install also
+   sets the service's permissions with `sc sdset`: the default ACEs plus start (`RP`) for interactive users (`IU`,
+   console and RDP sign-ins), so that the tray can start a stopped service without elevation; stop, reconfigure
+   and delete stay with SYSTEM and Administrators.
 10. Start menu: `SplitPlay` (tray) and `SplitPlay Web UI` (http://127.0.0.1:38299/). Optional task
    (on by default): start the tray at sign-in for all users (`HKLM\...\Run\SplitPlayTray`, value
    `"...\SplitPlay.Tray.exe" --autostart`). Started from the Start menu or the final "Launch SplitPlay" checkbox,
@@ -153,7 +156,7 @@ compiled with the .NET Framework `csc.exe` that ships with Windows; its `service
 idle `SplitPlay` service), checks that ISCC refuses an empty stage, compiles the installer and runs
 [`ci/Test-Installer.ps1`](ci/Test-Installer.ps1): silent install, upgrade over a running service, uninstall
 keeping data, reinstall without the TermWrap component and uninstall with `/PurgeData=1`, checking files, service
-state, firewall rules (including removal of per-desk rules), ProgramData ACL, shortcuts, the `--autostart` Run value,
+state and its DACL (users may start, not stop), firewall rules (including removal of per-desk rules), ProgramData ACL, shortcuts, the `--autostart` Run value,
 that setup ran `host prepare --skip-termwrap` before starting the service and the uninstaller ran `host revert` (the
 stub records its calls in `%ProgramData%\SplitPlay-ci-stub-calls.log`), that setup ran the (stub) ViGEmBus setup with
 the silent switches without recording it as installed, that the uninstaller removes a recorded ViGEmBus product and

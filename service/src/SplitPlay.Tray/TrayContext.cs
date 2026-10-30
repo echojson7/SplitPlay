@@ -30,6 +30,13 @@ internal sealed class TrayContext : ApplicationContext
         // A window handle on the UI thread so that other threads (the "show" signal) can post to it.
         _invoker = new Control();
         _invoker.CreateControl();
+
+        if (visible)
+        {
+            // Sign-in (the HKLM Run entry) or a start by hand: a stopped service is started right away, without a
+            // prompt. Without the permission to start it, the dashboard asks for elevation when it opens.
+            _ = Task.Run(ServiceStarter.TryStart);
+        }
     }
 
     /// <summary>Shows and activates the dashboard; safe from any thread.</summary>

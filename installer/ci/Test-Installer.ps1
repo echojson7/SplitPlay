@@ -248,11 +248,22 @@ Test-Installed 'after install'
 
 # 2. Upgrade in place: the running service must be stopped, files replaced and the service started again.
 Set-Content -Path (Join-Path $data 'config.json') -Value '{"schemaVersion":1}'
-# What an earlier version installed and this one no longer ships: the upgrade must delete it.
-New-Item -ItemType Directory -Force -Path (Join-Path $app 'drivers\idd') | Out-Null
-Set-Content -Path (Join-Path $app 'drivers\idd\SplitPlayIdd.inf') -Value '; left by an earlier version'
-Set-Content -Path (Join-Path $app 'native\splitplay-rdsprov.dll') -Value 'left by an earlier version'
+# What an earlier version installed and this one no longer ships: the upgrade must delete it, and only it.
+$shipped = 'drivers\SplitPlayIdd\SplitPlayIdd.inf', 'drivers\SplitPlayIdd\SplitPlayIdd.dll',
+    'drivers\SplitPlayPad\SplitPlayPad.inf', 'drivers\SplitPlayTestSigning.cer', 'drivers\README.txt',
+    'native\splitplay-rdsprov.dll'
+foreach ($f in $shipped) {
+    New-Item -ItemType Directory -Force -Path (Split-Path (Join-Path $app $f)) | Out-Null
+    Set-Content -Path (Join-Path $app $f) -Value 'left by an earlier version'
+}
+$foreign = Join-Path $app 'drivers\SplitPlayPad\not-ours.txt'
+Set-Content -Path $foreign -Value 'not shipped by SplitPlay'
 Check 'reinstall exit code 0' ((Invoke-Silent $Setup 'reinstall.log' "$common$vigemLater") -eq 0)
+Check 'upgrade deleted the files earlier versions shipped' (
+    $null -eq ($shipped | Where-Object { Test-Path (Join-Path $app $_) }))
+Check 'upgrade deleted the emptied driver folder' (-not (Test-Path (Join-Path $app 'drivers\SplitPlayIdd')))
+Check 'upgrade kept a file it never shipped' (Test-Path $foreign)
+Remove-Item -Recurse -Force (Join-Path $app 'drivers')
 Test-Installed 'after reinstall'
 
 # 3. Uninstall, keeping ProgramData (the silent default).

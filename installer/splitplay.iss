@@ -220,10 +220,23 @@ Filename: "{app}\tray\SplitPlay.Tray.exe"; Description: "{cm:LaunchTray}"; Flags
 
 [InstallDelete]
 ; Earlier versions copied the test-signed driver packages and splitplay-rdsprov to Program Files (never installed or
-; registered); an upgrade removes them.
-Type: filesandordirs; Name: "{app}\drivers"
-Type: files; Name: "{app}\native\splitplay-rdsprov.dll"
-Type: files; Name: "{app}\native\splitplay-rdsprov.pdb"
+; registered). An upgrade removes exactly those files, and a folder only when nothing else is left in it. A first
+; install (no SplitPlay uninstall entry yet) touches nothing.
+Type: files; Name: "{app}\drivers\SplitPlayIdd\SplitPlayIdd.inf"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayIdd\SplitPlayIdd.dll"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayIdd\SplitPlayIdd.cat"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayIdd\SplitPlayIdd.pdb"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayPad\SplitPlayPad.inf"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayPad\SplitPlayPad.dll"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayPad\SplitPlayPad.cat"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayPad\SplitPlayPad.pdb"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayTestSigning.cer"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\README.txt"; Check: UpgradingSplitPlay
+Type: dirifempty; Name: "{app}\drivers\SplitPlayIdd"; Check: UpgradingSplitPlay
+Type: dirifempty; Name: "{app}\drivers\SplitPlayPad"; Check: UpgradingSplitPlay
+Type: dirifempty; Name: "{app}\drivers"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\native\splitplay-rdsprov.dll"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\native\splitplay-rdsprov.pdb"; Check: UpgradingSplitPlay
 
 [UninstallDelete]
 Type: files; Name: "{group}\{cm:WebUiShortcut}.url"
@@ -371,6 +384,13 @@ end;
 function ServiceExists: Boolean;
 begin
   Result := RegKeyExists(HKLM, ServiceKey);
+end;
+
+// SplitPlay was installed before (this AppId's uninstall entry): only then [InstallDelete] removes what it left.
+function UpgradingSplitPlay: Boolean;
+begin
+  Result := RegKeyExists(HKLM64,
+    'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6F1C3B2A-5D4E-4C7B-9A8E-2B1D0F3C5A71}_is1');
 end;
 
 function DataDir: String;

@@ -70,8 +70,8 @@ repository's `LICENSE` and `NOTICE.md` are added by the script.
 4. Installs to `%ProgramFiles%\SplitPlay\{service,tray,native,worker,termwrap}`. TermService keeps
    `TermWrap.dll` loaded, so an upgrade replaces it at the next restart (`restartreplace`). SplitPlay installs no
    drivers of its own and no TermService protocol provider (owner's decision of 2026-10-30, ARCHITECTURE.md §10): the
-   frozen `drivers/` packages and `splitplay-rdsprov` are not shipped, and an upgrade deletes the copies earlier
-   versions left in `{app}\drivers` and `{app}\native` (`[InstallDelete]`).
+   frozen `drivers/` packages and `splitplay-rdsprov` are not shipped, and an upgrade deletes the files earlier
+   versions copied to `{app}\drivers` and `{app}\native`, by name, and the folders only if empty (`[InstallDelete]`).
 5. Creates `%ProgramData%\SplitPlay` (with `desks\` and `logs\`) and replaces its ACL with full control for
    SYSTEM and Administrators only, inherited by everything below.
 6. Adds the firewall rule `SplitPlay Web UI` (TCP 38299 inbound, local subnet, private/domain profiles,

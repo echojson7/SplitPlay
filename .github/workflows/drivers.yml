@@ -11,9 +11,11 @@ on:
     branches: [main]
     paths:
       - 'drivers/**'
+      - '.github/workflows/drivers.yml'
   pull_request:
     paths:
       - 'drivers/**'
+      - '.github/workflows/drivers.yml'
   workflow_dispatch:
 
 permissions:

@@ -306,7 +306,9 @@ value.
 
 All desks share both settings. The first worker to change the global value owns the undo file and restores the value
 when it exits, even if other desks still run; another desk sets it again (with a new undo file) at its next stream
-start. A desk with `nvenc_latency_over_power=disabled` removes the profile's setting for every desk until another desk
+start. A worker that finds the undo file held by a running worker logs that as info and leaves it alone; when
+two workers create the profile at the same time, the second reloads the driver settings and retries once. A desk
+with `nvenc_latency_over_power=disabled` removes the profile's setting for every desk until another desk
 starts. Both settle once the service owns driver profiles (below).
 
 ## Not done yet

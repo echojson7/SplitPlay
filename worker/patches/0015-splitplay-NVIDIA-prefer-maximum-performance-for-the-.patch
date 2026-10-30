@@ -28,6 +28,14 @@ made it exits, at the next worker start after a crash, or by
 co-installed Sunshine and the workers share one record of the original
 value instead of each keeping its own.
 
+Several workers start together:
+- An undo file another running instance holds open (sharing violation)
+  is logged as info and left to that instance, not as an error.
+- When the "SplitPlay worker" profile was created by another worker after
+  this one loaded the driver settings (NVAPI_PROFILE_NAME_IN_USE), or the
+  save fails, the settings are reloaded and the profile step is retried
+  once; the reload finds the existing profile.
+
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
 
@@ -57,7 +65,7 @@ index 32aba38e601077d987e1738325c78274dba6fae9..35fae2c7b8f15699a931c65f42e094e6
     * restore_nvprefs_undo();
     * @examples_end
 diff --git a/src/platform/windows/nvprefs/driver_settings.cpp b/src/platform/windows/nvprefs/driver_settings.cpp
-index 42410729a742ef56a2dcdeaeb4a688449a42b811..1b7585d41413cf4474642872eb826bb2d60fb07d 100644
+index 42410729a742ef56a2dcdeaeb4a688449a42b811..7108d0cb8d673e915b913fa9f45580bee26054e9 100644
 --- a/src/platform/windows/nvprefs/driver_settings.cpp
 +++ b/src/platform/windows/nvprefs/driver_settings.cpp
 @@ -5,13 +5,48 @@
@@ -111,7 +119,20 @@ index 42410729a742ef56a2dcdeaeb4a688449a42b811..1b7585d41413cf4474642872eb826bb2
  
    void nvapi_error_message(NvAPI_Status status) {
      NvAPI_ShortString message = {};
-@@ -242,7 +277,7 @@ namespace nvprefs {
+@@ -233,7 +268,11 @@ namespace nvprefs {
+       profile.version = NVDRS_PROFILE_VER1;
+       fill_nvapi_string(profile.profileName, sunshine_application_profile_name);
+       status = NvAPI_DRS_CreateProfile(session_handle, &profile, &profile_handle);
+-      if (status != NVAPI_OK) {
++      if (status == NVAPI_PROFILE_NAME_IN_USE) {
++        // SplitPlay: another worker created it since our settings were loaded; the caller reloads and retries
++        info_message("Application profile was created by another instance meanwhile");
++        return false;
++      } else if (status != NVAPI_OK) {
+         nvapi_error_message(status);
+         error_message("NvAPI_DRS_CreateProfile() failed");
+         return false;
+@@ -242,7 +281,7 @@ namespace nvprefs {
      }
  
      NvAPI_UnicodeString sunshine_path = {};
@@ -120,7 +141,7 @@ index 42410729a742ef56a2dcdeaeb4a688449a42b811..1b7585d41413cf4474642872eb826bb2
  
      NVDRS_APPLICATION application = {};
      application.version = NVDRS_APPLICATION_VER_V1;
-@@ -252,8 +287,8 @@ namespace nvprefs {
+@@ -252,8 +291,8 @@ namespace nvprefs {
        // Add application to application profile if missing
        application.version = NVDRS_APPLICATION_VER_V1;
        application.isPredefined = 0;
@@ -131,7 +152,7 @@ index 42410729a742ef56a2dcdeaeb4a688449a42b811..1b7585d41413cf4474642872eb826bb2
        fill_nvapi_string(application.launcher, L"");
  
        status = NvAPI_DRS_CreateApplication(session_handle, profile_handle, &application);
-@@ -307,4 +342,35 @@ namespace nvprefs {
+@@ -307,4 +346,35 @@ namespace nvprefs {
      return true;
    }
  
@@ -208,13 +229,51 @@ index 12d78a71aa5e271633db8341355665ca719f499f..a3f84ab73500006221a8a810840b478e
   * @brief Forward NvAPI_DRS_FindProfileByName to the loaded NVAPI DLL.
   *
 diff --git a/src/platform/windows/nvprefs/nvprefs_interface.cpp b/src/platform/windows/nvprefs/nvprefs_interface.cpp
-index 09ad072aa8554503141c301c3ba3845699c25202..533c1e9c5a00c81c1eb414de5c5b179f1b7e86de 100644
+index 09ad072aa8554503141c301c3ba3845699c25202..9bfd2d2c8a3b55af79a3d77cc6c55965e4aa5a32 100644
 --- a/src/platform/windows/nvprefs/nvprefs_interface.cpp
 +++ b/src/platform/windows/nvprefs/nvprefs_interface.cpp
-@@ -127,6 +127,25 @@ namespace nvprefs {
-     return true;
-   }
+@@ -108,20 +108,46 @@ namespace nvprefs {
+       return false;
+     }
  
+-    // Modify and save sunshine.exe application profile settings, if needed
+-    bool modified = false;
+-    if (!pimpl->driver_settings.check_and_modify_application_profile(modified)) {
+-      error_message("Failed to modify application profile settings");
+-      return false;
+-    } else if (modified) {
+-      if (pimpl->driver_settings.save_settings()) {
+-        info_message("Modified application profile settings");
+-      } else {
+-        error_message("Couldn't save application profile settings");
++    // Modify and save the worker's application profile settings, if needed.
++    // SplitPlay: several workers start together, so a profile another worker created or saved after our settings were
++    // loaded makes the create or the save fail; reload the driver settings and try once more.
++    for (int attempt = 0;; ++attempt) {
++      bool modified = false;
++      bool ok = pimpl->driver_settings.check_and_modify_application_profile(modified);
++      if (ok && modified) {
++        ok = pimpl->driver_settings.save_settings();
++        if (ok) {
++          info_message("Modified application profile settings");
++        }
++      } else if (ok) {
++        info_message("No need to modify application profile settings");
++      }
++
++      if (ok) {
++        return true;
++      }
++      if (attempt > 0 || !pimpl->driver_settings.load_settings()) {
++        error_message("Failed to modify or save application profile settings");
+         return false;
+       }
+-    } else {
+-      info_message("No need to modify application profile settings");
++      info_message("Reloaded driver settings, retrying the application profile");
++    }
++  }
++
 +  bool nvprefs_interface::remove_application_profile() {
 +    if (!pimpl->loaded) {
 +      return false;
@@ -229,14 +288,9 @@ index 09ad072aa8554503141c301c3ba3845699c25202..533c1e9c5a00c81c1eb414de5c5b179f
 +    } else if (!pimpl->driver_settings.save_settings()) {
 +      error_message("Couldn't save settings after removing the application profile");
 +      return false;
-+    }
-+
-+    return true;
-+  }
-+
-   bool nvprefs_interface::modify_global_profile() {
-     if (!pimpl->loaded) {
-       return false;
+     }
+ 
+     return true;
 diff --git a/src/platform/windows/nvprefs/nvprefs_interface.h b/src/platform/windows/nvprefs/nvprefs_interface.h
 index 1f682ce2931fb4caa0d6a11642faef6f9c679ac6..303800acca5edff768841dae6074094dd743dc54 100644
 --- a/src/platform/windows/nvprefs/nvprefs_interface.h
@@ -254,3 +308,20 @@ index 1f682ce2931fb4caa0d6a11642faef6f9c679ac6..303800acca5edff768841dae6074094d
      /**
       * @brief Apply Sunshine-specific NVIDIA global profile changes.
       *
+diff --git a/src/platform/windows/nvprefs/undo_file.cpp b/src/platform/windows/nvprefs/undo_file.cpp
+index 477af03399c037aac56a2981b451973e864b5c22..16f63d01e4d2e1207d3340128cc25c9864856c0f 100644
+--- a/src/platform/windows/nvprefs/undo_file.cpp
++++ b/src/platform/windows/nvprefs/undo_file.cpp
+@@ -57,6 +57,12 @@ namespace nvprefs {
+       return file;
+     } else {
+       auto last_error = GetLastError();
++      if (last_error == ERROR_SHARING_VIOLATION) {
++        // SplitPlay: another running worker (or Sunshine) holds the file it created; it restores the settings itself
++        info_message("Undo file is held by another running instance, leaving it to that instance");
++        access_denied = false;
++        return std::nullopt;
++      }
+       access_denied = (last_error != ERROR_FILE_NOT_FOUND && last_error != ERROR_PATH_NOT_FOUND);
+       return std::nullopt;
+     }

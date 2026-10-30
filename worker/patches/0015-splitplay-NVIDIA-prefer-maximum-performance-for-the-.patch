@@ -1,0 +1,256 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 12:00:00 +0000
+Subject: [PATCH] splitplay: NVIDIA "prefer maximum performance" for the
+ worker's own exe
+
+Upstream's nvprefs binds its application profile ("SunshineStream",
+PREFERRED_PSTATE = PREFER_MAX) to sunshine.exe. The driver matches
+applications by file name, so the renamed splitplay-worker.exe never got
+it and the GPU could clock down between frames while a desk streams.
+
+- The application profile is bound to the running executable's file name
+  (GetModuleFileNameW, lower case: splitplay-worker.exe) and is named
+  "SplitPlay worker", so a co-installed Sunshine's "SunshineStream"
+  profile is left alone. nvenc_latency_over_power keeps switching it
+  (default on).
+- `--restore-nvprefs-undo` also deletes that profile. The uninstaller
+  runs it once every worker has stopped, so the driver database is left
+  as found: the global change below is restored from the undo file and
+  the per-application profile is removed (upstream leaves its profile).
+
+The global change is upstream's and unchanged: OGL_CPL_PREFER_DXPRESENT
+("Vulkan/OpenGL present method: prefer layered on DXGI swapchain") on the
+base profile (nvenc_opengl_vulkan_on_dxgi, default on), recorded first in
+%ProgramData%\Sunshine\nvprefs_undo.json and restored when the worker that
+made it exits, at the next worker start after a crash, or by
+`--restore-nvprefs-undo`. The undo file stays upstream's, so a
+co-installed Sunshine and the workers share one record of the original
+value instead of each keeping its own.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/src/entry_handler.cpp b/src/entry_handler.cpp
+index ff7edb2417e763cc3e7fd70a1bbccd1e0202992a..075644f11983b461bd0212d8683077bf386b4953 100644
+--- a/src/entry_handler.cpp
++++ b/src/entry_handler.cpp
+@@ -60,6 +60,8 @@ namespace args {
+   int restore_nvprefs_undo() {
+     if (nvprefs_instance.load()) {
+       nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
++      // SplitPlay: the uninstaller runs this once every worker has stopped; the application profile is ours alone.
++      nvprefs_instance.remove_application_profile();
+       nvprefs_instance.unload();
+     }
+     return 0;
+diff --git a/src/entry_handler.h b/src/entry_handler.h
+index 32aba38e601077d987e1738325c78274dba6fae9..35fae2c7b8f15699a931c65f42e094e6be3fd22c 100644
+--- a/src/entry_handler.h
++++ b/src/entry_handler.h
+@@ -66,6 +66,7 @@ namespace args {
+    * If Sunshine was improperly terminated, this function restores
+    * the global NVIDIA control panel settings to the undo file left
+    * by Sunshine. This function is typically called by the uninstaller.
++   * SplitPlay: it also deletes the worker's application profile ("SplitPlay worker").
+    * @examples
+    * restore_nvprefs_undo();
+    * @examples_end
+diff --git a/src/platform/windows/nvprefs/driver_settings.cpp b/src/platform/windows/nvprefs/driver_settings.cpp
+index 42410729a742ef56a2dcdeaeb4a688449a42b811..1b7585d41413cf4474642872eb826bb2d60fb07d 100644
+--- a/src/platform/windows/nvprefs/driver_settings.cpp
++++ b/src/platform/windows/nvprefs/driver_settings.cpp
+@@ -5,13 +5,48 @@
+ // this include
+ #include "driver_settings.h"
+ 
++// standard includes
++#include <algorithm>
++#include <cwctype>
++#include <filesystem>
++#include <string>
++
+ // local includes
+ #include "nvprefs_common.h"
+ 
+ namespace {
+ 
+-  const auto sunshine_application_profile_name = L"SunshineStream";
+-  const auto sunshine_application_path = L"sunshine.exe";
++  // SplitPlay: the application profile is SplitPlay's own and is bound to the file name of the running executable
++  // (splitplay-worker.exe), not to sunshine.exe: the driver matches applications by file name, so upstream's profile
++  // never applied to the renamed worker. A separate profile name leaves a co-installed Sunshine's "SunshineStream"
++  // profile alone, and `--restore-nvprefs-undo` can delete this one without touching Sunshine's.
++  const auto sunshine_application_profile_name = L"SplitPlay worker";
++
++  /**
++   * @brief Lower-case file name of this process's executable, e.g. `splitplay-worker.exe`.
++   */
++  std::wstring executable_file_name() {
++    std::wstring path(MAX_PATH, L'\0');
++    for (;;) {
++      const auto length = GetModuleFileNameW(nullptr, path.data(), static_cast<DWORD>(path.size()));
++      if (length == 0) {
++        return L"splitplay-worker.exe";
++      }
++      if (length < path.size()) {
++        path.resize(length);
++        break;
++      }
++      path.resize(path.size() * 2);
++    }
++
++    auto name = std::filesystem::path(path).filename().wstring();
++    std::transform(name.begin(), name.end(), name.begin(), [](wchar_t c) {
++      return static_cast<wchar_t>(std::towlower(c));
++    });
++    return name.empty() ? L"splitplay-worker.exe" : name;
++  }
++
++  const std::wstring sunshine_application_path = executable_file_name();
+ 
+   void nvapi_error_message(NvAPI_Status status) {
+     NvAPI_ShortString message = {};
+@@ -242,7 +277,7 @@ namespace nvprefs {
+     }
+ 
+     NvAPI_UnicodeString sunshine_path = {};
+-    fill_nvapi_string(sunshine_path, sunshine_application_path);
++    fill_nvapi_string(sunshine_path, sunshine_application_path.c_str());
+ 
+     NVDRS_APPLICATION application = {};
+     application.version = NVDRS_APPLICATION_VER_V1;
+@@ -252,8 +287,8 @@ namespace nvprefs {
+       // Add application to application profile if missing
+       application.version = NVDRS_APPLICATION_VER_V1;
+       application.isPredefined = 0;
+-      fill_nvapi_string(application.appName, sunshine_application_path);
+-      fill_nvapi_string(application.userFriendlyName, sunshine_application_path);
++      fill_nvapi_string(application.appName, sunshine_application_path.c_str());
++      fill_nvapi_string(application.userFriendlyName, sunshine_application_path.c_str());
+       fill_nvapi_string(application.launcher, L"");
+ 
+       status = NvAPI_DRS_CreateApplication(session_handle, profile_handle, &application);
+@@ -307,4 +342,35 @@ namespace nvprefs {
+     return true;
+   }
+ 
++  bool driver_settings_t::delete_application_profile(bool &deleted) {
++    deleted = false;
++    if (!session_handle) {
++      return false;
++    }
++
++    NvAPI_UnicodeString profile_name = {};
++    fill_nvapi_string(profile_name, sunshine_application_profile_name);
++
++    NvDRSProfileHandle profile_handle = nullptr;
++    NvAPI_Status status = NvAPI_DRS_FindProfileByName(session_handle, profile_name, &profile_handle);
++    if (status == NVAPI_PROFILE_NOT_FOUND) {
++      return true;
++    } else if (status != NVAPI_OK) {
++      nvapi_error_message(status);
++      error_message("NvAPI_DRS_FindProfileByName() failed");
++      return false;
++    }
++
++    status = NvAPI_DRS_DeleteProfile(session_handle, profile_handle);
++    if (status != NVAPI_OK) {
++      nvapi_error_message(status);
++      error_message("NvAPI_DRS_DeleteProfile() failed");
++      return false;
++    }
++
++    deleted = true;
++    info_message(std::wstring(L"Deleted application profile ") + sunshine_application_profile_name);
++    return true;
++  }
++
+ }  // namespace nvprefs
+diff --git a/src/platform/windows/nvprefs/driver_settings.h b/src/platform/windows/nvprefs/driver_settings.h
+index 7e1f4b214f99926b4207e33aa921bf6d3e77f3ae..051dfe5fbe8d768e628e05b7c8a43db6b709a331 100644
+--- a/src/platform/windows/nvprefs/driver_settings.h
++++ b/src/platform/windows/nvprefs/driver_settings.h
+@@ -93,6 +93,13 @@ namespace nvprefs {
+      */
+     bool check_and_modify_application_profile(bool &modified);
+ 
++    /**
++     * @brief Delete SplitPlay's application profile (the executable's PREFERRED_PSTATE), if it exists; not saved.
++     * @param deleted Set to true when the profile existed and was deleted.
++     * @return true on success, also when there was nothing to delete.
++     */
++    bool delete_application_profile(bool &deleted);
++
+   private:
+     NvDRSSessionHandle session_handle = nullptr;
+   };
+diff --git a/src/platform/windows/nvprefs/nvapi_opensource_wrapper.cpp b/src/platform/windows/nvprefs/nvapi_opensource_wrapper.cpp
+index 12d78a71aa5e271633db8341355665ca719f499f..a3f84ab73500006221a8a810840b478e70e3f5cf 100644
+--- a/src/platform/windows/nvprefs/nvapi_opensource_wrapper.cpp
++++ b/src/platform/windows/nvprefs/nvapi_opensource_wrapper.cpp
+@@ -155,6 +155,17 @@ NVAPI_INTERFACE NvAPI_DRS_CreateProfile(NvDRSSessionHandle hSession, NVDRS_PROFI
+   return call_interface<decltype(NvAPI_DRS_CreateProfile)>("NvAPI_DRS_CreateProfile", hSession, pProfileInfo, phProfile);
+ }
+ 
++/**
++ * @brief Forward NvAPI_DRS_DeleteProfile to the loaded NVAPI DLL.
++ *
++ * @param hSession DRS session that owns the profile.
++ * @param hProfile Profile to delete.
++ * @return NVAPI status returned by the loaded function.
++ */
++NVAPI_INTERFACE NvAPI_DRS_DeleteProfile(NvDRSSessionHandle hSession, NvDRSProfileHandle hProfile) {
++  return call_interface<decltype(NvAPI_DRS_DeleteProfile)>("NvAPI_DRS_DeleteProfile", hSession, hProfile);
++}
++
+ /**
+  * @brief Forward NvAPI_DRS_FindProfileByName to the loaded NVAPI DLL.
+  *
+diff --git a/src/platform/windows/nvprefs/nvprefs_interface.cpp b/src/platform/windows/nvprefs/nvprefs_interface.cpp
+index 09ad072aa8554503141c301c3ba3845699c25202..533c1e9c5a00c81c1eb414de5c5b179f1b7e86de 100644
+--- a/src/platform/windows/nvprefs/nvprefs_interface.cpp
++++ b/src/platform/windows/nvprefs/nvprefs_interface.cpp
+@@ -127,6 +127,25 @@ namespace nvprefs {
+     return true;
+   }
+ 
++  bool nvprefs_interface::remove_application_profile() {
++    if (!pimpl->loaded) {
++      return false;
++    }
++
++    bool deleted = false;
++    if (!pimpl->driver_settings.delete_application_profile(deleted)) {
++      error_message("Failed to remove application profile");
++      return false;
++    } else if (!deleted) {
++      info_message("No application profile to remove");
++    } else if (!pimpl->driver_settings.save_settings()) {
++      error_message("Couldn't save settings after removing the application profile");
++      return false;
++    }
++
++    return true;
++  }
++
+   bool nvprefs_interface::modify_global_profile() {
+     if (!pimpl->loaded) {
+       return false;
+diff --git a/src/platform/windows/nvprefs/nvprefs_interface.h b/src/platform/windows/nvprefs/nvprefs_interface.h
+index 1f682ce2931fb4caa0d6a11642faef6f9c679ac6..303800acca5edff768841dae6074094dd743dc54 100644
+--- a/src/platform/windows/nvprefs/nvprefs_interface.h
++++ b/src/platform/windows/nvprefs/nvprefs_interface.h
+@@ -43,6 +43,12 @@ namespace nvprefs {
+      */
+     bool modify_application_profile();
+ 
++    /**
++     * @brief Delete the executable's application profile (SplitPlay: on uninstall, with the undo file restore).
++     * @return true on success, also when there was no profile.
++     */
++    bool remove_application_profile();
++
+     /**
+      * @brief Apply Sunshine-specific NVIDIA global profile changes.
+      *

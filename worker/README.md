@@ -41,6 +41,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0012` scheduler protection | the process opts out of power throttling (EcoQoS and ignored timer-resolution requests, `SetProcessInformation(ProcessPowerThrottling)`) and runs ABOVE_NORMAL when idle (upstream's HIGH while streaming is kept); capture, encode, video send and control receive threads run under MMCSS "Games" at normal priority. See *Scheduling* below |
 | `0013` stream profile | `welcome` and `set_profile` apply the Profile's `fec_percent`, `min_fps`, `pacing_mbps` (live) and `dpb_frames` (next stream, opt-in); pacing replaces upstream's fixed 800 Mbit/s, the DPB upstream's 5 (H.264/HEVC) or 8 (AV1) reference frames. See *Stream profile* below |
 | `0014` instant feedback | rumble, LED and motion requests and HDR metadata are sent as soon as they are queued: the producers ring a loopback "doorbell" datagram that the control thread's ENet intercept turns into a wake-up, instead of waiting up to ~100 ms for the next control loop cycle |
+| `0015` NVIDIA profile | the "prefer maximum performance" application profile (`PREFERRED_PSTATE`) is bound to the running executable's file name (`splitplay-worker.exe`) under the profile name "SplitPlay worker" instead of upstream's `sunshine.exe`/"SunshineStream"; `--restore-nvprefs-undo` also deletes that profile. See *NVIDIA driver settings* below |
 
 ### Changing a patch or adding one
 
@@ -279,13 +280,34 @@ timer resolution), priority class above normal (high while streaming), MMCSS "Ga
   registered with MMCSS: it runs at the process class (HIGH while streaming, base 13, above normal-class game threads
   except TIME_CRITICAL ones). A dedicated input thread under MMCSS is a follow-up.
 
+### NVIDIA driver settings (patch 0015)
+
+With an NVIDIA driver, every worker start (and every stream start) checks two driver settings through NvAPI DRS, as
+upstream Sunshine does:
+
+| Setting | Where | Option (default) | Undone |
+|---|---|---|---|
+| `PREFERRED_PSTATE` = prefer maximum performance | application profile "SplitPlay worker" for `splitplay-worker.exe` | `nvenc_latency_over_power` (on; `disabled` removes it) | the profile is deleted by `--restore-nvprefs-undo` |
+| `OGL_CPL_PREFER_DXPRESENT` = prefer layered on DXGI swapchain (Vulkan/OpenGL present method) | **global** base profile | `nvenc_opengl_vulkan_on_dxgi` (on; `disabled` leaves it alone) | the previous value is written to `%ProgramData%\Sunshine\nvprefs_undo.json` before the change and restored from it |
+
+The global value is restored when the worker that changed it exits, at the next worker start when a worker was killed
+before it could restore it, and by `splitplay-worker.exe --restore-nvprefs-undo`, which also deletes the application
+profile. The SplitPlay uninstaller runs that command once the service and every worker have stopped, so uninstalling
+leaves the driver database as it was found (a value someone changed after the worker set it is left alone, as
+upstream does). The undo file is upstream's, so a co-installed Sunshine and the workers keep one record of the original
+value.
+
+All desks share both settings. The first worker to change the global value owns the undo file and restores the value
+when it exits, even if other desks still run; another desk sets it again (with a new undo file) at its next stream
+start. A desk with `nvenc_latency_over_power=disabled` removes the profile's setting for every desk until another desk
+starts. Both settle once the service owns driver profiles (below).
+
 ## Not done yet
 
 - Frame tracing, the IDD capture ring and the input ring (the contract headers are already on the include path);
   the profile's `gpu_priority`, `gpu_luid` and `cpu_set`.
 - Per-session gamepads: ViGEm pads are visible to every session; SplitPlay's isolated pad driver comes in Stage 4.
-- Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile; with several workers they
-  should move to the service. Their "prefer maximum performance" application profile is bound to `sunshine.exe`, so
-  `splitplay-worker.exe` does not get it yet.
+- Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile from each worker (patch 0015);
+  with several workers they should move to the service.
 - mDNS: every worker publishes itself; Moonlight's automatic discovery is not tested with several desks yet
   (adding `HOST:port` by hand always works).

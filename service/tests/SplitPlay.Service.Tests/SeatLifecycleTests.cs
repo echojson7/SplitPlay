@@ -46,7 +46,7 @@ public sealed class SeatLifecycleTests
             [
                 "--desk-dir", deskDir, "--pipe", worker.PipeName, "--desk", "desk-1", "port=48089",
                 $"sunshine_name={Environment.MachineName}-desk-1", "min_log_level=warning", "nvenc_preset=1",
-                "nvenc_twopass=disabled", "hevc_mode=0", "av1_mode=0", "encoder=nvenc",
+                "nvenc_twopass=disabled", "hevc_mode=0", "av1_mode=0", "gamepad=ds4", "encoder=nvenc",
             ],
             worker.Arguments);
         Assert.EndsWith("splitplay-worker.exe", worker.Executable, StringComparison.Ordinal);

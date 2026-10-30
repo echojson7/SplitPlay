@@ -45,6 +45,40 @@ public sealed class AdminPipeClientTests
     }
 
     [Fact]
+    public void Token_cache_secures_the_file_before_it_takes_the_cache_name_or_caches_nothing()
+    {
+        var dir = Path.Combine(Path.GetTempPath(), "sp-cache-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var time = new FakeTimeProvider(DateTimeOffset.UnixEpoch.AddDays(1));
+            var path = Path.Combine(dir, "cli-token-s1.bin");
+            var secured = new List<string>();
+            var cache = new AdminTokenCache(path, Flip, Flip, time, f =>
+            {
+                Assert.False(File.Exists(path)); // labelled while it still has its temporary name
+                secured.Add(f);
+            });
+            cache.Write(new AdminToken("tok-1", null, time.GetUtcNow().AddMinutes(15)));
+            Assert.Equal([path + ".tmp"], secured);
+            Assert.Equal("tok-1", cache.Read());
+
+            // When the file cannot be secured, nothing is cached and the older token is gone too.
+            var failing = new AdminTokenCache(path, Flip, Flip, time, _ => throw new System.ComponentModel.Win32Exception(5));
+            failing.Write(new AdminToken("tok-2", null, time.GetUtcNow().AddMinutes(15)));
+            Assert.False(File.Exists(path));
+            Assert.False(File.Exists(path + ".tmp"));
+            Assert.Null(failing.Read());
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void Tray_stops_reloading_when_the_api_keeps_rejecting_the_pipe_session()
     {
         var time = new FakeTimeProvider(DateTimeOffset.UnixEpoch);

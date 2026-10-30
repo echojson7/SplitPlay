@@ -21,7 +21,7 @@ namespace SplitPlay.Service.Api;
 /// Nobody can hold the pipe: there is no instance limit and <see cref="ListeningInstances"/> instances wait for
 /// callers at once. A caller from a desk session or one that is clearly not the admin is disconnected right after it
 /// connects, without an answer (<see cref="IAdminCallerCheck.Screen"/>, run off the accept loop and at most
-/// <see cref="MaxConcurrentScreens"/> at once); at most <see cref="MaxConnectionsPerSession"/> connections per session
+/// <see cref="MaxConcurrentScreensPerSession"/> at once per session); at most <see cref="MaxConnectionsPerSession"/> connections per session
 /// run at once and at most <see cref="MaxRequestsPerSession"/> are accepted per session within <see cref="RateWindow"/>;
 /// every admitted connection ends after <see cref="RequestTimeout"/>. Stopping the service cancels and disposes every
 /// connection.
@@ -41,8 +41,8 @@ public sealed class AdminPipeServer(
     /// <summary>Pipe instances waiting for a caller at any time.</summary>
     public const int ListeningInstances = 3;
 
-    /// <summary>Connections being screened at once; more are disconnected unscreened.</summary>
-    public const int MaxConcurrentScreens = 16;
+    /// <summary>Connections from one session being screened at once; more from that session are disconnected unscreened.</summary>
+    public const int MaxConcurrentScreensPerSession = 4;
 
     public static readonly TimeSpan RateWindow = TimeSpan.FromMinutes(1);
 
@@ -59,7 +59,7 @@ public sealed class AdminPipeServer(
     private readonly Dictionary<int, Queue<DateTimeOffset>> _recent = [];
     private readonly HashSet<NamedPipeServerStream> _open = [];
     private readonly HashSet<Task> _handlers = [];
-    private int _screens;
+    private readonly Dictionary<int, int> _screening = [];
     private int _dropped;
     private int _droppedSinceLog;
     private DateTimeOffset _lastDropLog = DateTimeOffset.MinValue;
@@ -308,12 +308,34 @@ public sealed class AdminPipeServer(
         {
             // Before reading anything: a desk session or a caller that is clearly not the admin is disconnected at once,
             // without an answer, so that refusing costs next to nothing.
-            AdminCallerDecision screen;
+            // Screens are counted per session (one cheap call first), so that a flood from a desk cannot crowd out the owner.
+            int bucket;
             try
             {
-                screen = Interlocked.Increment(ref _screens) > MaxConcurrentScreens
-                    ? new AdminCallerDecision(false, "unknown caller", "too many connections at once")
-                    : check.Screen(pipe);
+                bucket = check.SessionOf(pipe) ?? -1;
+            }
+            catch (Exception ex) when (ex is IOException or InvalidOperationException or ObjectDisposedException)
+            {
+                bucket = -1;
+            }
+
+            AdminCallerDecision screen;
+            var counted = false;
+            try
+            {
+                lock (_gate)
+                {
+                    var n = _screening.GetValueOrDefault(bucket);
+                    if (n < MaxConcurrentScreensPerSession)
+                    {
+                        _screening[bucket] = n + 1;
+                        counted = true;
+                    }
+                }
+
+                screen = counted
+                    ? check.Screen(pipe)
+                    : new AdminCallerDecision(false, "unknown caller", "too many connections at once from this session", bucket);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception
                                            or InvalidOperationException)
@@ -322,7 +344,20 @@ public sealed class AdminPipeServer(
             }
             finally
             {
-                Interlocked.Decrement(ref _screens);
+                if (counted)
+                {
+                    lock (_gate)
+                    {
+                        if (_screening.GetValueOrDefault(bucket) <= 1)
+                        {
+                            _screening.Remove(bucket);
+                        }
+                        else
+                        {
+                            _screening[bucket]--;
+                        }
+                    }
+                }
             }
 
             var session = screen.Session ?? -1;

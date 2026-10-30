@@ -12,7 +12,8 @@ Desk users are other people signed in on the same PC, so loopback alone proves n
 - **A bearer token from the admin pipe** (CLI, scripts): `Authorization: Bearer <token>`, valid 15 minutes, no CSRF
   token needed. `splitplay auth token` prints one. The CLI uses `SPLITPLAY_TOKEN` when it is set; otherwise, in the
   console session, it keeps the pipe's token in `%LOCALAPPDATA%\SplitPlay\cli-token-s<session>.bin` (DPAPI, current
-  user) and reuses it while the service accepts it and at least a minute is left. Elsewhere (an elevated prompt in
+  user, medium mandatory label with no-read-up so that low-integrity processes cannot read it; if the label cannot be
+  set nothing is cached) and reuses it while the service accepts it and at least a minute is left. Elsewhere (an elevated prompt in
   another session) there is no cache: a script that calls the CLI in a loop sets `SPLITPLAY_TOKEN` from
   `splitplay auth token` once, because the pipe takes at most 30 requests a minute per session.
 - **A session from the admin pipe** (tray): the tray puts it into its WebView as the `splitplay_session` cookie, so the
@@ -35,9 +36,10 @@ Its DACL lets SYSTEM, Administrators and interactive users (IU) connect; the ser
 Everybody else is refused: a standard user at the console, any RDP session, a process below medium integrity, and
 always a process in a desk session, even a desk user who is an administrator. Desk sessions, callers that are clearly
 not the admin and callers over a limit are disconnected right after connecting, before anything is read and without
-an answer (the client reports that the service closed the connection); a caller refused after its request was read
-gets the reason. The pipe has no instance limit and keeps 3 instances listening; at most 16 new connections are
-screened at once (more are disconnected unscreened), a session may keep at most 4 connections open and make 30
+an answer (the client tries once more after 250 ms, then reports that the service closed the connection); a caller
+refused after its request was read gets the reason. The pipe has no instance limit and keeps 3 instances listening;
+at most 4 new connections per session are screened at once (more from that session are disconnected unscreened, so a
+desk cannot crowd out the owner), a session may keep at most 4 connections open and make 30
 requests a minute, every admitted connection ends after 3 s, and dropped connections are logged at most every 10 s.
 Refused users can still log in with the admin password (except from a desk session, see below). Clients only talk to a pipe owned by SYSTEM, Administrators or themselves (squatting while
 the service is stopped). The first admin password can only be set by the administrator (tray, CLI) in Settings, so a

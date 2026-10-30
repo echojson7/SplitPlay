@@ -7,10 +7,13 @@ namespace SplitPlay.Core.Ipc;
 /// <summary>
 /// The CLI's per-user cache of its admin-pipe bearer token, so that a script running <c>splitplay</c> in a loop does not
 /// ask the pipe (at most 30 requests a minute per session) every time. The file holds the token and its expiry,
-/// encrypted by <paramref name="protect"/> (DPAPI for the current user on Windows); a token with less than
-/// <see cref="MinRemaining"/> left is not used. Any problem reading or writing it just means no cache.
+/// encrypted by <paramref name="protect"/> (DPAPI for the current user on Windows) and, before it takes the cache's
+/// name, given <paramref name="secure"/> (on Windows a mandatory label that keeps low-integrity processes of the same
+/// user from reading it); if that fails nothing is cached. A token with less than <see cref="MinRemaining"/> left is not
+/// used. Any problem reading or writing it just means no cache.
 /// </summary>
-public sealed class AdminTokenCache(string path, Func<byte[], byte[]> protect, Func<byte[], byte[]> unprotect, TimeProvider time)
+public sealed class AdminTokenCache(string path, Func<byte[], byte[]> protect, Func<byte[], byte[]> unprotect, TimeProvider time,
+    Action<string>? secure = null)
 {
     /// <summary>A cached token is used only while at least this much of its lifetime is left.</summary>
     public static readonly TimeSpan MinRemaining = TimeSpan.FromMinutes(1);
@@ -54,11 +57,23 @@ public sealed class AdminTokenCache(string path, Func<byte[], byte[]> protect, F
             var text = token.ExpiresAt.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture) + "\n" + token.Token;
             var temp = path + ".tmp";
             File.WriteAllBytes(temp, protect(Encoding.UTF8.GetBytes(text)));
+            try
+            {
+                secure?.Invoke(temp);
+            }
+            catch
+            {
+                File.Delete(temp);
+                throw;
+            }
+
             File.Move(temp, path, overwrite: true);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException
+                                       or System.ComponentModel.Win32Exception)
         {
-            // No cache then.
+            // No cache then; a file that may be readable by less than the owner is not left behind.
+            Clear();
         }
     }
 

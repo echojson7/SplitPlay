@@ -45,11 +45,11 @@ public sealed class DeskSupervisor : IHostedService
     private readonly IOptions<SupervisorOptions> _options;
     private readonly TimeProvider _time;
 
-    /// <summary>How long <see cref="IsDeskSession"/> keeps what it learnt from a session's user.</summary>
-    internal static readonly TimeSpan SessionKindLifetime = TimeSpan.FromSeconds(5);
+    /// <summary>How long <see cref="IsDeskSession"/> keeps whether a user is a desk user.</summary>
+    internal static readonly TimeSpan UserKindLifetime = TimeSpan.FromSeconds(5);
 
-    private readonly object _sessionKindGate = new();
-    private readonly Dictionary<int, (bool Desk, DateTimeOffset At)> _sessionKinds = [];
+    private readonly object _userKindGate = new();
+    private readonly Dictionary<string, (bool Desk, DateTimeOffset At)> _userKinds = new(StringComparer.OrdinalIgnoreCase);
     private readonly ILogger<DeskSupervisor> _logger;
     private readonly ILogger _childLogger;
     private readonly GpuInventory _gpus;
@@ -352,27 +352,32 @@ public sealed class DeskSupervisor : IHostedService
                 return false;
             }
 
-            // Every API request asks: the answer from the session's user (a WTS query and an account lookup) is kept for
-            // a few seconds. A failed lookup is not kept.
-            var now = _time.GetUtcNow();
-            lock (_sessionKindGate)
+            // Every API request asks. Who is signed in is read every time (a session id can be reused by someone else);
+            // whether that user is a desk user (the config and an account lookup) is kept for a few seconds.
+            var user = _platform.SessionUser(sessionId);
+            if (user is null)
             {
-                if (_sessionKinds.TryGetValue(sessionId, out var known) && now - known.At < SessionKindLifetime)
+                return false;
+            }
+
+            var now = _time.GetUtcNow();
+            lock (_userKindGate)
+            {
+                if (_userKinds.TryGetValue(user, out var known) && now - known.At < UserKindLifetime)
                 {
                     return known.Desk;
                 }
             }
 
-            var user = _platform.SessionUser(sessionId);
-            var desk = user is not null && IsDeskUser(user);
-            lock (_sessionKindGate)
+            var desk = IsDeskUser(user);
+            lock (_userKindGate)
             {
-                if (_sessionKinds.Count > 256)
+                if (_userKinds.Count > 256)
                 {
-                    _sessionKinds.Clear();
+                    _userKinds.Clear();
                 }
 
-                _sessionKinds[sessionId] = (desk, now);
+                _userKinds[user] = (desk, now);
             }
 
             return desk;

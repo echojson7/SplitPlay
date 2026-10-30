@@ -33,20 +33,54 @@ public static class AdminPipe
     /// <summary>The pipe name for .NET pipe streams (without <c>\\.\pipe\</c>).</summary>
     public static string LocalName(string ns = PipeNames.DefaultNamespace) => ns + "admin";
 
-    /// <summary>What a caller the service disconnects without an answer is told.</summary>
-    public const string ClosedMessage = "the SplitPlay service closed the connection without an answer: it refuses callers in a desk " +
-                                        "session, callers that are not the host's administrator and callers that ask too often";
+    /// <summary>What a caller is told when the service closed the connection without an answer twice.</summary>
+    public const string ClosedMessage = "the SplitPlay service closed the connection without an answer (restarting, or the request was refused)";
+
+    /// <summary>Pause before the one retry after the service closed the connection without an answer.</summary>
+    public static readonly TimeSpan RetryDelay = TimeSpan.FromMilliseconds(250);
 
     /// <summary>
     /// Asks the service for a credential. Returns null when the pipe is not there (service stopped, older build) or does
-    /// not answer within <paramref name="timeout"/>; throws <see cref="AdminPipeException"/> when the service refuses,
-    /// also when it disconnects without an answer (how it drops callers it will not serve).
+    /// not answer within <paramref name="timeout"/>; throws <see cref="AdminPipeException"/> when the service refuses.
+    /// A connection the service closes without an answer (how it drops callers it will not serve, or a restart) is
+    /// tried once more; if that is closed too, the exception says so (<see cref="ClosedMessage"/>).
     /// </summary>
     public static async Task<AdminToken?> RequestAsync(string kind, string client, TimeSpan timeout, string ns = PipeNames.DefaultNamespace,
         CancellationToken cancellationToken = default)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         cts.CancelAfter(timeout);
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await RequestOnceAsync(kind, client, ns, cts, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ClosedException) when (attempt == 0)
+            {
+                try
+                {
+                    await Task.Delay(RetryDelay, cts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return null;
+                }
+            }
+            catch (ClosedException)
+            {
+                throw new AdminPipeException("forbidden", ClosedMessage);
+            }
+        }
+    }
+
+    /// <summary>The service closed the connection without an answer.</summary>
+    private sealed class ClosedException : Exception;
+
+    private static async Task<AdminToken?> RequestOnceAsync(string kind, string client, string ns, CancellationTokenSource cts,
+        CancellationToken cancellationToken)
+    {
         // Identification is enough for the service to read who we are; it cannot act as us.
         await using var pipe = new NamedPipeClientStream(".", LocalName(ns), PipeDirection.InOut, PipeOptions.Asynchronous,
             TokenImpersonationLevel.Identification);
@@ -65,7 +99,7 @@ public static class AdminPipe
             switch (ServerIsTrusted(pipe))
             {
                 case null:
-                    throw new AdminPipeException("forbidden", ClosedMessage);
+                    throw new ClosedException();
                 case false:
                     // Someone else created the pipe before the service did (the service was not running): never talk to it.
                     throw new AdminPipeException("forbidden", "the admin pipe is not owned by the SplitPlay service");
@@ -81,7 +115,7 @@ public static class AdminPipe
             var line = await ReadLineAsync(pipe, cts.Token).ConfigureAwait(false);
             if (line is null)
             {
-                throw new AdminPipeException("forbidden", ClosedMessage);
+                throw new ClosedException();
             }
 
             var answer = JsonSerializer.Deserialize(line, AdminPipeJsonContext.Default.AdminTokenResponse);
@@ -101,7 +135,7 @@ public static class AdminPipe
         {
             // Connected, then the service closed its end before answering.
             cancellationToken.ThrowIfCancellationRequested();
-            throw new AdminPipeException("forbidden", ClosedMessage);
+            throw new ClosedException();
         }
         catch (Exception ex) when (ex is OperationCanceledException or IOException or JsonException)
         {

@@ -173,17 +173,26 @@ public sealed class SecurityTests
     }
 
     [Fact]
-    public async Task Desk_session_answers_are_kept_for_a_few_seconds()
+    public async Task Desk_user_answers_are_kept_for_a_few_seconds_but_a_reused_session_id_is_seen_at_once()
     {
-        await using var svc = await TestService.StartAsync(platform: p => p.AddSession(6, "gamer", disconnected: false));
+        await using var svc = await TestService.StartAsync(platform: p =>
+        {
+            p.AddManagedAccount("sp-orphan");
+            p.AddSession(6, "gamer", disconnected: false);
+        });
         var desks = svc.App.Services.GetRequiredService<DeskSupervisor>();
-        var before = svc.Platform.SessionUserCalls;
+        var before = svc.Platform.FindAccountCalls;
         for (var i = 0; i < 20; i++)
         {
             Assert.False(desks.IsDeskSession(6));
         }
 
-        Assert.Equal(before + 1, svc.Platform.SessionUserCalls);
+        Assert.Equal(before + 1, svc.Platform.FindAccountCalls);
+
+        // Session 6 ends and its id goes to an account SplitPlay created: a desk session straight away.
+        svc.Platform.LogoffSession(6);
+        svc.Platform.AddSession(6, "sp-orphan", disconnected: false);
+        Assert.True(desks.IsDeskSession(6));
     }
 
     // ------------------------------------------------------------------ login throttling
@@ -317,6 +326,64 @@ public sealed class SecurityTests
     }
 
     [Fact]
+    public async Task A_pipe_client_tries_once_more_when_the_connection_is_closed_without_an_answer()
+    {
+        await using var svc = await TestService.StartAsync();
+        var server = svc.App.Services.GetRequiredService<AdminPipeServer>();
+        await server.Listening;
+        svc.App.Services.GetRequiredService<FakeAdminCallerCheck>().RefuseConnects = 1;
+        Assert.NotNull(await AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "test", TimeSpan.FromSeconds(5), PipeNamespace(svc)));
+        Assert.Equal(1, server.Dropped);
+    }
+
+    [Fact]
+    public async Task A_desk_flooding_the_pipe_with_slow_screens_does_not_crowd_out_the_owner()
+    {
+        await using var svc = await TestService.StartAsync();
+        var server = svc.App.Services.GetRequiredService<AdminPipeServer>();
+        await server.Listening;
+        var check = svc.App.Services.GetRequiredService<FakeAdminCallerCheck>();
+        var ns = PipeNamespace(svc);
+        using var hold = new ManualResetEventSlim();
+        check.HoldScreen = hold;
+        check.HoldSession = 5;
+        check.Session = 5;
+
+        var flood = new List<NamedPipeClientStream>();
+        try
+        {
+            for (var i = 0; i < 12; i++)
+            {
+                var c = new NamedPipeClientStream(".", AdminPipe.LocalName(ns), PipeDirection.InOut, PipeOptions.Asynchronous);
+                await c.ConnectAsync(5000);
+                flood.Add(c);
+            }
+
+            // Session 5 has its 4 screens stuck; the rest of its connections are dropped unscreened.
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(5);
+            while ((check.Holding < AdminPipeServer.MaxConcurrentScreensPerSession || server.Dropped < 8) && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(20);
+            }
+
+            Assert.Equal(AdminPipeServer.MaxConcurrentScreensPerSession, check.Holding);
+            Assert.Equal(8, server.Dropped);
+
+            // The owner (another session) still gets through.
+            check.Session = 1;
+            Assert.NotNull(await AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "test", TimeSpan.FromSeconds(5), ns));
+        }
+        finally
+        {
+            hold.Set();
+            foreach (var c in flood)
+            {
+                await c.DisposeAsync();
+            }
+        }
+    }
+
+    [Fact]
     public async Task A_flood_of_refused_pipe_callers_is_cheap_and_does_not_keep_the_admin_out()
     {
         await using var svc = await TestService.StartAsync();
@@ -396,7 +463,7 @@ public sealed class SecurityTests
         var dropped = server.Dropped;
         var ex = await Assert.ThrowsAsync<AdminPipeException>(() => AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "test", TimeSpan.FromSeconds(5), ns));
         Assert.Equal(AdminPipe.ClosedMessage, ex.Message);
-        Assert.Equal(dropped + 1, server.Dropped);
+        Assert.Equal(dropped + 2, server.Dropped); // the client tries once more before it reports the refusal
         Assert.True(DateTime.UtcNow - started < AdminPipeServer.RequestTimeout, "the refusal waited for the connection deadline");
     }
 

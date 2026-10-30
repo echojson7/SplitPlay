@@ -87,6 +87,9 @@ public interface IAdminCallerCheck
     /// </summary>
     AdminCallerDecision Screen(NamedPipeServerStream pipe);
 
+    /// <summary>The client's session (one cheap call, before <see cref="Screen"/>), or null when it cannot be read.</summary>
+    int? SessionOf(NamedPipeServerStream pipe);
+
     /// <summary>The final decision, after the request line was read (Windows can only impersonate a client that has written).</summary>
     AdminCallerDecision Check(NamedPipeServerStream pipe);
 }
@@ -132,10 +135,49 @@ public sealed class FakeAdminCallerCheck : IAdminCallerCheck
     /// <summary>The session every caller is in.</summary>
     public int Session { get; set; } = 1;
 
-    public AdminCallerDecision Screen(NamedPipeServerStream pipe) =>
-        RefuseAtConnect is { } reason
-            ? new AdminCallerDecision(false, "test caller", reason, Session)
-            : new AdminCallerDecision(true, "test caller", Session: Session);
+    /// <summary>When set, screens of callers in <see cref="HoldSession"/> wait on it (tests: screens still running).</summary>
+    public ManualResetEventSlim? HoldScreen { get; set; }
+
+    public int? HoldSession { get; set; }
+
+    private int _holding;
+    private int _refuseConnects;
+
+    /// <summary>The next this many connections are dropped at connect, then callers are screened as usual.</summary>
+    public int RefuseConnects
+    {
+        get => Math.Max(0, Volatile.Read(ref _refuseConnects));
+        set => Volatile.Write(ref _refuseConnects, value);
+    }
+
+    /// <summary>Screens waiting on <see cref="HoldScreen"/> right now.</summary>
+    public int Holding => Volatile.Read(ref _holding);
+
+    // A connection keeps the session it had when it was first asked about.
+    private readonly System.Runtime.CompilerServices.ConditionalWeakTable<NamedPipeServerStream, object> _sessions = [];
+
+    public int? SessionOf(NamedPipeServerStream pipe) => (int)_sessions.GetValue(pipe, _ => Session);
+
+    public AdminCallerDecision Screen(NamedPipeServerStream pipe)
+    {
+        var session = SessionOf(pipe)!.Value;
+        if (HoldScreen is { } hold && session == HoldSession)
+        {
+            Interlocked.Increment(ref _holding);
+            hold.Wait(TimeSpan.FromSeconds(10));
+            Interlocked.Decrement(ref _holding);
+        }
+
+        if (Interlocked.Decrement(ref _refuseConnects) >= 0)
+        {
+            return new AdminCallerDecision(false, "test caller", "refused once", session);
+        }
+
+        Interlocked.Exchange(ref _refuseConnects, 0);
+        return RefuseAtConnect is { } reason
+            ? new AdminCallerDecision(false, "test caller", reason, session)
+            : new AdminCallerDecision(true, "test caller", Session: session);
+    }
 
     public AdminCallerDecision Check(NamedPipeServerStream pipe) =>
         Refuse is { } reason

@@ -20,6 +20,12 @@ namespace SplitPlay.Service.Platform;
 [SupportedOSPlatform("windows")]
 public sealed class WindowsAdminCallerCheck(DeskSupervisor desks, IDeskPlatform platform) : IAdminCallerCheck
 {
+    public int? SessionOf(NamedPipeServerStream pipe)
+    {
+        ArgumentNullException.ThrowIfNull(pipe);
+        return GetNamedPipeClientSessionId(pipe.SafePipeHandle, out var session) ? (int)session : null;
+    }
+
     public AdminCallerDecision Screen(NamedPipeServerStream pipe)
     {
         ArgumentNullException.ThrowIfNull(pipe);

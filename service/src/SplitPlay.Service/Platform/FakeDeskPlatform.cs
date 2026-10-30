@@ -356,8 +356,16 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 
     public string? ConsoleUserName() => ConsoleUser;
 
-    public DeskAccount? FindAccount(string user) =>
-        _accounts.TryGetValue(user, out var account) ? new DeskAccount(user, account.CreatedBySplitPlay) : null;
+    private int _findAccountCalls;
+
+    /// <summary>How often <see cref="FindAccount"/> was asked.</summary>
+    public int FindAccountCalls => Volatile.Read(ref _findAccountCalls);
+
+    public DeskAccount? FindAccount(string user)
+    {
+        Interlocked.Increment(ref _findAccountCalls);
+        return _accounts.TryGetValue(user, out var account) ? new DeskAccount(user, account.CreatedBySplitPlay) : null;
+    }
 
     public bool VerifyPassword(string user, string password) =>
         _accounts.TryGetValue(user, out var account) && account.Password == password;

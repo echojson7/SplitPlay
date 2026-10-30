@@ -312,6 +312,9 @@ public static partial class ApiEndpoints
             return Results.NoContent();
         });
 
+        // ---- client launch pack (ClientPackEndpoints.cs)
+        api.MapClientPack();
+
         // ---- observability
         api.MapGet("/metrics", (DeskSupervisor s) => Results.Json(s.Metrics(), Ctx.MetricsDto));
 

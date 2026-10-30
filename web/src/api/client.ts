@@ -4,6 +4,8 @@
 import type {
   ApiErrorBody,
   AuthSession,
+  ClientPack,
+  ClientPlatform,
   Desk,
   DeskConfig,
   DeskProfile,
@@ -248,6 +250,16 @@ export class ApiClient {
     return this.request('DELETE', `/desks/${encodeURIComponent(id)}/clients/${encodeURIComponent(clientId)}`, {
       expect: 'none',
     })
+  }
+
+  /** Moonlight settings and launch scripts for a desk; `address` picks the host address (default: the first LAN one). */
+  clientPack(id: string, address?: string): Promise<ClientPack> {
+    return this.request('GET', `/desks/${encodeURIComponent(id)}/client-pack`, { query: { address } })
+  }
+
+  /** The launch script for one platform (.cmd for Windows, .sh for Linux). */
+  clientScript(id: string, platform: ClientPlatform, address?: string): Promise<Blob> {
+    return this.request('GET', `/desks/${encodeURIComponent(id)}/client-pack/${platform}`, { query: { address }, expect: 'blob' })
   }
 
   // --- host --------------------------------------------------------------------------------

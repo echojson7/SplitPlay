@@ -49,6 +49,7 @@ JSON in and out, `camelCase` field names. Errors: HTTP 4xx/5xx with `{"error":{"
 | GET | `/desks/{id}/clients` | array of paired Moonlight clients `{"id","name","pairedAt"?}` (409 `child_unavailable` when the desk is not running) |
 | POST | `/desks/{id}/pair` | `{"pin":"1234","name":"Laptop"}` |
 | DELETE | `/desks/{id}/clients/{clientId}` | revoke a client |
+| GET | `/desks/{id}/client-pack`, `/desks/{id}/client-pack/{windows,linux}` | Moonlight settings recommended for the desk and its launch scripts, see [Client launch pack](#client-launch-pack) |
 | GET | `/metrics` | host-level metrics plus per-desk metrics |
 | GET | `/logs?component=service&desk=desk-1&tail=200` | array of `{"time","level","component","desk"?,"message"}` |
 | GET | `/config/export` | zip download (secrets excluded unless `?includeSecrets=true&password=...`) |
@@ -142,6 +143,40 @@ value. Changing it on a running desk is `409 invalid_state`.
 
 `state` is one of the lifecycle states in ARCHITECTURE.md §4:
 `Defined, Provisioning, Connecting, SessionReady, DisplayReady, Ready, Streaming, Recovering, Faulted, Stopping, Stopped`.
+
+## Client launch pack
+
+The host cannot take V-Sync latency out of the client, only recommend settings that do (ARCHITECTURE.md §9: about
+8 ms on a 60 Hz client). `GET /desks/{id}/client-pack[?address=…]` answers:
+
+```json
+{
+  "desk": "desk-1", "host": "192.168.1.20", "port": 48089, "address": "192.168.1.20:48089", "app": "Desktop",
+  "settings": { "width": 1920, "height": 1080, "fps": 120, "bitrateKbps": 50000, "codec": "hevc",
+                "vsync": false, "displayMode": "fullscreen", "videoDecoder": "hardware", "framePacing": false },
+  "arguments": ["stream", "192.168.1.20:48089", "Desktop", "--resolution", "1920x1080", "--fps", "120",
+                "--bitrate", "50000", "--video-codec", "HEVC", "--video-decoder", "hardware",
+                "--display-mode", "fullscreen", "--no-vsync", "--no-frame-pacing"],
+  "scripts": [{ "platform": "windows", "fileName": "splitplay-desk-1.cmd" },
+              { "platform": "linux", "fileName": "splitplay-desk-1.sh" }]
+}
+```
+
+- `host`: `?address=` when given (an IPv4 address or host name, otherwise 400 `validation_failed`), else the first
+  address of `GET /host/network`, else the computer name; `port` is the desk's `basePort`; `app` is the desk's
+  Moonlight app "Desktop".
+- `settings`: the desk profile's resolution and fps (1920×1080 and 60 when unset) and codec (HEVC when unset); its
+  `bitrateKbps` when set, otherwise 30 Mbit/s for 1080p60 scaled by the square root of the pixel rate, +15 %, rounded
+  to 5 Mbit/s, 10–150 Mbit/s (the add-desk wizard's rule), kept within Moonlight's 500–500000 kbit/s. V-Sync off
+  (a VRR display avoids tearing without it), exclusive full screen, hardware decoding (D3D11VA on Windows), frame
+  pacing off.
+- `arguments` is moonlight-qt's command line after the executable; the option names are those of moonlight-qt's
+  `app/cli/commandlineparser.cpp` (v6.2.0). Moonlight finds the host by `address:port` and adds it when it does not
+  know it yet; the client must already be paired with the desk.
+- `GET /desks/{id}/client-pack/windows` and `/linux` (same `?address=`) download the scripts as attachments: a `.cmd`
+  (CRLF) that runs `%MOONLIGHT%`, a `Moonlight.exe` next to it, `%ProgramFiles%\Moonlight Game Streaming\Moonlight.exe`
+  or `Moonlight.exe` on `PATH`, and a POSIX `.sh` that runs `$MOONLIGHT`, `moonlight`, `moonlight-qt` or the Flathub
+  app `com.moonlight_stream.Moonlight`. Another platform name gives 404 `not_found`.
 
 ## Metrics
 

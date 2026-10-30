@@ -13,6 +13,7 @@ import type {
   MetricsSnapshot,
   PairedClient,
 } from '../src/api/types.ts'
+import { isValidPackHost, mockClientPack, mockClientScript } from './client-pack.ts'
 
 export interface MockRequest {
   method: string
@@ -409,6 +410,9 @@ export class MockBackend {
       return ok(clone(e.desk), 201)
     }
 
+    const pm = /^\/desks\/([^/]+)\/client-pack(?:\/([^/]+))?$/.exec(path)
+    if (pm && method === 'GET') return this.clientPack(decodeURIComponent(pm[1]!), pm[2], req.query?.['address'])
+
     const m = /^\/desks\/([^/]+)(?:\/(start|stop|restart|clients|pair)(?:\/([^/]+))?)?$/.exec(path)
     if (m) {
       const id = decodeURIComponent(m[1]!)
@@ -550,6 +554,22 @@ export class MockBackend {
     e.service = { ...e.service, status: target === 'running' ? 'starting' : 'stopping', canStart: false, canStop: false }
     e.target = target
     e.doneAt = this.now() + this.stepMs * steps
+  }
+
+  private clientPack(id: string, platform: string | undefined, address: string | undefined): MockResponse {
+    const e = this.desks.get(id)
+    if (!e) return err(404, 'not_found', `Desk ${id} not found`)
+    const host = address || MOCK_ADDRESSES[0]!
+    if (!isValidPackHost(host)) return err(400, 'validation_failed', 'address: must be an IPv4 address or a host name')
+    const pack = mockClientPack(e.desk, host)
+    if (platform === undefined) return ok(pack)
+    if (platform !== 'windows' && platform !== 'linux') return err(404, 'not_found', `no launch script for '${platform}'`)
+    const file = pack.scripts.find((x) => x.platform === platform)!.fileName
+    return {
+      status: 200,
+      headers: { 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename=${file}` },
+      bytes: new TextEncoder().encode(mockClientScript(pack, platform)) as Uint8Array<ArrayBuffer>,
+    }
   }
 
   private newSession(): MockResponse {

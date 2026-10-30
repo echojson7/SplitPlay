@@ -61,9 +61,6 @@
 #if !FileExists(AddBackslash(StageDir) + "native\splitplay-seat.exe")
   #error Missing staged file native\splitplay-seat.exe (check /DStageDir, see installer/README.md)
 #endif
-#if !FileExists(AddBackslash(StageDir) + "native\splitplay-rdsprov.dll")
-  #error Missing staged file native\splitplay-rdsprov.dll (check /DStageDir, see installer/README.md)
-#endif
 #if !FileExists(AddBackslash(StageDir) + "native\splitplay-stubworker.exe")
   #error Missing staged file native\splitplay-stubworker.exe (check /DStageDir, see installer/README.md)
 #endif
@@ -195,14 +192,14 @@ Name: "{commonappdata}\SplitPlay\logs"; Flags: uninsneveruninstall
 Source: "{#StageDir}\service\*"; DestDir: "{app}\service"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 ; The tray carries its own self-contained runtime (with WindowsDesktop), so it cannot share the service folder.
 Source: "{#StageDir}\tray\*"; DestDir: "{app}\tray"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#StageDir}\native\*"; DestDir: "{app}\native"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
+; SplitPlay ships no drivers of its own and no TermService protocol provider (owner's decision of 2026-10-30,
+; docs/ARCHITECTURE.md §10): splitplay-rdsprov is never installed, even when a stage still carries it.
+Source: "{#StageDir}\native\*"; DestDir: "{app}\native"; Excludes: "splitplay-rdsprov.*"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#StageDir}\worker\*"; DestDir: "{app}\worker"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs
 ; TermService (svchost) keeps TermWrap.dll loaded: an upgrade replaces it at the next restart, and the uninstaller
 ; deletes it at the next restart after "host revert" has pointed TermService back at termsrv.dll.
 Source: "{#StageDir}\termwrap\*"; DestDir: "{app}\termwrap"; Components: termwrap; Flags: ignoreversion recursesubdirs createallsubdirs restartreplace uninsrestartdelete
-; Driver packages are shipped but not installed in Stage 2 (pnputil comes with the drivers in Stage 4).
-Source: "{#StageDir}\drivers\*"; DestDir: "{app}\drivers"; Components: core; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
-; Interim gamepads (until the Stage 4 pad driver): extracted to {tmp} and run only when ViGEmBus is missing.
+; Gamepads (ViGEmBus, DualShock 4 by default): extracted to {tmp} and run only when ViGEmBus is missing.
 Source: "{#StageDir}\vigembus\{#ViGEmBusSetup}"; DestDir: "{tmp}"; Flags: dontcopy
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Components: core; Flags: ignoreversion
 Source: "..\NOTICE.md"; DestDir: "{app}"; Components: core; Flags: ignoreversion
@@ -220,6 +217,26 @@ Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 [Run]
 ; Started by hand the tray opens its dashboard window; the Run entry above passes --autostart to stay an icon.
 Filename: "{app}\tray\SplitPlay.Tray.exe"; Description: "{cm:LaunchTray}"; Flags: postinstall nowait skipifsilent runasoriginaluser
+
+[InstallDelete]
+; Earlier versions copied the test-signed driver packages and splitplay-rdsprov to Program Files (never installed or
+; registered). An upgrade removes exactly those files, and a folder only when nothing else is left in it. A first
+; install (no SplitPlay uninstall entry yet) touches nothing.
+Type: files; Name: "{app}\drivers\SplitPlayIdd\SplitPlayIdd.inf"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayIdd\SplitPlayIdd.dll"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayIdd\SplitPlayIdd.cat"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayIdd\SplitPlayIdd.pdb"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayPad\SplitPlayPad.inf"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayPad\SplitPlayPad.dll"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayPad\SplitPlayPad.cat"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayPad\SplitPlayPad.pdb"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\SplitPlayTestSigning.cer"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\drivers\README.txt"; Check: UpgradingSplitPlay
+Type: dirifempty; Name: "{app}\drivers\SplitPlayIdd"; Check: UpgradingSplitPlay
+Type: dirifempty; Name: "{app}\drivers\SplitPlayPad"; Check: UpgradingSplitPlay
+Type: dirifempty; Name: "{app}\drivers"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\native\splitplay-rdsprov.dll"; Check: UpgradingSplitPlay
+Type: files; Name: "{app}\native\splitplay-rdsprov.pdb"; Check: UpgradingSplitPlay
 
 [UninstallDelete]
 Type: files; Name: "{group}\{cm:WebUiShortcut}.url"
@@ -367,6 +384,13 @@ end;
 function ServiceExists: Boolean;
 begin
   Result := RegKeyExists(HKLM, ServiceKey);
+end;
+
+// SplitPlay was installed before (this AppId's uninstall entry): only then [InstallDelete] removes what it left.
+function UpgradingSplitPlay: Boolean;
+begin
+  Result := RegKeyExists(HKLM64,
+    'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{6F1C3B2A-5D4E-4C7B-9A8E-2B1D0F3C5A71}_is1');
 end;
 
 function DataDir: String;
@@ -614,8 +638,8 @@ begin
     Result := FindNewViGEmBusProductIn(HKLM32, Before32);
 end;
 
-{ Interim gamepads (until the Stage 4 per-session pad driver): the workers emulate Moonlight's gamepads as ViGEm pads,
-  which every session sees. Installs the bundled ViGEmBus only when no ViGEmBus driver is present; a failure is logged
+{ Gamepads: the workers emulate Moonlight's gamepads as ViGEm pads (DualShock 4 by default), which every session sees;
+  SplitPlay has no pad driver of its own (owner's decision of 2026-10-30). Installs the bundled ViGEmBus only when no ViGEmBus driver is present; a failure is logged
   and setup continues (desks then have no gamepads). }
 procedure InstallViGEmBus;
 var
@@ -900,6 +924,9 @@ begin
       UninstallRebootRequired := True;
     { After the service is gone, so that no worker holds a ViGEm pad any more. }
     UninstallViGEmBus;
+    { With every worker stopped: put the NVIDIA driver settings back (the global value a killed worker left recorded in
+      its undo file, and the workers' "SplitPlay worker" application profile). Nothing happens without an NVIDIA driver. }
+    RunHidden(ExpandConstant('{app}\worker\splitplay-worker.exe'), '--desk-dir "' + ExpandConstant('{tmp}\worker') + '" --restore-nvprefs-undo');
     RunHidden(SysTool('netsh.exe'), 'advfirewall firewall delete rule name="' + FirewallRuleWeb + '"');
     { netsh cannot delete by wildcard. }
     RunHidden(SysTool('WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' +

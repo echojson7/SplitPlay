@@ -16,7 +16,7 @@ $csc = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path $csc)) { throw "csc.exe not found at $csc" }
 
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
-foreach ($d in 'service\wwwroot', 'tray', 'native', 'worker', 'drivers', 'termwrap', 'vigembus') {
+foreach ($d in 'service\wwwroot', 'tray', 'native', 'worker', 'termwrap', 'vigembus') {
     New-Item -ItemType Directory -Force -Path (Join-Path $Stage $d) | Out-Null
 }
 $Stage = (Resolve-Path $Stage).Path
@@ -39,6 +39,9 @@ foreach ($e in $exes) { Copy-Item $stub (Join-Path $Stage $e) }
 Copy-Item $stub (Join-Path $Stage 'vigembus\ViGEmBus_1.22.0_x64_x86_arm64.exe')
 # Not real DLLs: the installer only copies them. The smoke test installs with /SkipTermWrap=1, so TermService never
 # points at the fake TermWrap.dll.
+# The frozen protocol provider (and a drivers\ folder, as an older stage had it) are staged on purpose: the installer
+# must leave both out, and Test-Installer.ps1 checks that they are not installed.
+New-Item -ItemType Directory -Force -Path (Join-Path $Stage 'drivers') | Out-Null
 Copy-Item $stub (Join-Path $Stage 'native\splitplay-rdsprov.dll')
 foreach ($dll in 'TermWrap.dll', 'UmWrap.dll', 'Zydis.dll') { Copy-Item $stub (Join-Path $Stage "termwrap\$dll") }
 Remove-Item $stub
@@ -52,7 +55,7 @@ Placeholder source offer (CI fake stage). The real worker stage contains the wri
 link to the exact Sunshine commit and patch queue used for this build.
 '@
 Set-Content -Encoding utf8 -Path (Join-Path $Stage 'termwrap\LICENSE') -Value 'Placeholder for the TermWrap MIT licence (CI fake stage).'
-Set-Content -Encoding utf8 -Path (Join-Path $Stage 'drivers\README.txt') -Value 'Driver packages are not part of the Stage 2 installer.'
+Set-Content -Encoding utf8 -Path (Join-Path $Stage 'drivers\README.txt') -Value 'Frozen driver packages: the installer must not ship this folder.'
 
 $www = Join-Path $Stage 'service\wwwroot'
 if ($WebDist -and (Test-Path (Join-Path $WebDist 'index.html'))) {

@@ -69,18 +69,35 @@ public sealed class FirewallRuleData
 
     public bool CoversPort(int port) => LocalPorts.Count == 0 || LocalPorts.Any(spec => PortSpecCovers(spec, port));
 
-    /// <summary>The single numeric ports of <see cref="LocalPorts"/>; null when there is a range or a keyword.</summary>
+    /// <summary>
+    /// Every port of <see cref="LocalPorts"/>, with ranges (<c>48098-48100</c>, as Windows may store a netsh rule)
+    /// expanded; null when there is a keyword, a malformed entry or a range of more than 1024 ports.
+    /// </summary>
     public IReadOnlySet<int>? NumericPorts()
     {
         var set = new HashSet<int>();
         foreach (var spec in LocalPorts)
         {
-            if (!int.TryParse(spec, NumberStyles.None, CultureInfo.InvariantCulture, out var port))
+            var dash = spec.IndexOf('-', StringComparison.Ordinal);
+            if (dash > 0
+                && int.TryParse(spec.AsSpan(0, dash), NumberStyles.None, CultureInfo.InvariantCulture, out var low)
+                && int.TryParse(spec.AsSpan(dash + 1), NumberStyles.None, CultureInfo.InvariantCulture, out var high)
+                && low <= high && high <= 65535 && high - low < 1024)
+            {
+                for (var port = low; port <= high; port++)
+                {
+                    set.Add(port);
+                }
+
+                continue;
+            }
+
+            if (!int.TryParse(spec, NumberStyles.None, CultureInfo.InvariantCulture, out var single))
             {
                 return null;
             }
 
-            set.Add(port);
+            set.Add(single);
         }
 
         return set;

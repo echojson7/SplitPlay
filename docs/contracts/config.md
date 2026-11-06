@@ -76,7 +76,9 @@ Rules:
   `"<InstallPath>\steam.exe" -master_ipc_name_override SplitPlay_<id> -gamepadui` (an owner's own "Steam" entry
   without the flag is kept). Changing the option requires a stopped desk.
 - `workerSettings`: extra Sunshine `name=value` settings passed to the worker after the service defaults (ipc.md);
-  names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters. Only these may be set (Sunshine's `src/config.cpp` at
+  names `[A-Za-z0-9_.-]{1,64}`, values up to 1024 characters of printable ASCII without `"` and `\`, or letters and
+  digits of other scripts (Sunshine reads its settings from the ANSI `argv`, where "best fit" turns look-alikes such as
+  U+FF02 into a quote that could end the argument; the desk `name` loses such characters). Only these may be set (Sunshine's `src/config.cpp` at
   the commit in `worker/upstream.lock`), because the worker runs as SYSTEM:
   - encoder and codec: `encoder`, `hevc_mode`, `av1_mode`, `qp`, `min_threads`, `sw_preset`, `sw_tune`, `nvenc_preset`,
     `nvenc_vbv_increase`, `nvenc_spatial_aq`, `nvenc_twopass`, `nvenc_h264_cavlc`, `nvenc_split_encode`,
@@ -90,13 +92,14 @@ Rules:
   - `sunshine_name`, `min_log_level`.
 
   Anything else (commands, files, certificates, network and UPnP, encryption modes, driver installs, capture, display
-  and audio devices, which follow the desk's session) gets a 400 naming the setting; a `config.json` that has them
+  and audio devices, which follow the desk's session) or an unsafe value gets a 400 naming the setting; a `config.json` that has them
   loads without them (logged as a warning) and the worker launch drops them in any case. `port` is set by the service
   from `basePort`, as are the defaults the service passes itself.
 - `name` (optional, up to 64 characters) is what Moonlight shows: the worker gets `sunshine_name=<PC name>-<name>`
   (`<PC name>-<id>` without a name) and names its mDNS instance after it. Moonlight tells hosts apart by their
   `uniqueid`, so renaming a desk (only while it is stopped) keeps its paired clients; they show the new name at the
-  next poll. A desk's `workerSettings.sunshine_name` overrides it.
+  next poll. A desk's `workerSettings.sunshine_name` overrides it. When two desks would get the same mDNS instance name
+  (equal up to case, punctuation or the 63-byte cut), each of them gets `<PC name>-<id>` instead.
 - `basePort` unique; if omitted the service picks `basePortStart + stride * k` with the lowest free `k ≥ 0`. A desk occupies `basePort-5 … basePort+21`.
   The service creates the desk's inbound firewall rules for those ports (`SplitPlay desk <id> (TCP|UDP)`, the worker's
   executable, private and domain profiles) and creates them again when the desk starts, or a worker restarts, and they

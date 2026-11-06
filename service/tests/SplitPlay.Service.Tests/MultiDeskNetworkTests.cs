@@ -24,6 +24,7 @@ public sealed class MultiDeskNetworkTests
     [InlineData("desk-2", "  Стол \t девушки  ", "GAMEPC-Стол девушки")]
     [InlineData("desk-3", "A#1\u0001", "GAMEPC-A1")]
     [InlineData("desk-4", "###", "GAMEPC-desk-4")]
+    [InlineData("desk-5", "A\uFF02 B\"\\ x=1\u02BA", "GAMEPC-A B x=1")]
     public void Sunshine_name_is_the_pc_name_and_the_desk_name(string id, string? name, string expected)
     {
         Assert.Equal(expected, DeskSupervisor.SunshineName("GAMEPC", id, name));
@@ -44,9 +45,70 @@ public sealed class MultiDeskNetworkTests
         Assert.Equal("Mine", overridden["sunshine_name"]);
     }
 
+    [Fact]
+    public void Worker_setting_values_that_could_break_out_of_their_argument_are_refused_and_dropped()
+    {
+        Assert.True(ConfigValidator.IsSafeWorkerArgument("Стол девушки 2"));
+        Assert.True(ConfigValidator.IsSafeWorkerArgument("[0x10,0xA0,0x11,0xA2]"));
+        // U+FF02 and U+FF3C become '"' and '\\' in the ANSI argv (best fit); U+02BA and U+2033 are quote-like too.
+        foreach (var value in new[] { "a\"b", "a\\", "a\uFF02 origin_web_ui_allowed=wan", "a\uFF3C", "a\u02BA", "a\u2033", "a\u00A0b", "a\tb" })
+        {
+            Assert.False(ConfigValidator.IsSafeWorkerArgument(value), value);
+        }
+
+        var settings = DeskSupervisor.WorkerSettings("desk-1", new DeskConfig
+        {
+            Id = "desk-1",
+            Name = "Living room",
+            WorkerSettings = new() { ["sunshine_name"] = "x\uFF02 origin_web_ui_allowed=wan", ["min_log_level"] = "debug" },
+        }).ToDictionary();
+        Assert.Equal($"{Environment.MachineName}-Living room", settings["sunshine_name"]);
+        Assert.Equal("debug", settings["min_log_level"]);
+    }
+
+    [Theory]
+    [InlineData("GAMEPC-Skyrim box", "gamepc-skyrim-box")]
+    [InlineData("GAMEPC-Стол  Девушки!", "gamepc-стол-девушки")]
+    [InlineData("--A..b--", "a-b")]
+    public void Mdns_instance_key_follows_the_worker_and_ignores_case(string name, string expected)
+    {
+        Assert.Equal(expected, DeskSupervisor.MdnsInstanceKey(name));
+    }
+
+    [Fact]
+    public void Mdns_instance_key_is_cut_to_63_bytes_on_a_character_boundary()
+    {
+        var key = DeskSupervisor.MdnsInstanceKey("PC-" + new string('Ж', 40));
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(key) <= 63);
+        Assert.Equal("pc-" + new string('ж', 30), key);
+    }
+
+    [Fact]
+    public void Desks_whose_names_would_collide_in_mdns_fall_back_to_the_desk_id()
+    {
+        DeskConfig[] desks =
+        [
+            new() { Id = "desk-1", Name = "Living room" },
+            new() { Id = "desk-2", Name = "living-ROOM" },
+            new() { Id = "desk-3", Name = "Kitchen" },
+            new() { Id = "desk-4", Name = new string('a', 70) + "1" },
+            new() { Id = "desk-5", Name = new string('a', 70) + "2" },
+        ];
+        string Name(DeskConfig d) => DeskSupervisor.UniqueSunshineName("GAMEPC", d.Id, d, desks);
+
+        Assert.Equal("GAMEPC-desk-1", Name(desks[0]));
+        Assert.Equal("GAMEPC-desk-2", Name(desks[1]));
+        Assert.Equal("GAMEPC-Kitchen", Name(desks[2]));
+        // Different names, but the same 63-byte instance name.
+        Assert.Equal("GAMEPC-desk-4", Name(desks[3]));
+        Assert.Equal("GAMEPC-desk-5", Name(desks[4]));
+    }
+
     // ------------------------------------------------------------------ owner tables
 
-    private static byte[] ListenerTableV4(params (int Port, uint Pid)[] rows)
+    private static byte[] ListenerTableV4(params (int Port, uint Pid)[] rows) => ListenerTableV4(0, rows);
+
+    private static byte[] ListenerTableV4(uint address, params (int Port, uint Pid)[] rows)
     {
         var table = new byte[4 + (rows.Length * TcpOwnerTable.RowSizeV4)];
         BinaryPrimitives.WriteUInt32LittleEndian(table, (uint)rows.Length);
@@ -54,6 +116,7 @@ public sealed class MultiDeskNetworkTests
         {
             var row = table.AsSpan(4 + (i * TcpOwnerTable.RowSizeV4));
             BinaryPrimitives.WriteUInt32LittleEndian(row, 2); // LISTEN
+            BinaryPrimitives.WriteUInt32BigEndian(row[4..], address);
             BinaryPrimitives.WriteUInt16BigEndian(row[8..], (ushort)rows[i].Port);
             BinaryPrimitives.WriteUInt32LittleEndian(row[20..], rows[i].Pid);
         }
@@ -100,6 +163,15 @@ public sealed class MultiDeskNetworkTests
         Assert.Equal(10u, UdpOwnerTable.FindOwner(UdpTable(true, (48099, 10)), true, 48099));
         Assert.Null(UdpOwnerTable.FindOwner(UdpTable(false, (48098, 9)), false, 48099));
 
+        // A listener or socket on one address only (127.0.0.1 here) does not block the worker's wildcard bind.
+        Assert.Null(TcpOwnerTable.FindListener(ListenerTableV4(0x7F000001, (48089, 777)), false, 48089));
+        var loopbackUdp = UdpTable(false, (48098, 9));
+        BinaryPrimitives.WriteUInt32BigEndian(loopbackUdp.AsSpan(4), 0x7F000001);
+        Assert.Null(UdpOwnerTable.FindOwner(loopbackUdp, false, 48098));
+        var loopbackV6 = ListenerTableV6(48110, 55);
+        loopbackV6[4 + 15] = 1; // ::1
+        Assert.Null(TcpOwnerTable.FindListener(loopbackV6, true, 48110));
+
         var malformed = UdpTable(false, (48098, 9));
         BinaryPrimitives.WriteUInt32LittleEndian(malformed, 99);
         Assert.Null(UdpOwnerTable.FindOwner(malformed, false, 48098));
@@ -143,6 +215,16 @@ public sealed class MultiDeskNetworkTests
             FirewallRules.DeskRule([DeskRule(ports: "LPort=48084,48089,48110")], name, FirewallRules.Tcp, ports, Program));
         Assert.Equal(FirewallRules.DeskRuleState.Match,
             FirewallRules.DeskRule([DeskRule().Replace(Program, Program.ToUpperInvariant(), StringComparison.Ordinal)], name, FirewallRules.Tcp, ports, Program));
+
+        // Windows may store the ports as ranges.
+        Assert.Equal(FirewallRules.DeskRuleState.Match,
+            FirewallRules.DeskRule([DeskRule(ports: "LPort=48084|LPort=48089-48089|LPort=48110")], name, FirewallRules.Tcp, ports, Program));
+        Assert.Equal(FirewallRules.DeskRuleState.Match,
+            FirewallRules.DeskRule([DeskRule(ports: "LPort=48098-48100")], name, FirewallRules.Tcp, [48098, 48099, 48100], Program));
+        Assert.Equal(FirewallRules.DeskRuleState.Different,
+            FirewallRules.DeskRule([DeskRule(ports: "LPort=48098-48101")], name, FirewallRules.Tcp, [48098, 48099, 48100], Program));
+        Assert.Equal(FirewallRules.DeskRuleState.Different,
+            FirewallRules.DeskRule([DeskRule(ports: "LPort=1-65535")], name, FirewallRules.Tcp, ports, Program));
 
         Assert.Equal(FirewallRules.DeskRuleState.Missing, FirewallRules.DeskRule([], name, FirewallRules.Tcp, ports, Program));
         Assert.Equal(FirewallRules.DeskRuleState.Missing,
@@ -198,7 +280,7 @@ public sealed class MultiDeskNetworkTests
     [Fact]
     public async Task A_busy_port_at_start_faults_the_desk_with_the_port_and_program()
     {
-        await using var svc = await TestService.StartAsync();
+        await using var svc = await TestService.StartAsync(["--Supervisor:PortBusyGraceMs=200"]);
         await svc.CreateDeskAsync("desk-1");
         svc.Platform.PortConflicts["desk-1"] = new PortConflict(48089, "TCP", "sunshine.exe");
         await svc.PostDeskActionAsync("desk-1", "start");
@@ -213,6 +295,21 @@ public sealed class MultiDeskNetworkTests
         svc.Platform.PortConflicts.Clear();
         await svc.PostDeskActionAsync("desk-1", "start");
         Assert.Null((await svc.WaitForStateAsync("desk-1", DeskState.Ready)).LastError);
+    }
+
+    [Fact]
+    public async Task A_port_freed_within_the_grace_at_start_does_not_fault_the_desk()
+    {
+        // A quick stop and start: the previous worker still holds the port for a moment.
+        await using var svc = await TestService.StartAsync(["--Supervisor:PortBusyGraceMs=5000"]);
+        await svc.CreateDeskAsync("desk-1");
+        svc.Platform.PortConflicts["desk-1"] = new PortConflict(48089, "TCP", "splitplay-worker.exe");
+        await svc.PostDeskActionAsync("desk-1", "start");
+        await Task.Delay(500);
+        svc.Platform.PortConflicts.Clear();
+
+        var ready = await svc.WaitForStateAsync("desk-1", DeskState.Ready, TimeSpan.FromSeconds(30));
+        Assert.Null(ready.LastError);
     }
 
     [Fact]

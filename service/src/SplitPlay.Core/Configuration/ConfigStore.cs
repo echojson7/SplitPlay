@@ -70,7 +70,10 @@ public static class ConfigStore
             dropped.Count > 0 ? dropped : null);
     }
 
-    /// <summary>Removes desk worker settings that are well-formed but not allowed; returns them as <c>desk-id.name</c>.</summary>
+    /// <summary>
+    /// Removes desk worker settings that are well-formed but not allowed, or whose value is not safe on the worker's
+    /// command line (<see cref="ConfigValidator.IsSafeWorkerArgument"/>); returns them as <c>desk-id.name</c>.
+    /// </summary>
     public static List<string> DropDisallowedWorkerSettings(SplitPlayConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -84,7 +87,10 @@ public static class ConfigStore
 
             foreach (var name in settings.Keys.ToList())
             {
-                if (name is not null && !ConfigValidator.IsAllowedWorkerSetting(name) && !ConfigValidator.ReservedWorkerSettings.Contains(name))
+                if (name is not null
+                    && ((!ConfigValidator.IsAllowedWorkerSetting(name) && !ConfigValidator.ReservedWorkerSettings.Contains(name))
+                        || (ConfigValidator.IsAllowedWorkerSetting(name) && settings[name] is { } value && !value.Any(char.IsControl)
+                            && !ConfigValidator.IsSafeWorkerArgument(value))))
                 {
                     settings.Remove(name);
                     dropped.Add($"{desk.Id}.{name}");

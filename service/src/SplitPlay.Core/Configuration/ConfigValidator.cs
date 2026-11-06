@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+using System.Globalization;
 using System.Text.RegularExpressions;
 using SplitPlay.Core.Ports;
 
@@ -70,6 +71,34 @@ public static partial class ConfigValidator
         // Identity and logging
         "sunshine_name", "min_log_level",
     };
+
+    /// <summary>
+    /// True for a character that may reach the worker's command line inside a setting value. Upstream Sunshine parses
+    /// its settings from the narrow <c>argv</c>, which Windows converts to the ANSI code page with "best fit", so a
+    /// look-alike such as U+FF02 (fullwidth quotation mark) turns into <c>"</c> and could end the quoted argument and
+    /// smuggle another <c>key=value</c> to a worker running as SYSTEM. Allowed: printable ASCII except <c>"</c> and
+    /// <c>\</c>, and outside ASCII only letters and decimal digits (no modifier letters such as U+02BA, no punctuation,
+    /// symbols, marks, other spaces or surrogates).
+    /// </summary>
+    public static bool IsSafeWorkerArgumentChar(char c)
+    {
+        if (c < 0x80)
+        {
+            return c >= 0x20 && c != 0x7F && c != '"' && c != '\\';
+        }
+
+        // Best fit maps quote-like and backslash-like characters (U+FF02, U+FF3C, U+2033, U+02BA...), which are all
+        // punctuation, symbols or modifier letters; letters and digits map to letters, digits or '?'.
+        return char.GetUnicodeCategory(c) is UnicodeCategory.UppercaseLetter or UnicodeCategory.LowercaseLetter
+            or UnicodeCategory.TitlecaseLetter or UnicodeCategory.OtherLetter or UnicodeCategory.DecimalDigitNumber;
+    }
+
+    /// <summary>True when every character of <paramref name="value"/> passes <see cref="IsSafeWorkerArgumentChar"/>.</summary>
+    public static bool IsSafeWorkerArgument(string value)
+    {
+        ArgumentNullException.ThrowIfNull(value);
+        return value.All(IsSafeWorkerArgumentChar);
+    }
 
     /// <summary>True for a setting a desk's <c>workerSettings</c> may carry (see <see cref="AllowedWorkerSettings"/>).</summary>
     public static bool IsAllowedWorkerSetting(string name)
@@ -266,6 +295,11 @@ public static partial class ConfigValidator
                 if (value is null || value.Length > 1024 || value.Any(char.IsControl))
                 {
                     errors.Add(new($"{path}.workerSettings.{name}", "must be a string of at most 1024 characters without control characters"));
+                }
+                else if (!IsSafeWorkerArgument(value))
+                {
+                    errors.Add(new($"{path}.workerSettings.{name}",
+                        "may hold printable ASCII except '\"' and '\\', and other letters and digits only (no quote-like or other symbols)"));
                 }
             }
         }

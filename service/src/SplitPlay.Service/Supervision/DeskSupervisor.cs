@@ -1006,8 +1006,9 @@ public sealed class DeskSupervisor : IHostedService
                         var c = _platform.Provision(config);
                         _platform.EnsureFirewallRules(config);
                         // Another program on the desk's ports: the worker could not bind them, and retrying would not
-                        // help, so the desk faults at once with the port and the program.
-                        if (_platform.FindPortConflict(config) is { } conflict)
+                        // help, so the desk faults with the port and the program. A worker of this desk that is still
+                        // exiting (a quick stop and start) gets PortBusyGraceMs to let go of them first.
+                        if (FindLastingPortConflict(config) is { } conflict)
                         {
                             throw new DeskProvisioningException(conflict.Message);
                         }
@@ -1269,6 +1270,26 @@ public sealed class DeskSupervisor : IHostedService
     }
 
     /// <summary>
+    /// A port conflict that is still there after <see cref="SupervisorOptions.PortBusyGraceMs"/> (checked every 250 ms),
+    /// or null. Blocks: runs on the provisioning thread.
+    /// </summary>
+    private PortConflict? FindLastingPortConflict(DeskConfig config)
+    {
+        var deadline = _time.GetUtcNow() + TimeSpan.FromMilliseconds(Math.Max(0, _options.Value.PortBusyGraceMs));
+        while (true)
+        {
+            var conflict = _platform.FindPortConflict(config);
+            var left = deadline - _time.GetUtcNow();
+            if (conflict is null || left <= TimeSpan.Zero)
+            {
+                return conflict;
+            }
+
+            Thread.Sleep(left < TimeSpan.FromMilliseconds(250) ? left : TimeSpan.FromMilliseconds(250));
+        }
+    }
+
+    /// <summary>
     /// Before every worker start: the desk's firewall rules are created again if someone deleted them, and its ports
     /// must be free. A busy port gets <see cref="SupervisorOptions.PortBusyGraceMs"/> to come free (the previous worker
     /// may still be exiting); after that the attempt fails with "Port N busy: X" instead of starting a worker that cannot
@@ -1298,9 +1319,11 @@ public sealed class DeskSupervisor : IHostedService
 
     /// <summary>
     /// The name Moonlight shows for a desk and the worker's mDNS instance is made from (Sunshine's <c>sunshine_name</c>,
-    /// patch 0017): <c>&lt;PC name&gt;-&lt;desk name&gt;</c>, with the desk id when the desk has no name. Control
-    /// characters and <c>#</c> (a comment in Sunshine's settings syntax) are left out and runs of white space become one
-    /// space. Moonlight tells hosts apart by their uniqueid, not by this name, so renaming a desk keeps its pairings.
+    /// patch 0017): <c>&lt;PC name&gt;-&lt;desk name&gt;</c>, with the desk id when the desk has no name. <c>#</c> (a
+    /// comment in Sunshine's settings syntax) and every character that is not safe on the worker's command line
+    /// (<see cref="ConfigValidator.IsSafeWorkerArgumentChar"/>: quotes, backslashes, symbols, control characters) are
+    /// left out and runs of white space become one space. Moonlight tells hosts apart by their uniqueid, not by this
+    /// name, so renaming a desk keeps its pairings.
     /// </summary>
     internal static string SunshineName(string machineName, string deskId, string? deskName)
     {
@@ -1316,7 +1339,7 @@ public sealed class DeskSupervisor : IHostedService
                 continue;
             }
 
-            if (char.IsControl(c) || c == '#')
+            if (c == '#' || !ConfigValidator.IsSafeWorkerArgumentChar(c))
             {
                 continue;
             }
@@ -1334,14 +1357,80 @@ public sealed class DeskSupervisor : IHostedService
     }
 
     /// <summary>
+    /// <see cref="SunshineName"/>, or <c>&lt;PC name&gt;-&lt;desk id&gt;</c> when another desk of <paramref name="allDesks"/>
+    /// would get the same mDNS instance name (<see cref="MdnsInstanceKey"/>: same name up to case, punctuation or the
+    /// 63-byte cut). Two desks with one instance name would hide each other from Moonlight's discovery.
+    /// </summary>
+    internal static string UniqueSunshineName(string machineName, string deskId, DeskConfig config, IEnumerable<DeskConfig> allDesks)
+    {
+        var name = SunshineName(machineName, deskId, config.Name);
+        var key = MdnsInstanceKey(name);
+        var clash = allDesks.Any(d => !string.Equals(d.Id, deskId, StringComparison.Ordinal)
+            && string.Equals(MdnsInstanceKey(NameOf(d)), key, StringComparison.Ordinal));
+        return clash ? $"{machineName}-{deskId}" : name;
+
+        string NameOf(DeskConfig d)
+        {
+            foreach (var (setting, value) in d.WorkerSettings ?? [])
+            {
+                if (string.Equals(setting, "sunshine_name", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(value))
+                {
+                    return value;
+                }
+            }
+
+            return SunshineName(machineName, d.Id, d.Name);
+        }
+    }
+
+    /// <summary>
+    /// The worker's mDNS instance name for <paramref name="sunshineName"/> (patch 0017, <c>net::mdns_desk_instance_name</c>:
+    /// ASCII letters and digits kept, other ASCII becomes one <c>-</c>, other characters kept, cut to 63 UTF-8 bytes,
+    /// trailing <c>-</c> dropped), in lower case because DNS-SD compares names without case.
+    /// </summary>
+    internal static string MdnsInstanceKey(string sunshineName)
+    {
+        var text = new System.Text.StringBuilder(sunshineName.Length);
+        foreach (var rune in sunshineName.EnumerateRunes())
+        {
+            if (rune.Value < 0x80)
+            {
+                if (System.Text.Rune.IsLetterOrDigit(rune))
+                {
+                    text.Append(char.ToLowerInvariant((char)rune.Value));
+                }
+                else if (rune.Value >= 0x20 && rune.Value != 0x7F && text.Length > 0 && text[^1] != '-')
+                {
+                    text.Append('-');
+                }
+            }
+            else if (rune.Value >= 0xA0)
+            {
+                text.Append(System.Text.Rune.ToLowerInvariant(rune).ToString());
+            }
+        }
+
+        var key = text.ToString();
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(key);
+        while (bytes > 63)
+        {
+            var last = key.EnumerateRunes().Last();
+            key = key[..^last.Utf16SequenceLength];
+            bytes -= last.Utf8SequenceLength;
+        }
+
+        return key.TrimEnd('-');
+    }
+
+    /// <summary>
     /// Sunshine settings for the worker: defaults recommended in worker/README.md, overridden by the desk's
     /// <c>workerSettings</c>. Encoder, adapter, output and audio sink stay unset so that the worker picks the session's own.
     /// </summary>
-    internal static IEnumerable<KeyValuePair<string, string>> WorkerSettings(string deskId, DeskConfig config)
+    internal static IEnumerable<KeyValuePair<string, string>> WorkerSettings(string deskId, DeskConfig config, IEnumerable<DeskConfig>? allDesks = null)
     {
         var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
-            ["sunshine_name"] = SunshineName(Environment.MachineName, deskId, config.Name),
+            ["sunshine_name"] = UniqueSunshineName(Environment.MachineName, deskId, config, allDesks ?? []),
             ["min_log_level"] = "info",
             ["nvenc_preset"] = "1",
             ["nvenc_twopass"] = "disabled",
@@ -1354,8 +1443,9 @@ public sealed class DeskSupervisor : IHostedService
         };
         foreach (var (name, value) in config.WorkerSettings ?? [])
         {
-            // Only the allowed settings ever reach a worker running as SYSTEM, whatever config.json says.
-            if (ConfigValidator.IsAllowedWorkerSetting(name))
+            // Only the allowed settings, with values that cannot break out of their argument, ever reach a worker
+            // running as SYSTEM, whatever config.json says.
+            if (ConfigValidator.IsAllowedWorkerSetting(name) && value is not null && ConfigValidator.IsSafeWorkerArgument(value))
             {
                 settings[name] = value;
             }
@@ -1380,7 +1470,7 @@ public sealed class DeskSupervisor : IHostedService
             UpdateSteamApp(deskId, config, deskDirectory);
             args.AddRange(["--desk-dir", deskDirectory, "--pipe", pipe, "--desk", deskId]);
             args.Add(FormattableString.Invariant($"port={config.BasePort}"));
-            foreach (var (name, value) in WorkerSettings(deskId, config))
+            foreach (var (name, value) in WorkerSettings(deskId, config, _config.Snapshot().Desks))
             {
                 args.Add($"{name}={value}");
             }

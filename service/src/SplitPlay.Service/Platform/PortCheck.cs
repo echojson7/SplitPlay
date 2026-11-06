@@ -87,21 +87,29 @@ internal static class WindowsPortCheck
         return PortCheck.Find(basePort,
             port => (tcp4 is null ? null : TcpOwnerTable.FindListener(tcp4, false, port)) ?? (tcp6 is null ? null : TcpOwnerTable.FindListener(tcp6, true, port)),
             port => (udp4 is null ? null : UdpOwnerTable.FindOwner(udp4, false, port)) ?? (udp6 is null ? null : UdpOwnerTable.FindOwner(udp6, true, port)),
-            port => BindRefused(SocketType.Stream, ProtocolType.Tcp, port),
-            port => BindRefused(SocketType.Dgram, ProtocolType.Udp, port),
+            port => BindRefused(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp, port)
+                || BindRefused(AddressFamily.InterNetworkV6, SocketType.Stream, ProtocolType.Tcp, port),
+            port => BindRefused(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp, port)
+                || BindRefused(AddressFamily.InterNetworkV6, SocketType.Dgram, ProtocolType.Udp, port),
             ProcessName);
     }
 
     /// <summary>
     /// True when Windows refuses a bind to the port with WSAEACCES (an excluded port range). "In use" is not reported
     /// here: the owner tables name the process, and a port that only has connections in TIME_WAIT is fine for the worker.
+    /// IPv4 and IPv6 have separate excluded ranges, so both are tried; a PC without IPv6 just does not refuse.
     /// </summary>
-    private static bool BindRefused(SocketType type, ProtocolType protocol, int port)
+    private static bool BindRefused(AddressFamily family, SocketType type, ProtocolType protocol, int port)
     {
         try
         {
-            using var socket = new Socket(AddressFamily.InterNetwork, type, protocol);
-            socket.Bind(new IPEndPoint(IPAddress.Any, port));
+            using var socket = new Socket(family, type, protocol);
+            if (family == AddressFamily.InterNetworkV6)
+            {
+                socket.DualMode = false;
+            }
+
+            socket.Bind(new IPEndPoint(family == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, port));
             return false;
         }
         catch (SocketException ex)

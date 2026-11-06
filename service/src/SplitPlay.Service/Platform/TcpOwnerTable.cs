@@ -17,6 +17,9 @@ public static class TcpOwnerTable
 
     public const int RowSizeV6 = 56;
 
+    /// <summary>True for the wildcard local address (0.0.0.0 or ::): every byte is zero.</summary>
+    public static bool IsWildcard(ReadOnlySpan<byte> address) => !address.ContainsAnyExcept((byte)0);
+
     /// <summary>The port of a port DWORD as the table stores it (its first two bytes, big-endian).</summary>
     public static int Port(ReadOnlySpan<byte> portField) => (portField[0] << 8) | portField[1];
 
@@ -75,9 +78,10 @@ public static class TcpOwnerTable
     }
 
     /// <summary>
-    /// The pid listening on local <paramref name="port"/> (any local address) in a
+    /// The pid listening on local <paramref name="port"/> on the wildcard address (0.0.0.0 or ::) in a
     /// <c>GetExtendedTcpTable(TCP_TABLE_OWNER_PID_LISTENER)</c> table, whose rows have the layout above. Null when no
-    /// row matches or the table is malformed.
+    /// row matches or the table is malformed. A listener on one address only (127.0.0.1, a VPN adapter) does not stop
+    /// the worker's own wildcard bind, so it is not counted.
     /// </summary>
     public static uint? FindListener(ReadOnlySpan<byte> table, bool v6, int port)
     {
@@ -97,7 +101,8 @@ public static class TcpOwnerTable
         {
             var row = table.Slice(4 + (i * rowSize), rowSize);
             var localPort = v6 ? row.Slice(20, 4) : row.Slice(8, 4);
-            if (Port(localPort) == port)
+            var localAddr = v6 ? row[..16] : row.Slice(4, 4);
+            if (Port(localPort) == port && IsWildcard(localAddr))
             {
                 return BinaryPrimitives.ReadUInt32LittleEndian(v6 ? row.Slice(52, 4) : row.Slice(20, 4));
             }
@@ -118,7 +123,10 @@ public static class UdpOwnerTable
 
     public const int RowSizeV6 = 28;
 
-    /// <summary>The pid of a socket bound to local <paramref name="port"/> (any local address), or null.</summary>
+    /// <summary>
+    /// The pid of a socket bound to local <paramref name="port"/> on the wildcard address (0.0.0.0 or ::), or null; as
+    /// for TCP, a socket bound to one address only is not counted.
+    /// </summary>
     public static uint? FindOwner(ReadOnlySpan<byte> table, bool v6, int port)
     {
         var rowSize = v6 ? RowSizeV6 : RowSizeV4;
@@ -137,7 +145,7 @@ public static class UdpOwnerTable
         {
             var row = table.Slice(4 + (i * rowSize), rowSize);
             var localPort = v6 ? row.Slice(20, 4) : row.Slice(4, 4);
-            if (TcpOwnerTable.Port(localPort) == port)
+            if (TcpOwnerTable.Port(localPort) == port && TcpOwnerTable.IsWildcard(v6 ? row[..16] : row[..4]))
             {
                 return BinaryPrimitives.ReadUInt32LittleEndian(v6 ? row.Slice(24, 4) : row.Slice(8, 4));
             }

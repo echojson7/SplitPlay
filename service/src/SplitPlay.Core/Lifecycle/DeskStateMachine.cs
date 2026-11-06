@@ -26,6 +26,9 @@ public sealed class InvalidDeskTransitionException(DeskState state, DeskTrigger 
 /// transient and retrying from Connecting would skip the failed step.</item>
 /// <item><c>Pause</c> (the PC goes to sleep) moves a running desk to Recovering without counting a failure and without
 /// a retry time; only <c>Resume</c> (back to Connecting) or <c>Stop</c> leave it.</item>
+/// <item><c>GpuReset</c> (the graphics driver was reset) moves a running desk to Recovering with a short fixed delay and
+/// without counting a failure; while Recovering it forgives the failure the reset caused (Recovering to Recovering).
+/// Beyond <see cref="RecoveryPolicy.MaxGpuResetsInWindow"/> resets it is an ordinary <c>Fail</c>.</item>
 /// </list>
 /// </remarks>
 public sealed class DeskStateMachine
@@ -60,7 +63,8 @@ public sealed class DeskStateMachine
     ];
 
     private readonly TimeProvider _time;
-    private readonly Queue<DateTimeOffset> _failures = new();
+    private readonly List<DateTimeOffset> _failures = [];
+    private readonly List<DateTimeOffset> _gpuResets = [];
 
     public DeskStateMachine(TimeProvider? time = null, RecoveryPolicy? policy = null, DeskState initial = DeskState.Defined)
     {
@@ -152,18 +156,44 @@ public sealed class DeskStateMachine
                 return DeskState.Faulted;
 
             case DeskTrigger.Fail when Recoverable.Contains(State):
-            {
+                return ResolveFailure(now, commit, reason);
+
+            case DeskTrigger.GpuReset when Recoverable.Contains(State):
                 Prune(now);
-                var faulted = _failures.Count + 1 > Policy.MaxFailuresInWindow
-                              || ConsecutiveFailures + 1 > Policy.MaxConsecutiveFailures;
-                if (commit)
+                if (_gpuResets.Count + 1 > Policy.MaxGpuResetsInWindow)
                 {
-                    RecordFailure(now, reason);
-                    RetryAt = faulted ? null : now + Policy.BackoffFor(ConsecutiveFailures);
+                    // A driver that keeps resetting: count it, so the desk faults instead of restarting forever.
+                    return ResolveFailure(now, commit, reason);
                 }
 
-                return faulted ? DeskState.Faulted : DeskState.Recovering;
-            }
+                if (commit)
+                {
+                    _gpuResets.Add(now);
+                    LastError = reason ?? "the graphics driver was reset";
+                    RetryAt = now + Policy.GpuResetDelay;
+                }
+
+                return DeskState.Recovering;
+
+            case DeskTrigger.GpuReset when State == DeskState.Recovering && !Paused && RetryAt is not null:
+                // The worker died of the reset before it was reported: take that failure back and retry after the delay.
+                Prune(now);
+                if (_failures.Count == 0 || now - _failures[^1] > Policy.GpuResetForgiveWindow
+                    || _gpuResets.Count + 1 > Policy.MaxGpuResetsInWindow)
+                {
+                    return null;
+                }
+
+                if (commit)
+                {
+                    _failures.RemoveAt(_failures.Count - 1);
+                    ConsecutiveFailures = Math.Max(0, ConsecutiveFailures - 1);
+                    _gpuResets.Add(now);
+                    LastError = reason ?? "the graphics driver was reset";
+                    RetryAt = now + Policy.GpuResetDelay;
+                }
+
+                return DeskState.Recovering;
 
             case DeskTrigger.Pause when Recoverable.Contains(State):
                 if (commit)
@@ -195,6 +225,20 @@ public sealed class DeskStateMachine
         }
     }
 
+    private DeskState ResolveFailure(DateTimeOffset now, bool commit, string? reason)
+    {
+        Prune(now);
+        var faulted = _failures.Count + 1 > Policy.MaxFailuresInWindow
+                      || ConsecutiveFailures + 1 > Policy.MaxConsecutiveFailures;
+        if (commit)
+        {
+            RecordFailure(now, reason);
+            RetryAt = faulted ? null : now + Policy.BackoffFor(ConsecutiveFailures);
+        }
+
+        return faulted ? DeskState.Faulted : DeskState.Recovering;
+    }
+
     private void OnSimple(DeskTrigger trigger)
     {
         switch (trigger)
@@ -202,6 +246,7 @@ public sealed class DeskStateMachine
             case DeskTrigger.Start:
                 // A user-initiated start gets a fresh failure budget.
                 _failures.Clear();
+                _gpuResets.Clear();
                 ConsecutiveFailures = 0;
                 LastError = null;
                 RetryAt = null;
@@ -220,16 +265,14 @@ public sealed class DeskStateMachine
 
     private void RecordFailure(DateTimeOffset now, string? reason)
     {
-        _failures.Enqueue(now);
+        _failures.Add(now);
         ConsecutiveFailures++;
         LastError = reason ?? "failure";
     }
 
     private void Prune(DateTimeOffset now)
     {
-        while (_failures.Count > 0 && now - _failures.Peek() > Policy.FailureWindow)
-        {
-            _failures.Dequeue();
-        }
+        _failures.RemoveAll(at => now - at > Policy.FailureWindow);
+        _gpuResets.RemoveAll(at => now - at > Policy.FailureWindow);
     }
 }

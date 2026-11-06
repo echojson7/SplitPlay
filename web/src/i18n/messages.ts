@@ -274,6 +274,12 @@ export const en = {
   'unit.ms': '{value} ms',
   'unit.gb': '{value} GB',
   'unit.percent': '{value} %',
+
+  'warning.gpuReset': 'Graphics driver reset',
+  'warning.gpuResetDesks': 'Desks restarted: {count}, their sessions kept',
+  'warning.gpuResetNoDesks': 'No desk was running',
+  'warning.encoderBusy': 'Video encoder overloaded',
+  'warning.vramFull': 'Video memory full',
   'unit.fps': '{value} FPS',
 } as const
 
@@ -552,6 +558,12 @@ export const ru: Partial<Messages> = {
   'unit.ms': '{value} мс',
   'unit.gb': '{value} ГБ',
   'unit.percent': '{value} %',
+
+  'warning.gpuReset': 'Сбой драйвера видеокарты',
+  'warning.gpuResetDesks': 'Перезапущено столов: {count}, сессии сохранены',
+  'warning.gpuResetNoDesks': 'Столы не работали',
+  'warning.encoderBusy': 'Кодер видеокарты перегружен',
+  'warning.vramFull': 'Видеопамять заполнена',
   'unit.fps': '{value} FPS',
 }
 

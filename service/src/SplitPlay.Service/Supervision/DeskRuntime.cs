@@ -61,6 +61,9 @@ internal sealed class DeskRuntime
     /// <summary>Set to end the current worker run without a worker fault (e.g. the session changed after a reconnect).</summary>
     public TaskCompletionSource<string>? WorkerAbort { get; set; }
 
+    /// <summary>While the run loop waits out a retry: completed when <c>RetryAt</c> moved (a graphics driver reset), so it re-reads it.</summary>
+    public TaskCompletionSource? RetryWake { get; set; }
+
     /// <summary>The seat reported <c>session_lost</c> and has not reported <c>session_restored</c> yet.</summary>
     public bool SessionLost { get; set; }
 

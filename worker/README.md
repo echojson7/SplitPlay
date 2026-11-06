@@ -45,6 +45,11 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0016` input thread | input is injected on its own thread (`input_pool`, one thread, MMCSS "Games") instead of Sunshine's shared task-pool thread; key repeat, gamepads, rumble/LED callbacks and touch/pen repeat run there too, so ordering and the input state's synchronisation are upstream's. See *Scheduling* below |
 | `0017` mDNS per desk | the DNS-SD instance is named after `sunshine_name` instead of the host name every desk shares (`net::mdns_desk_instance_name`: ASCII punctuation and spaces become `-`, other UTF-8 is kept, at most 63 bytes on a character boundary; an ASCII fallback ending in the port if Windows refuses a non-ASCII name); `sunshine_name=` is also read from the UTF-8 command line, since the narrow `argv` is in the ANSI code page. See *mDNS* below |
 
+| `0022` lost GPU device | when DXGI capture fails and the D3D device reports `GetDeviceRemovedReason()` (driver reset/TDR, hang, driver update), the worker logs it, sends `event gpu_reset {reason, where}` and exits with code 5; the service starts a new worker in the same session. Standalone it only logs. See *Graphics driver reset* below |
+
+Patch numbers 0018–0024 are reserved per Stage 4 PR (docs/ARCHITECTURE.md §10), so a file may keep its number while
+earlier ones are still in review; `export-patches.sh` numbers files in queue order, so rename them back after an export.
+
 ### Changing a patch or adding one
 
 ```bash
@@ -329,6 +334,18 @@ start. A worker that finds the undo file held by a running worker logs that as i
 two workers create the profile at the same time, the second reloads the driver settings and retries once. A desk
 with `nvenc_latency_over_power=disabled` removes the profile's setting for every desk until another desk
 starts. Both settle once the service owns driver profiles (below).
+
+### Graphics driver reset (patch 0022)
+
+A TDR (Windows resets a GPU that stopped answering for 2 s), a driver crash or a driver update takes the worker's
+D3D11 device with it, and the NVENC session built on that device. Neither comes back: upstream ends the stream and
+the next one may fail too. Patch 0022 checks the device when DXGI capture reports an error; a lost device is reported
+to the service (`gpu_reset`) and the worker exits with code 5. The service also watches the System event log for
+"Display driver … stopped responding and has successfully recovered" (provider `Display`, event 4101), which covers
+workers that were idle or failed elsewhere (in the encoder). Either way every desk's worker is restarted 3 s later
+in its unchanged RDP session: games and windows survive, Moonlight reconnects to a fresh device, and the Desks page
+shows "Сбой драйвера видеокарты" for 15 minutes. A driver that keeps resetting (more than 3 times in 10 minutes)
+counts as ordinary failures, so the desk faults instead of looping.
 
 ## Not possible without drivers of our own
 

@@ -9,6 +9,7 @@ import type {
   DeskState,
   HostService,
   HostSettings,
+  HostWarning,
   LogLine,
   MetricsSnapshot,
   PairedClient,
@@ -46,6 +47,8 @@ export interface MockBackendOptions {
   stepMs?: number
   /** Network profile and mDNS state GET /host/network reports (default: a private network with mDNS allowed). */
   network?: { profile: 'Public' | 'Private' | 'Domain' | null; mdnsAllowed: boolean | null }
+  /** Host warnings GET /metrics reports (default: none). */
+  warnings?: HostWarning[]
 }
 
 const SESSION_COOKIE = 'sp_session'
@@ -196,6 +199,7 @@ export class MockBackend {
   private clientSeq = 1
   private readonly services = new Map<string, ServiceEntry>()
   private readonly network: { profile: 'Public' | 'Private' | 'Domain' | null; mdnsAllowed: boolean | null }
+  private readonly warnings: HostWarning[]
 
   constructor(opts: MockBackendOptions = {}) {
     this.now = opts.now ?? (() => Date.now())
@@ -203,6 +207,7 @@ export class MockBackend {
     this.password = opts.password
     this.trusted = opts.trusted ?? opts.password === undefined
     this.network = opts.network ?? { profile: 'Private', mdnsAllowed: true }
+    this.warnings = opts.warnings ?? []
     this.startedAt = this.now()
     for (const s of MOCK_SERVICES) this.services.set(s.name.toLowerCase(), { service: clone(s), doneAt: 0 })
     this.seed()
@@ -634,6 +639,7 @@ export class MockBackend {
             vramTotalMb: 2048,
           },
         ],
+        warnings: clone(this.warnings),
       },
       desks,
     }

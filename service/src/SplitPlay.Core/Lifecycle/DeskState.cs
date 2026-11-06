@@ -61,6 +61,13 @@ public enum DeskTrigger
 
     /// <summary>The PC woke up: a paused desk reconnects (a new worker, so NVENC and capture are recreated).</summary>
     Resume,
+
+    /// <summary>
+    /// The graphics driver was reset (TDR): the worker is restarted after <see cref="RecoveryPolicy.GpuResetDelay"/>
+    /// and the session stays. Not counted as a failure, up to <see cref="RecoveryPolicy.MaxGpuResetsInWindow"/> resets;
+    /// while Recovering it forgives the failure the reset just caused.
+    /// </summary>
+    GpuReset,
 }
 
 public static class DeskStateExtensions

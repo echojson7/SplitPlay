@@ -115,6 +115,19 @@ describe('DeskCard', () => {
     expect(w.find('[data-live]').text()).toBe('10.0.0.7 · 60 FPS')
   })
 
+  it('adds the desk GPU load to the row once it is measured', async () => {
+    const stream = { client: 'Ноутбук Ани', address: '192.168.1.37', width: 1920, height: 1080, fps: 120, codec: 'hevc', bitrateKbps: 50000, hdr: false }
+    const metrics = { fps: 120, bitrateKbps: 0, encodeMsP99: 0, rttMs: 8, clients: 1, gpuPercent: 34, encoderPercent: 12, vramMb: 2900 }
+    const streaming = await mountCard(desk('Streaming', { stream, metrics }))
+    expect(streaming.find('[data-live]').text()).toBe('Ноутбук Ани · 120 FPS · 8 мс · GPU 34 %')
+
+    const idle = await mountCard(desk('Ready', { metrics: { fps: 0, bitrateKbps: 0, encodeMsP99: 0, clients: 0, gpuPercent: 3 } }))
+    expect(idle.text()).toContain('anna · 1920×1080 · 120 FPS · GPU 3 %')
+
+    const unknown = await mountCard(desk('Ready', { metrics: { fps: 0, bitrateKbps: 0, encodeMsP99: 0, clients: 0, gpuPercent: null } }))
+    expect(unknown.text()).not.toContain('GPU')
+  })
+
   it('shows the last error of a faulted desk', async () => {
     const w = await mountCard(desk('Faulted', { lastError: 'seat: logon failed' }))
     expect(w.text()).toContain('seat: logon failed')

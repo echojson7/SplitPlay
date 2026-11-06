@@ -80,7 +80,7 @@ web-api.md leaves some response shapes open; the client accepts these and degrad
 - `POST /auth/password` body `{ newPassword, currentPassword? }` (no `currentPassword` for the first password).
 - `GET /desks`, `/desks/{id}/clients`, `/logs`: a bare array or `{ desks | clients | lines: [...] }`.
 - Client: `{ id, name, pairedAt? }`. Log line: `{ time, level, component, desk?, message }`.
-- `GET /metrics` -> `{ host: { cpuPercent?, memoryUsedMb?, memoryTotalMb?, composeHz?, gpus: [{ luid, name, utilizationPercent?, encoderPercent?, vramUsedMb?, vramTotalMb? }] }, desks: [{ id, fps, bitrateKbps, encodeMsP99, clients }] }`.
+- `GET /metrics` -> `{ host: { cpuPercent?, memoryUsedMb?, memoryTotalMb?, composeHz?, gpus: [{ luid, name, utilizationPercent?, encoderPercent?, vramUsedMb?, vramTotalMb? }] }, desks: [{ id, fps, bitrateKbps, encodeMsP99, clients, gpuPercent?, encoderPercent?, vramMb? }] }`.
   The desk form's GPU list comes from `host.gpus`.
 - Host settings use `GET/PUT /host` (config.json `host` object); when the service answers 404 the settings page says
   the service does not support it.

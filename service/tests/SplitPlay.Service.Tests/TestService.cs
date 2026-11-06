@@ -30,6 +30,8 @@ internal sealed class TestService : IAsyncDisposable
 
     public Platform.FakeDeskPlatform Platform { get; }
 
+    public Platform.FakeCpuControl Cpu => App.Services.GetRequiredService<Platform.FakeCpuControl>();
+
     public WebApplication App { get; }
 
     public string DataRoot { get; }
@@ -64,6 +66,7 @@ internal sealed class TestService : IAsyncDisposable
             "--Supervisor:Platform=fake",
             "--Supervisor:RelogonAfterLayoutCopy=false",
             "--Supervisor:BluetoothPollMs=100",
+            "--Supervisor:CpuSweepMs=100",
             "--Supervisor:HeartbeatIntervalMs=100",
             // 1 s of silence: generous enough for a loaded CI runner; the hang test sets 3 itself.
             "--Supervisor:MissedHeartbeats=10",

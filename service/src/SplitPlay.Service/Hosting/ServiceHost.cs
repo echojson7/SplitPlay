@@ -88,6 +88,13 @@ public static class ServiceHost
                 "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsDeskPlatform>(sp),
                 var other => throw new InvalidOperationException($"unsupported Supervisor:Platform '{other}' (expected windows or fake)"),
             });
+        builder.Services.AddSingleton<FakeCpuControl>();
+        builder.Services.AddSingleton<ICpuControl>(sp =>
+            sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch
+            {
+                "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsCpuControl>(sp),
+                _ => sp.GetRequiredService<FakeCpuControl>(),
+            });
         builder.Services.AddSingleton<FakeServiceControl>();
         builder.Services.AddSingleton<IServiceControl>(sp =>
             sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch

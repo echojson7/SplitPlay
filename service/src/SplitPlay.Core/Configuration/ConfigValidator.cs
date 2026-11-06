@@ -27,6 +27,9 @@ public static partial class ConfigValidator
     /// <summary>Maximum length of a local Windows account name (SAM limit).</summary>
     public const int MaxUserNameLength = 20;
 
+    /// <summary>Largest processor index <c>profile.cpuSet</c> accepts (Windows has at most 2048 logical processors).</summary>
+    public const int MaxCpuIndex = 2047;
+
     [GeneratedRegex("^[a-z0-9-]{1,32}\\z", RegexOptions.CultureInvariant)]
     private static partial Regex DeskIdRegex();
 
@@ -238,6 +241,11 @@ public static partial class ConfigValidator
         {
             errors.Add(new("host.logLevel", $"must be one of {string.Join(", ", LogLevels)}"));
         }
+
+        if (host.DeskCores is null || !Host.DeskCoresMode.All.Contains(host.DeskCores))
+        {
+            errors.Add(new("host.deskCores", $"must be one of {string.Join(", ", Host.DeskCoresMode.All)}"));
+        }
     }
 
     private static void ValidateDesk(DeskConfig desk, string path, HostConfig? host, List<ConfigError> errors)
@@ -375,9 +383,9 @@ public static partial class ConfigValidator
             errors.Add(new($"{path}.gpuLuid", "must be an adapter LUID \"0x…\""));
         }
 
-        if (p.CpuSet is not null && (p.CpuSet.Any(c => c < 0) || p.CpuSet.Distinct().Count() != p.CpuSet.Count))
+        if (p.CpuSet is not null && (p.CpuSet.Any(c => c is < 0 or > MaxCpuIndex) || p.CpuSet.Distinct().Count() != p.CpuSet.Count))
         {
-            errors.Add(new($"{path}.cpuSet", "must be a list of distinct non-negative CPU indices"));
+            errors.Add(new($"{path}.cpuSet", $"must be a list of distinct CPU indices (0-{MaxCpuIndex})"));
         }
     }
 }

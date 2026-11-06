@@ -168,6 +168,27 @@ public sealed record HostUserDto(string Name, string? FullName, bool IsAdmin, bo
 public sealed record HostNetworkDto(IReadOnlyList<string> Addresses, string? Profile = null, bool? MdnsAllowed = null);
 
 /// <summary>
+/// <c>GET /host/cpu</c>: the CPU, how <c>host.deskCores</c> splits it (<see cref="Kind"/> is one of
+/// <see cref="Host.CpuKind"/>) and the processors each desk gets now. <see cref="Auto"/> is what <c>auto</c> would give
+/// each desk, so that the settings page can say what switching it on does.
+/// </summary>
+public sealed record HostCpuDto(
+    string? Name,
+    int Cores,
+    int Threads,
+    string Kind,
+    string Mode,
+    IReadOnlyList<CpuCacheGroupDto> Caches,
+    IReadOnlyList<DeskCpuDto> Desks,
+    IReadOnlyList<DeskCpuDto> Auto);
+
+/// <summary>The performance processors that share one L3 cache (a CCD on Ryzen).</summary>
+public sealed record CpuCacheGroupDto(IReadOnlyList<int> Cpus, double L3Mb);
+
+/// <summary>The processors of one desk; null: every processor (not restricted).</summary>
+public sealed record DeskCpuDto(string Id, IReadOnlyList<int>? Cpus);
+
+/// <summary>
 /// One entry of <c>GET /host/services</c>: a Windows service SplitPlay depends on. <see cref="Status"/> is one of
 /// <c>running</c>, <c>stopped</c>, <c>starting</c>, <c>stopping</c>, <c>missing</c> (see <see cref="HostServiceStatus"/>);
 /// <see cref="StartType"/> is <c>automatic</c>, <c>automaticDelayed</c>, <c>manual</c>, <c>disabled</c>, <c>boot</c> or

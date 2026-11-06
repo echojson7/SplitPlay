@@ -7,12 +7,14 @@ import type {
   DeskConfig,
   DeskMetrics,
   DeskState,
+  HostCpu,
   HostService,
   HostSettings,
   LogLine,
   MetricsSnapshot,
   PairedClient,
 } from '../src/api/types.ts'
+import { DESK_CORES_MODES } from '../src/api/types.ts'
 import { isValidPackHost, mockClientPack, mockClientScript } from './client-pack.ts'
 
 export interface MockRequest {
@@ -192,6 +194,7 @@ export class MockBackend {
     composeIntervalMs: 4,
     logLevel: 'info',
     keepAwake: true,
+    deskCores: 'off',
   }
   private clientSeq = 1
   private readonly services = new Map<string, ServiceEntry>()
@@ -544,12 +547,15 @@ export class MockBackend {
     if (path === '/logs' && method === 'GET') return ok(this.logs(req.query ?? {}))
     if (path === '/host' && method === 'GET') return ok(clone(this.host))
     if (path === '/host/network' && method === 'GET') return ok({ addresses: [...MOCK_ADDRESSES], ...this.network })
+    if (path === '/host/cpu' && method === 'GET') return ok(this.cpu())
     if (path === '/host' && method === 'PUT') {
       const h = req.body as Partial<HostSettings> | undefined
       if (!h || typeof h.webPort !== 'number' || h.webPort < 1 || h.webPort > 65535)
         return err(400, 'invalid_config', 'webPort is invalid')
       if (typeof h.composeIntervalMs !== 'number' || h.composeIntervalMs < 2 || h.composeIntervalMs > 17)
         return err(400, 'invalid_config', 'composeIntervalMs must be 2..17')
+      if (h.deskCores !== undefined && !DESK_CORES_MODES.includes(h.deskCores))
+        return err(400, 'invalid_config', 'host.deskCores must be one of off, auto')
       this.host = { ...this.host, ...clone(h) } as HostSettings
       return ok(clone(this.host))
     }
@@ -598,6 +604,22 @@ export class MockBackend {
       status: 200,
       headers: { 'Set-Cookie': `${SESSION_COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Strict` },
       body: { csrfToken: csrf },
+    }
+  }
+
+  /** A Ryzen 9 7950X3D (CCD 1 has the 3D V-Cache): with auto, desks take the CCDs in turn, the V-Cache one first. */
+  private cpu(): HostCpu {
+    const ccd = (n: number) => Array.from({ length: 16 }, (_, i) => n * 16 + i)
+    const auto = [...this.desks.values()].map((e, i) => ({ id: e.desk.id, cpus: ccd(i % 2 === 0 ? 1 : 0) }))
+    const mode = this.host.deskCores ?? 'off'
+    return {
+      name: 'AMD Ryzen 9 7950X3D 16-Core Processor',
+      cores: 16,
+      threads: 32,
+      kind: 'x3d',
+      mode,
+      desks: mode === 'auto' ? auto : auto.map((d) => ({ id: d.id, cpus: null })),
+      auto,
     }
   }
 

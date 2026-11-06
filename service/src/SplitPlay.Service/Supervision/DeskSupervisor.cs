@@ -5,6 +5,7 @@ using System.IO.Pipes;
 using Microsoft.Extensions.Options;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Host;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Lifecycle;
 using SplitPlay.Core.Steam;
@@ -54,6 +55,7 @@ public sealed class DeskSupervisor : IHostedService
     private readonly ILogger _childLogger;
     private readonly GpuInventory _gpus;
     private readonly IDeskPlatform _platform;
+    private readonly ICpuControl _cpu;
     private readonly DateTimeOffset _startedAt;
     private TimeSpan _lastCpu;
     private DateTimeOffset _lastCpuAt;
@@ -67,9 +69,10 @@ public sealed class DeskSupervisor : IHostedService
 
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
-        PowerEvents power, RequiredServicesStarter requiredServices)
+        PowerEvents power, RequiredServicesStarter requiredServices, ICpuControl cpu)
     {
         ArgumentNullException.ThrowIfNull(power);
+        _cpu = cpu;
         power.Changed += OnPowerChange;
         _requiredServices = requiredServices;
         _gpus = gpus;
@@ -1579,7 +1582,7 @@ public sealed class DeskSupervisor : IHostedService
             }
         }
 
-        StartSessionJanitor(rt, config, session);
+        StartSessionJanitor(rt, config, session, credentials.User);
         return null;
     }
 
@@ -1791,23 +1794,23 @@ public sealed class DeskSupervisor : IHostedService
         }
     }
 
-    // ------------------------------------------------------------------ per-session janitor (Bluetooth)
+    // ------------------------------------------------------------------ per-session janitors (Bluetooth, CPU cores)
 
-    private void StartSessionJanitor(DeskRuntime rt, DeskConfig config, int session)
+    private void StartSessionJanitor(DeskRuntime rt, DeskConfig config, int session, string user)
     {
         CancelSessionJanitor(rt);
-        if (!config.DisableBluetoothUserService)
-        {
-            return;
-        }
-
         var cts = new CancellationTokenSource();
         lock (rt.Gate)
         {
             rt.SeatScope = cts;
         }
 
-        _ = Task.Run(() => BluetoothJanitorAsync(rt.Id, session, cts.Token), CancellationToken.None);
+        if (config.DisableBluetoothUserService)
+        {
+            _ = Task.Run(() => BluetoothJanitorAsync(rt.Id, session, cts.Token), CancellationToken.None);
+        }
+
+        _ = Task.Run(() => CpuJanitorAsync(rt.Id, session, user, cts.Token), CancellationToken.None);
     }
 
     private void CancelSessionJanitor(DeskRuntime rt)
@@ -1823,6 +1826,52 @@ public sealed class DeskSupervisor : IHostedService
         {
             cts.Cancel();
             cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The processors of each desk (null: not restricted) under the current <c>host.deskCores</c> and desk profiles.
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<int>?> CpuPlan()
+    {
+        var config = _config.Snapshot();
+        return DeskCorePlanner.Plan(_cpu.Topology(), config.Host.DeskCores,
+            [.. config.Desks.Select(d => new DeskCoreRequest(d.Id, d.Profile.CpuSet))]);
+    }
+
+    /// <summary>
+    /// Stage 4 PR 12: keeps the desk user's processes in the session on the processors <see cref="CpuPlan"/> gives the
+    /// desk, re-reading the plan every sweep so that a settings change applies to a running desk within one period.
+    /// </summary>
+    private async Task CpuJanitorAsync(string deskId, int session, string user, CancellationToken ct)
+    {
+        var period = TimeSpan.FromMilliseconds(Math.Max(100, _options.Value.CpuSweepMs));
+        IDeskCpuScope? scope = null;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    scope ??= await Task.Run(() => _cpu.Open(deskId, session, user), ct).ConfigureAwait(false);
+                    var cpus = CpuPlan().GetValueOrDefault(deskId);
+                    var current = scope;
+                    await Task.Run(() => current.Sweep(cpus), ct).WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug("Desk {Desk}: processor sweep failed: {Message}", deskId, ex.Message);
+                }
+
+                await Task.Delay(period, _time, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            scope?.Dispose();
         }
     }
 

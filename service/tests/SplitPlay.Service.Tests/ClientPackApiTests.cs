@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 using System.Net;
 using System.Net.Http.Json;
+using Microsoft.Extensions.DependencyInjection;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Json;
+using SplitPlay.Service.Api;
 
 namespace SplitPlay.Service.Tests;
 
@@ -58,6 +60,29 @@ public sealed class ClientPackApiTests
         var shText = await sh.Content.ReadAsStringAsync();
         Assert.StartsWith("#!/bin/sh\n", shText, StringComparison.Ordinal);
         Assert.Contains("stream gaming-pc:48189 Desktop", shText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Pack_and_scripts_need_the_admin_and_work_with_the_trays_cookie()
+    {
+        await using var svc = await TestService.StartAsync();
+        await svc.CreateDeskAsync("desk-1", Profile);
+        using var anonymous = svc.AnonymousClient();
+
+        foreach (var path in new[] { "/api/v1/desks/desk-1/client-pack", "/api/v1/desks/desk-1/client-pack/windows", "/api/v1/desks/desk-1/client-pack/linux" })
+        {
+            var refused = await anonymous.GetAsync(path);
+            Assert.Equal(HttpStatusCode.Unauthorized, refused.StatusCode);
+            Assert.Equal(ApiErrorCodes.Unauthorized, (await refused.Content.ReadFromJsonAsync(SplitPlayJsonContext.Default.ApiErrorResponse))!.Error.Code);
+        }
+
+        // The tray's WebView downloads with its session cookie (a GET needs no CSRF header).
+        var tray = svc.App.Services.GetRequiredService<AuthService>().IssuePipeSession();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/api/v1/desks/desk-1/client-pack/windows?address=192.168.1.20");
+        request.Headers.Add("Cookie", $"{AuthService.CookieName}={tray.Token}");
+        var script = await anonymous.SendAsync(request);
+        Assert.Equal(HttpStatusCode.OK, script.StatusCode);
+        Assert.Equal("splitplay-desk-1.cmd", script.Content.Headers.ContentDisposition!.FileName);
     }
 
     [Theory]

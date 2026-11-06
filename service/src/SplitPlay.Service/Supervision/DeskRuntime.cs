@@ -4,6 +4,7 @@ using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Lifecycle;
+using SplitPlay.Core.Streaming;
 
 namespace SplitPlay.Service.Supervision;
 
@@ -51,6 +52,27 @@ internal sealed class DeskRuntime
     public DeskHdrDto? Hdr { get; set; }
 
     public DateTimeOffset LastHeartbeat { get; set; }
+
+    /// <summary>"Адаптивный поток" of the current worker. Reset when a worker starts.</summary>
+    public StreamAdaptation Adaptation { get; } = new();
+
+    /// <summary>What the adaptation does now (shown as <c>desk.adaptive</c>); null when it is off or no worker runs.</summary>
+    public AdaptiveState? Adaptive { get; set; }
+
+    /// <summary>FEC share and bitrate cap (0: none) last sent to the current worker, in welcome or set_profile.</summary>
+    public (int? FecPercent, int? BitrateCapKbps)? SentStreamSettings { get; set; }
+
+    /// <summary>The stream ids the adaptation last saw: a change starts the bitrate over.</summary>
+    public string AdaptedStreams { get; set; } = "";
+
+    /// <summary>A worker starts (or stopped): the adaptation starts over. Caller holds <see cref="Gate"/>.</summary>
+    public void ResetAdaptation(IpcProfile? sent)
+    {
+        Adaptation.Reset();
+        Adaptive = null;
+        AdaptedStreams = "";
+        SentStreamSettings = sent is null ? null : (sent.FecPercent, sent.BitrateCapKbps);
+    }
 
     /// <summary>The worker's control connection while it is connected (used for pair, list_clients, …).</summary>
     public IpcConnection? Connection { get; set; }
@@ -126,6 +148,19 @@ internal sealed class DeskRuntime
                 Metrics = Metrics,
                 Stream = Streams.Count > 0 ? ToStreamDto(Streams[0]) : null,
                 Hdr = Hdr,
+                Adaptive = Adaptive is { } a
+                    ? new DeskAdaptiveDto
+                    {
+                        FecPercent = a.FecPercent,
+                        BitrateCapKbps = a.BitrateCapKbps,
+                        Limit = a.Limit switch
+                        {
+                            AdaptiveLimit.Loss => "loss",
+                            AdaptiveLimit.Network => "network",
+                            _ => "none",
+                        },
+                    }
+                    : null,
                 LastError = Machine.LastError ?? Warning,
             };
         }
@@ -378,6 +413,25 @@ internal sealed class DeskRuntime
                     // null (or anything but a number): no stream, so nothing captures.
                     dto.CaptureFps = number;
                     break;
+                case "packet_loss_pct":
+                    dto.PacketLossPct = number;
+                    break;
+                case "burst_loss_pct":
+                    dto.BurstLossPct = number;
+                    break;
+                case "fec_recovered":
+                    dto.FecRecovered = number;
+                    break;
+                case "fec_failed":
+                    dto.FecFailed = number;
+                    break;
+                case "fec_percent":
+                    dto.FecPercent = number;
+                    break;
+                case "encoder_kbps":
+                    // null: no stream, or an encoder that cannot change its bitrate live.
+                    dto.EncoderKbps = number;
+                    break;
                 default:
                     dto.Extra ??= [];
                     dto.Extra[key] = value.Clone();
@@ -389,22 +443,42 @@ internal sealed class DeskRuntime
     }
 
     /// <summary>
-    /// Converts the configuration profile to the pipe's snake_case profile object. The stream settings the worker
-    /// applies (FEC, minimum fps, DPB, pacing) are always sent, with the service defaults where the desk sets none, so
-    /// that clearing a value of a running desk restores the default instead of keeping the old value.
+    /// What the stream adaptation reads from a heartbeat: the mapped metrics and the stream list (requested bitrates,
+    /// whether every client sends FEC reports). Caller holds <see cref="Gate"/>.
     /// </summary>
-    public static IpcProfile ToIpcProfile(ProfileConfig p) => new()
+    public AdaptiveSample ToAdaptiveSample() => new()
+    {
+        Clients = Streams.Count > 0 ? Math.Max(Streams.Count, (int)Metrics.Clients) : (int)Metrics.Clients,
+        PacketLossPct = Metrics.PacketLossPct ?? 0,
+        BurstLossPct = Metrics.BurstLossPct ?? 0,
+        FecFailed = Metrics.FecFailed ?? 0,
+        FrameLossPct = Metrics.LossPct,
+        RttMs = Metrics.RttMs,
+        WireKbps = Metrics.BitrateKbps,
+        RequestedKbps = (int)Math.Min(int.MaxValue, Streams.Sum(s => (long)s.BitrateKbpsRequested)),
+        FecFeedback = Streams.Count > 0 && Metrics.PacketLossPct is not null && Streams.All(s => s.FecFeedback),
+        EncoderKbps = Metrics.EncoderKbps,
+    };
+
+    /// <summary>
+    /// Converts the configuration profile to the pipe's snake_case profile object. The stream settings the worker
+    /// applies (FEC, minimum fps, DPB, pacing, bitrate cap) are always sent, with the service defaults where the desk
+    /// sets none, so that clearing a value of a running desk restores the default instead of keeping the old value.
+    /// With <paramref name="adaptive"/> its FEC share and bitrate cap are sent instead (0: no cap).
+    /// </summary>
+    public static IpcProfile ToIpcProfile(ProfileConfig p, AdaptiveState? adaptive = null) => new()
     {
         Fps = p.Fps,
         Width = p.Width,
         Height = p.Height,
         BitrateKbps = p.BitrateKbps,
         Codec = p.Codec,
-        FecPercent = p.FecPercent ?? ProfileConfig.DefaultFecPercent,
+        FecPercent = adaptive?.FecPercent ?? p.FecPercent ?? ProfileConfig.DefaultFecPercent,
         MinFps = p.MinFps ?? Math.Min(ProfileConfig.DefaultMinFps, p.Fps ?? ProfileConfig.DefaultMinFps),
         DpbFrames = p.DpbFrames ?? ProfileConfig.DefaultDpbFrames,
         PacingMbps = p.PacingMbps ?? ProfileConfig.DefaultPacingMbps,
         CaptureMode = p.CaptureMode ?? ProfileConfig.DefaultCaptureMode,
+        BitrateCapKbps = adaptive?.BitrateCapKbps ?? 0,
         GpuPriority = p.GpuPriority,
         GpuLuid = p.GpuLuid,
         CpuSet = p.CpuSet,

@@ -46,6 +46,8 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0017` mDNS per desk | the DNS-SD instance is named after `sunshine_name` instead of the host name every desk shares (`net::mdns_desk_instance_name`: ASCII punctuation and spaces become `-`, other UTF-8 is kept, at most 63 bytes on a character boundary; an ASCII fallback ending in the port if Windows refuses a non-ASCII name); `sunshine_name=` is also read from the UTF-8 command line, since the narrow `argv` is in the ANSI code page. See *mDNS* below |
 | `0018` capture on arrival | the Profile's `capture_mode` (live): `slot` keeps upstream's DDA loop, `arrival` hands each desktop frame to the encoder as soon as DWM composes it, rate-limited to the stream's fps on average; heartbeats gain `capture_fps`, the session's real composition rate from `AccumulatedFrames`. See *Capture on arrival* below |
 | `0019` HDR probe | `event display_hdr` with the HDR state of the session's displays (DXGI colour space, Display Configuration API advanced colour / 24H2 HDR info), probed every 5 s on a thread of its own and sent with the next heartbeat on change; `--self-test` also switches HDR on for each display that is not in HDR and back (`hdr` in `self-test.json`); a stream that asks for HDR on an SDR display logs a warning. Number `0018` is reserved for capture on frame arrival. See *HDR* below |
+| `0023` loss telemetry | the client's per-frame FEC reports (`SS_FRAME_FEC_STATUS`, control type `0x5502`, which upstream drops) are counted per stream; heartbeats gain `packet_loss_pct`, `burst_loss_pct`, `fec_recovered`, `fec_failed` and `fec_percent`, the stream object `fec_feedback`. Numbers `0020`-`0022` and `0024` are reserved for other stage 4 PRs. See *Loss telemetry and live bitrate* below |
+| `0025` live bitrate | the Profile's `bitrate_cap_kbps` (live): native NVENC follows it with `NvEncReconfigureEncoder` (CBR bitrate and VBV, no IDR); heartbeats gain `encoder_kbps`. See *Loss telemetry and live bitrate* below |
 
 ### Changing a patch or adding one
 
@@ -243,6 +245,7 @@ type or out of range rejects `set_profile` with `bad_request`.
 | `min_fps` | 1-1000, capped at the stream's fps | `minimum_fps_target` (default half the stream's fps) | next frame |
 | `pacing_mbps` | 1-100000 | fixed 80 % of 1 Gbit/s (`ratecontrol_packets_in_1ms`, stream.cpp) | next frame |
 | `dpb_frames` | 1-16 (AV1 at most 8), 0 = codec default | 5 (H.264, HEVC) and 8 (AV1) reference frames | next stream (or encoder reinit) |
+| `bitrate_cap_kbps` (patch 0025) | 0-1000000, 0 = no cap | the client's bitrate for the whole stream | next frame (native NVENC only) |
 
 `dpb_frames` only applies when the client leaves the reference frame count to the host, which Moonlight does for
 decoders that support reference frame invalidation (`maxNumReferenceFrames=0`); other decoders keep one reference.
@@ -255,6 +258,33 @@ refuse, and every reference costs a reconstructed surface of VRAM (about 200 MB 
 log); the encoder line in the log shows `dpb=N`. The profile wins over `fec_percentage` and `minimum_fps_target` passed as
 `name=value`. `fps`, size, bitrate and codec stay Moonlight's choice; `gpu_priority`, `gpu_luid` and `cpu_set` are
 not applied yet.
+
+### Loss telemetry and live bitrate (patches 0023, 0025)
+
+Moonlight clients that announce `ML_FF_FEC_STATUS` (every current one talking to a Sunshine host) send
+`SS_FRAME_FEC_STATUS` for each FEC block that lost packets: when they recover it with parity, and when they give up on
+it. Upstream ignores the message; patch 0023 counts it per stream on the control thread (relaxed atomics):
+
+| Heartbeat key | Meaning (interval of about 1 s) |
+|---|---|
+| `packet_loss_pct` | packets lost per video packet sent (data and parity), 0.01 %: a recovered block counts the gaps below its highest packet received, a lost block every packet that did not come |
+| `burst_loss_pct` | the worst block: lost packets per data packet, 0.1 %; the FEC share that block would have needed |
+| `fec_recovered`, `fec_failed` | blocks the client repaired with parity, blocks it could not repair |
+| `fec_percent` (`metrics` only) | the FEC share the next frame is sent with |
+| `encoder_kbps` (`metrics` only, patch 0025) | the bitrate the live encoder runs at; `null` without a stream or when the encoder cannot change it |
+| `fec_feedback` (stream object) | the client announced the reports; without them the loss figures stay 0 |
+
+The client sends at most 8 reports per 100 ms, so a very lossy link is under-counted; `loss_pct` (frames the client
+could not decode) is unchanged.
+
+Patch 0025 adds the Profile field `bitrate_cap_kbps` (0-1000000, live, 0 or `null` = no cap): the most video traffic
+one stream may send, parity included. The encoder bitrate becomes the stream's own (the client's bitrate less the FEC
+and audio allowance, as upstream computes it at launch) or `cap * 100 / (100 + fec_percent)`, whichever is lower, never
+below 500 kbit/s. Native NVENC (`nvenc_base`) keeps its initialisation parameters and, before each frame, reconfigures
+itself when that value changed: `NvEncReconfigureEncoder` with the new CBR average bitrate and the VBV buffer and
+initial delay scaled with it, no reset and no forced IDR, so the picture does not stall. A refusal is logged once and
+the stream keeps its bitrate. Other encoders keep the client's bitrate (`encoder_kbps` stays `null`). The service's
+"Адаптивный поток" drives both fields (docs/contracts/ipc.md).
 
 ### Capture on arrival (patch 0018)
 

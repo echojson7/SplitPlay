@@ -40,6 +40,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
         "dpbFrames": 16,
         "pacingMbps": 800,
         "captureMode": "arrival",
+        "adaptiveStream": true,
         "gpuPriority": "high"
       }
     }
@@ -125,6 +126,19 @@ Rules:
   half a stream interval later on average) or `arrival` (each frame as soon as DWM composes it, at most `fps` on
   average; worker/README.md, *Capture on arrival*). The default stays `slot` until the lab measures `arrival`. In the
   web UI: Дополнительно → Захват кадра.
+- `profile.adaptiveStream` (default `true`, «Адаптивный поток»; worker patches 0023 and 0025): while a client streams
+  the service reads the packet loss the client reports on every heartbeat and
+  - sets FEC between 5 and 50 %: the worst FEC block of the last 15 s plus a quarter and two points, rounded up to
+    5; up at once, down one step every 10 s, so a clean link goes from 20 % to 5 % in 30 s. A desk with `fecPercent`
+    keeps that share;
+  - caps the stream's video traffic (encoder bitrate with FEC included, native NVENC only) to 3/4 of what it sends
+    after two heartbeats in a row with 5 % of packets lost, unrecoverable frames with 1 %, or a round trip 50 ms and
+    twice above its lowest; not below a fifth of the client's bitrate or 2 Mbit/s. After 10 clean seconds the cap rises
+    by 5 % of the client's bitrate per second and is lifted when it gets there. A new stream starts uncapped;
+  - shares 80 % of a network adapter's link speed between the desks whose clients it reaches directly (same subnet),
+    in proportion to their clients' bitrates, when together they ask for more.
+  `false`: the desk's `fecPercent` (or 20 %) and the client's bitrate, as before. In the web UI: Поток → Адаптивный
+  поток.
 - `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz), 1–100. `0`
   (default, «Частота композиции: Авто»): the service composes at least twice per frame of the fastest desk and never
   slower than 250 Hz: 4 ms up to 125 fps, 3 ms for 126–166 fps (144, 165), 2 ms from 167 fps (240). The fastest desk is the highest

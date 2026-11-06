@@ -120,6 +120,7 @@ Stream object (`sessions[]` and the `data` of the client events):
 | `codec` | `h264`, `hevc` or `av1` |
 | `bitrate_kbps_requested` | the client's bitrate setting |
 | `hdr` | the client asked for a 10-bit HDR stream |
+| `fec_feedback` | the client sends per-frame FEC reports (`ML_FF_FEC_STATUS`), so the packet loss figures below are measured for it (worker patch 0023; absent from older workers) |
 | `started_at` | UTC, ISO 8601, whole seconds |
 
 In `sessions[]` each stream also carries its own live numbers (`fps`, `bitrate_kbps`, `loss_pct`, `rtt_ms` (`null` until
@@ -137,6 +138,11 @@ Worker metric definitions (all over the interval since the previous heartbeat, a
 | `loss_pct` | frames the client reported lost (reference-frame invalidation ranges, and the legacy loss-stats count when a client sends it) per frame sent. Losses FEC recovered are not counted |
 | `rtt_ms` | ENet round-trip time of the control connection, as ENet measures it from its own pings |
 | `clients` | streams listed in `sessions` |
+| `packet_loss_pct` | video packets lost on the way per packet sent (data and FEC parity), from the client's per-frame FEC reports, 0.01 %: a block the client repaired counts the gaps below the highest packet it received, a block it could not repair every packet that did not come. Lost or repaired alike (patch 0023) |
+| `burst_loss_pct` | the worst FEC block of the interval: lost packets per data packet, 0.1 %; the FEC share that block would have needed (more than 100 when a block lost more than its data, e.g. a Wi-Fi stall) |
+| `fec_recovered`, `fec_failed` | FEC blocks the client repaired with parity, and blocks it could not repair |
+| `fec_percent` (`metrics` only) | the FEC share the next frame is sent with |
+| `encoder_kbps` (`metrics` only) | the bitrate the encoder runs at, after `bitrate_cap_kbps` (patch 0025); `null` without a stream or when the encoder cannot change it live (encoders other than native NVENC) |
 | `capture_fps` | frames DWM composed per second in the desk session, as Desktop Duplication reports them (`AccumulatedFrames` of each acquired frame with new content): the real composition rate, whatever `capture_mode` is. `null` while no stream runs |
 
 Ordering: the streaming and RTSP threads only queue `client_connected`/`client_disconnected`; the worker's heartbeat
@@ -190,7 +196,7 @@ Tuning parameters applied live (see ARCHITECTURE.md §9). All fields optional; a
   "fps": 120, "width": 1920, "height": 1080,
   "bitrate_kbps": 60000, "codec": "hevc",
   "fec_percent": 20, "min_fps": 15, "dpb_frames": 16,
-  "pacing_mbps": 800, "capture_mode": "slot",
+  "pacing_mbps": 800, "capture_mode": "slot", "bitrate_cap_kbps": 0,
   "gpu_priority": "high",
   "gpu_luid": "0x0000000000012345",
   "cpu_set": [4,5,6,7]
@@ -206,11 +212,14 @@ What the worker applies (worker/README.md, *Stream profile*), from `welcome` and
 | `pacing_mbps` | 1–100000, send pacing of one stream | next frame |
 | `capture_mode` | `"slot"` (take the newest frame at the stream's next frame slot) or `"arrival"` (take each frame as soon as DWM composes it, at most the stream's fps on average) | next frame |
 | `dpb_frames` | 1–16 (AV1 at most 8), 0 = codec default; only for clients that leave the reference count to the host | next stream |
+| `bitrate_cap_kbps` | 0–1000000, 0 = no cap: the most video traffic one stream may send, FEC included; the encoder bitrate becomes `min(stream's own, cap × 100 / (100 + fec_percent))`, at least 500 (patch 0025) | next frame, native NVENC only |
 
 `null` restores the worker's default (Sunshine's: FEC 20 %, half the stream's fps, 800 Mbit/s, DPB 5 or 8). A value
 of the wrong type or out of range fails `set_profile` with `bad_request` and nothing is applied. The other fields
 are accepted and ignored by the worker (the client picks mode, bitrate and codec). The service always sends these
-five fields, with its defaults where the desk sets none (config.md; `capture_mode` `slot`). The answer lists what happened:
+six fields, with its defaults where the desk sets none (config.md; `capture_mode` `slot`). With «Адаптивный поток»
+(config.md, `profile.adaptiveStream`) it sends a new `set_profile` whenever the adaptation changes `fec_percent` or
+`bitrate_cap_kbps`, at most once per heartbeat; otherwise `bitrate_cap_kbps` is 0. The answer lists what happened:
 
 ```json
 {"type":"result","id":5,"ok":true,"data":{"applied":["fec_percent","min_fps","pacing_mbps"],"next_stream":["dpb_frames"],"not_applied":["fps","width","height","bitrate_kbps","codec","gpu_priority"]}}

@@ -66,6 +66,13 @@ public sealed record FakeChildOptions
     /// <summary>With <see cref="SimulateClient"/>: the client disconnects after this long (<c>client_disconnected</c>).</summary>
     public TimeSpan? SimulatedClientDuration { get; init; }
 
+    /// <summary>
+    /// With <see cref="SimulateClient"/>: the client sends FEC reports and loses this share of the packets (worst block
+    /// three times as much, a block lost from 5 % on). The heartbeats then carry the loss telemetry, the FEC share and
+    /// the encoder bitrate the last profile asks for, as a worker with patches 0023 and 0025 does. Null: an older worker.
+    /// </summary>
+    public double? SimulatedPacketLossPct { get; init; }
+
     /// <summary>Worker: send <c>display_hdr</c> with this state (one display on "Fake GPU") right after ready.</summary>
     public string? DisplayHdr { get; init; }
 
@@ -151,6 +158,7 @@ public static class FakeChild
         using var heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         var maxHeartbeats = options.Behavior == FakeChildBehavior.StopHeartbeats ? 2 : long.MaxValue;
         using var stream = new FakeStream(options);
+        stream.ApplyProfile(welcome.Profile);
         var heartbeats = HeartbeatLoopAsync(connection, options.HeartbeatInterval, maxHeartbeats, stream, heartbeatCts.Token);
 
         try
@@ -237,7 +245,7 @@ public static class FakeChild
                 }
             }
 
-            return await ServeAsync(connection, options, log, cancellationToken).ConfigureAwait(false);
+            return await ServeAsync(connection, options, stream, log, cancellationToken).ConfigureAwait(false);
         }
         catch (IOException)
         {
@@ -261,7 +269,7 @@ public static class FakeChild
         }
     }
 
-    private static async Task<int> ServeAsync(IpcConnection connection, FakeChildOptions options, Action<string> log, CancellationToken ct)
+    private static async Task<int> ServeAsync(IpcConnection connection, FakeChildOptions options, FakeStream stream, Action<string> log, CancellationToken ct)
     {
         while (true)
         {
@@ -302,6 +310,7 @@ public static class FakeChild
                     break;
 
                 case SetProfileMessage setProfile:
+                    stream.ApplyProfile(setProfile.Profile);
                     await connection.ReplyAsync(setProfile.Id, ok: true, cancellationToken: ct).ConfigureAwait(false);
                     break;
 
@@ -371,8 +380,36 @@ public static class FakeChild
         private readonly long _id = Random.Shared.NextInt64(1, uint.MaxValue);
         private bool _streaming;
         private DateTimeOffset _startedAt;
+        private int _fecPercent = 20;
+        private int _capKbps;
+
+        private const int RequestedKbps = 50_000;
 
         private readonly record struct Live(double Fps, int BitrateKbps, double EncodeMsP50, double EncodeMsP99, double LossPct, int? RttMs);
+
+        /// <summary>The stream settings of a welcome or set_profile (absent: unchanged, as in the worker).</summary>
+        public void ApplyProfile(IpcProfile? profile)
+        {
+            lock (_gate)
+            {
+                if (profile?.FecPercent is int fec)
+                {
+                    _fecPercent = fec;
+                }
+
+                if (profile?.BitrateCapKbps is int cap)
+                {
+                    _capKbps = cap;
+                }
+            }
+        }
+
+        /// <summary>The encoder bitrate of a worker with patch 0025 (profile.cpp encode_bitrate_kbps). Caller holds the gate.</summary>
+        private int EncoderKbps()
+        {
+            var stream = RequestedKbps * (100 - Math.Min(_fecPercent, 80)) / 100;
+            return _capKbps > 0 ? Math.Min(stream, Math.Max(500, _capKbps * 100 / (100 + _fecPercent))) : stream;
+        }
 
         public void Dispose() => _order.Dispose();
 
@@ -441,7 +478,7 @@ public static class FakeChild
                     {
                         Seq = seq,
                         State = "idle",
-                        Metrics = Metrics(new Live(), clients: 0),
+                        Metrics = Metrics(new Live(), clients: 0, null),
                         Sessions = ToElement(w =>
                         {
                             w.WriteStartArray();
@@ -455,7 +492,7 @@ public static class FakeChild
                 {
                     Seq = seq,
                     State = "streaming",
-                    Metrics = Metrics(live, clients: 1),
+                    Metrics = Metrics(live, clients: 1, Telemetry()),
                     Sessions = ToElement(w =>
                     {
                         w.WriteStartArray();
@@ -486,8 +523,13 @@ public static class FakeChild
             w.WriteNumber("height", 1080);
             w.WriteNumber("fps_requested", 120);
             w.WriteString("codec", "hevc");
-            w.WriteNumber("bitrate_kbps_requested", 50_000);
+            w.WriteNumber("bitrate_kbps_requested", RequestedKbps);
             w.WriteBoolean("hdr", false);
+            if (options.SimulatedPacketLossPct is not null)
+            {
+                w.WriteBoolean("fec_feedback", true);
+            }
+
             w.WriteString("started_at", _startedAt.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
             if (live is { } l)
             {
@@ -514,26 +556,63 @@ public static class FakeChild
             }
         }
 
+        /// <summary>The loss telemetry of a heartbeat with a stream (<see cref="FakeChildOptions.SimulatedPacketLossPct"/>). Caller holds the gate.</summary>
+        private Dictionary<string, double?>? Telemetry()
+        {
+            if (options.SimulatedPacketLossPct is not double loss)
+            {
+                return null;
+            }
+
+            return new Dictionary<string, double?>(StringComparer.Ordinal)
+            {
+                ["packet_loss_pct"] = loss,
+                ["burst_loss_pct"] = loss * 3,
+                ["fec_recovered"] = loss > 0 ? 3 : 0,
+                ["fec_failed"] = loss >= 5 ? 1 : 0,
+                ["fec_percent"] = _fecPercent,
+                ["encoder_kbps"] = EncoderKbps(),
+            };
+        }
+
         /// <summary>One heartbeat interval's numbers.</summary>
         private Live Next()
         {
             var p50 = Math.Round(3.1 + (_random.NextDouble() * 0.8), 1);
+            var wire = options.SimulatedPacketLossPct is null
+                ? 31_000 + _random.Next(0, 12_000)
+                : EncoderKbps() * (100 + _fecPercent) / 100;
             return new Live(
                 Fps: Math.Round(120 - (_random.NextDouble() * 1.6), 1),
-                BitrateKbps: 31_000 + _random.Next(0, 12_000),
+                BitrateKbps: wire,
                 EncodeMsP50: p50,
                 EncodeMsP99: Math.Round(p50 + 1.2 + (_random.NextDouble() * 2.4), 1),
                 LossPct: _random.Next(0, 10) == 0 ? Math.Round(_random.NextDouble() * 0.8, 1) : 0,
                 RttMs: _random.Next(2, 6));
         }
 
-        private static Dictionary<string, JsonElement> Metrics(Live live, int clients)
+        private static Dictionary<string, JsonElement> Metrics(Live live, int clients, Dictionary<string, double?>? telemetry)
         {
             var element = ToElement(w =>
             {
                 w.WriteStartObject();
                 WriteLive(w, live);
                 w.WriteNumber("clients", clients);
+                if (telemetry is not null)
+                {
+                    foreach (var (key, value) in telemetry)
+                    {
+                        if (value is double v)
+                        {
+                            w.WriteNumber(key, v);
+                        }
+                        else
+                        {
+                            w.WriteNull(key);
+                        }
+                    }
+                }
+
                 if (clients > 0)
                 {
                     // The composition rate of a busy 240 Hz session.

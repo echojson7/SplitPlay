@@ -171,6 +171,21 @@ describe('DeskSettings', () => {
     expect(w.text()).toContain('Введите пароль')
   })
 
+  it('turns the adaptive stream off and on while the desk runs, leaving the default out', async () => {
+    const w = mount(DeskSettings, { props: { desk: { ...desk, state: 'Streaming' }, running: true } })
+    const box = w.find('input[name="adaptiveStream"]')
+    expect((box.element as HTMLInputElement).checked).toBe(true)
+    expect(box.attributes('disabled')).toBeUndefined()
+    expect(w.find('input[name="fecPercent"]').attributes('placeholder')).toBe('Авто')
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![0]![0] as DeskConfig).profile).not.toHaveProperty('adaptiveStream')
+    await box.setValue(false)
+    expect(w.find('input[name="fecPercent"]').attributes('placeholder')).toBe('По умолчанию')
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![1]![0] as DeskConfig).profile.adaptiveStream).toBe(false)
+    expect(w.text()).toContain('Адаптивный поток')
+  })
+
   it('sends the sign-in screen choice only when it changes, also while the desk runs', async () => {
     const own: Desk = { ...desk, state: 'Ready', userManaged: false, hideFromLogon: false }
     const w = mount(DeskSettings, { props: { desk: own, running: true } })

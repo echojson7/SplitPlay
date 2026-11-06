@@ -40,6 +40,8 @@ export interface DeskProfile {
   pacingMbps?: number
   /** When the worker takes a new frame: at the stream's frame slot (default) or as soon as DWM composes it. */
   captureMode?: CaptureMode
+  /** «Адаптивный поток»: FEC and bitrate follow the network's losses (absent: on). */
+  adaptiveStream?: boolean
   gpuPriority?: GpuPriority
 }
 
@@ -166,6 +168,16 @@ export interface DeskMetrics {
   encoderPercent?: number | null
   /** Dedicated video memory used by the desk session, MB. */
   vramMb?: number | null
+  /** Video packets lost on the way, percent of those sent, before FEC repairs them; null from older workers. */
+  packetLossPct?: number | null
+  /** The worst FEC block: lost packets per data packet, percent. */
+  burstLossPct?: number | null
+  fecRecovered?: number | null
+  fecFailed?: number | null
+  /** FEC share the worker sends now, percent. */
+  fecPercent?: number | null
+  /** The encoder's bitrate, kbit/s; null when it cannot change it live. */
+  encoderKbps?: number | null
 }
 
 /** The Moonlight stream a desk is serving (`desk.stream`): who is connected and what it asked for. */
@@ -220,7 +232,18 @@ export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   stream?: DeskStream | null
   /** The display's HDR state; null (or absent from older services) while no worker has reported it. */
   hdr?: DeskHdr | null
+  /** What «Адаптивный поток» does now; null when it is off or the desk does not run (older services: absent). */
+  adaptive?: DeskAdaptive | null
   lastError: string | null
+}
+
+/** `desk.adaptive`: the FEC share and the bitrate cap the service sends the worker, and why it caps. */
+export interface DeskAdaptive {
+  fecPercent: number
+  /** Cap on each stream's video traffic, kbit/s; null: the client's bitrate. */
+  bitrateCapKbps: number | null
+  /** `loss`: the network loses packets; `network`: the desk's share of its network adapter. */
+  limit: 'none' | 'loss' | 'network' | string
 }
 
 export interface Health {

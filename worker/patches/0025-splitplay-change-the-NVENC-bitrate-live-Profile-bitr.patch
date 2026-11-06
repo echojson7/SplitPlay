@@ -28,10 +28,10 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01J21Rm4nQqGPBDq9D7KQv3H
 
 diff --git a/src/nvenc/nvenc_base.cpp b/src/nvenc/nvenc_base.cpp
-index 0dca50ab4e5e240c36918280a4db230f2ddbc817..2aad392e9f707362d732e21145526d9015475394 100644
+index 0dca50ab4e5e240c36918280a4db230f2ddbc817..912d3de16ef981d252e83a4a2cada352e24f91c1 100644
 --- a/src/nvenc/nvenc_base.cpp
 +++ b/src/nvenc/nvenc_base.cpp
-@@ -700,6 +700,17 @@ namespace NVENC_NAMESPACE {
+@@ -700,6 +700,18 @@ namespace NVENC_NAMESPACE {
                       << frame_size_format % (client_config.bitrate / 8. / client_config.framerate) << " kB";
      log_created_encoder(init_params, enc_config, config, client_config, buffer_format);
  
@@ -43,13 +43,14 @@ index 0dca50ab4e5e240c36918280a4db230f2ddbc817..2aad392e9f707362d732e21145526d90
 +    splitplay_rate.stream_kbps = client_config.bitrate > 0 ? static_cast<std::uint32_t>(client_config.bitrate) : 0;
 +    splitplay_rate.vbv_bits = enc_config.rcParams.vbvBufferSize;
 +    splitplay_rate.vbv_initial_delay = enc_config.rcParams.vbvInitialDelay;
++    splitplay_rate.stream_fec_percent = splitplay::profile::fec_percentage();
 +    splitplay_rate.applied_kbps = splitplay_rate.stream_kbps;
 +    splitplay::profile::set_encoder_kbps(splitplay_rate.applied_kbps);
 +
      encoder_state = {};
      fail_guard.disable();
      return true;
-@@ -734,6 +745,53 @@ namespace NVENC_NAMESPACE {
+@@ -734,6 +746,54 @@ namespace NVENC_NAMESPACE {
  
      encoder_state = {};
      encoder_params = {};
@@ -64,7 +65,7 @@ index 0dca50ab4e5e240c36918280a4db230f2ddbc817..2aad392e9f707362d732e21145526d90
 +    if (rate.failed || rate.stream_kbps == 0) {
 +      return;
 +    }
-+    const std::uint32_t target = splitplay::profile::encode_bitrate_kbps(rate.stream_kbps);
++    const std::uint32_t target = splitplay::profile::encode_bitrate_kbps(rate.stream_kbps, rate.stream_fec_percent);
 +    if (target == rate.applied_kbps) {
 +      return;
 +    }
@@ -92,6 +93,7 @@ index 0dca50ab4e5e240c36918280a4db230f2ddbc817..2aad392e9f707362d732e21145526d90
 +      BOOST_LOG(warning) << "SplitPlay: NvEnc could not change the bitrate to " << target << " kbps, keeping "
 +                         << rate.applied_kbps << " kbps for this stream: " << last_nvenc_error_string;
 +      rate.failed = true;
++      splitplay::profile::set_encoder_kbps(0);  // heartbeats: this encoder cannot follow a cap
 +      return;
 +    }
 +
@@ -103,7 +105,7 @@ index 0dca50ab4e5e240c36918280a4db230f2ddbc817..2aad392e9f707362d732e21145526d90
    }
  
    ::nvenc::nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr) {
-@@ -741,6 +799,8 @@ namespace NVENC_NAMESPACE {
+@@ -741,6 +801,8 @@ namespace NVENC_NAMESPACE {
        return {};
      }
  
@@ -113,10 +115,10 @@ index 0dca50ab4e5e240c36918280a4db230f2ddbc817..2aad392e9f707362d732e21145526d90
      assert(output_bitstream);
  
 diff --git a/src/nvenc/nvenc_base.h b/src/nvenc/nvenc_base.h
-index d7338bb19d5c0f7498f2c76c5fa5eb099610667e..e406455728b7b66034b0d54d88612f0c0246ef5c 100644
+index d7338bb19d5c0f7498f2c76c5fa5eb099610667e..13d116ff4b77353b8bc6fd13a2935acfd359f0e4 100644
 --- a/src/nvenc/nvenc_base.h
 +++ b/src/nvenc/nvenc_base.h
-@@ -332,6 +332,23 @@ namespace NVENC_NAMESPACE {
+@@ -332,6 +332,24 @@ namespace NVENC_NAMESPACE {
  
      NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
  
@@ -131,6 +133,7 @@ index d7338bb19d5c0f7498f2c76c5fa5eb099610667e..e406455728b7b66034b0d54d88612f0c
 +      NV_ENC_INITIALIZE_PARAMS init_params {};
 +      NV_ENC_CONFIG enc_config {};
 +      std::uint32_t stream_kbps = 0;  ///< Bitrate the stream was set up with; 0: no live changes.
++      int stream_fec_percent = 0;  ///< FEC share when the encoder was set up.
 +      std::uint32_t vbv_bits = 0;  ///< VBV buffer size for stream_kbps (0: the driver's default).
 +      std::uint32_t vbv_initial_delay = 0;  ///< Initial VBV delay for stream_kbps (0: the driver's default).
 +      std::uint32_t applied_kbps = 0;  ///< Bitrate the encoder runs at now.
@@ -180,7 +183,7 @@ index 4ab25f3003c1921514824700c72b920f9ae62562..407334f266da270c1fb70c3b89d72c24
    void report_heartbeat(const event_sink_t &send_event, const heartbeat_sink_t &send_heartbeat);
  }  // namespace splitplay::live_stats
 diff --git a/src/splitplay/profile.cpp b/src/splitplay/profile.cpp
-index e38b04f2ec299e1a2ee76907760b7e9146724184..955724b9f3b664cb016e20b332798a3cc8bcc4a4 100644
+index e38b04f2ec299e1a2ee76907760b7e9146724184..9410e94bf0989078ccd5379203b302d0c27a5e1a 100644
 --- a/src/splitplay/profile.cpp
 +++ b/src/splitplay/profile.cpp
 @@ -20,6 +20,11 @@ namespace splitplay::profile {
@@ -195,7 +198,7 @@ index e38b04f2ec299e1a2ee76907760b7e9146724184..955724b9f3b664cb016e20b332798a3c
  
      void store(std::atomic_int &target, std::optional<int> value) {
        target.store(value ? *value : unset, std::memory_order_relaxed);
-@@ -46,6 +51,29 @@ namespace splitplay::profile {
+@@ -46,6 +51,36 @@ namespace splitplay::profile {
      mode.store(value.value_or(capture_mode_e::slot), std::memory_order_relaxed);
    }
  
@@ -203,15 +206,22 @@ index e38b04f2ec299e1a2ee76907760b7e9146724184..955724b9f3b664cb016e20b332798a3c
 +    store(bitrate_cap, value && *value > 0 ? value : std::nullopt);
 +  }
 +
-+  std::uint32_t encode_bitrate_kbps(std::uint32_t stream_kbps) {
-+    const int cap = bitrate_cap.load(std::memory_order_relaxed);
-+    if (cap == unset || stream_kbps == 0) {
++  std::uint32_t encode_bitrate_kbps(std::uint32_t stream_kbps, int stream_fec_percent) {
++    if (stream_kbps == 0) {
 +      return stream_kbps;
 +    }
-+    // Parity shards add fec % of the data on the wire.
++    // Parity shards add fec % of the data on the wire. A higher FEC share than at the start lowers the encoder
++    // bitrate so that the traffic stays what the client's bitrate allowed; a cap lowers it further.
 +    const auto fec = static_cast<std::uint64_t>(std::max(fec_percentage(), 0));
-+    const auto within_cap = static_cast<std::uint32_t>(static_cast<std::uint64_t>(cap) * 100 / (100 + fec));
-+    return std::min(stream_kbps, std::max(within_cap, min_encode_kbps));
++    const auto start_fec = static_cast<std::uint64_t>(std::max(stream_fec_percent, 0));
++    const auto wire = static_cast<std::uint64_t>(stream_kbps) * (100 + start_fec) / 100;
++    std::uint64_t budget = wire;
++    const int cap = bitrate_cap.load(std::memory_order_relaxed);
++    if (cap != unset) {
++      budget = std::min<std::uint64_t>(budget, static_cast<std::uint64_t>(cap));
++    }
++    const auto target = static_cast<std::uint32_t>(std::min<std::uint64_t>(budget * 100 / (100 + fec), stream_kbps));
++    return std::min(stream_kbps, std::max(target, min_encode_kbps));
 +  }
 +
 +  void set_encoder_kbps(std::uint32_t kbps) {
@@ -226,7 +236,7 @@ index e38b04f2ec299e1a2ee76907760b7e9146724184..955724b9f3b664cb016e20b332798a3c
      return mode.load(std::memory_order_relaxed);
    }
 diff --git a/src/splitplay/profile.h b/src/splitplay/profile.h
-index eed8fa41f66c0945c1163945d77f18184d1771e0..f726dae4cee243e762b25303a117f4c9b406b8f4 100644
+index eed8fa41f66c0945c1163945d77f18184d1771e0..a5ee4a4fa1974e372ef6872c0dccc99afc4f2465 100644
 --- a/src/splitplay/profile.h
 +++ b/src/splitplay/profile.h
 @@ -13,6 +13,7 @@
@@ -237,7 +247,7 @@ index eed8fa41f66c0945c1163945d77f18184d1771e0..f726dae4cee243e762b25303a117f4c9
   */
  // SPDX-License-Identifier: GPL-3.0-only
  #pragma once
-@@ -66,6 +67,33 @@ namespace splitplay::profile {
+@@ -66,6 +67,34 @@ namespace splitplay::profile {
     */
    void set_capture_mode(std::optional<capture_mode_e> value);
  
@@ -251,10 +261,11 @@ index eed8fa41f66c0945c1163945d77f18184d1771e0..f726dae4cee243e762b25303a117f4c9
 +  /**
 +   * @param stream_kbps The encoder bitrate the stream was set up with (the client's bitrate less the FEC and audio
 +   *                    allowance).
++   * @param stream_fec_percent The FEC share when the stream was set up.
 +   * @return Encoder bitrate for the next frame: `stream_kbps`, or less so that the video traffic with the current FEC
-+   *         share stays within the cap.
++   *         share stays within the cap and never exceeds what the stream sent at its own FEC share.
 +   */
-+  std::uint32_t encode_bitrate_kbps(std::uint32_t stream_kbps);
++  std::uint32_t encode_bitrate_kbps(std::uint32_t stream_kbps, int stream_fec_percent);
 +
 +  /**
 +   * @brief The bitrate an encoder that can change it live runs at now (kbit/s); 0 when none does (no stream, or an

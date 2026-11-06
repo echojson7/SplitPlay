@@ -278,9 +278,10 @@ The client sends at most 8 reports per 100 ms, so a very lossy link is under-cou
 could not decode) is unchanged.
 
 Patch 0025 adds the Profile field `bitrate_cap_kbps` (0-1000000, live, 0 or `null` = no cap): the most video traffic
-one stream may send, parity included. The encoder bitrate becomes the stream's own (the client's bitrate less the FEC
-and audio allowance, as upstream computes it at launch) or `cap * 100 / (100 + fec_percent)`, whichever is lower, never
-below 500 kbit/s. Native NVENC (`nvenc_base`) keeps its initialisation parameters and, before each frame, reconfigures
+one stream may send, parity included. The stream's traffic budget is what it sent at launch (the client's bitrate less
+the FEC and audio allowance, as upstream computes it, plus that FEC share), or the cap if lower; the encoder bitrate
+becomes `budget * 100 / (100 + fec_percent)`, at most the stream's own and never below 500 kbit/s. So raising FEC
+during a stream lowers the encoder bitrate instead of adding traffic, with or without a cap. Native NVENC (`nvenc_base`) keeps its initialisation parameters and, before each frame, reconfigures
 itself when that value changed: `NvEncReconfigureEncoder` with the new CBR average bitrate and the VBV buffer and
 initial delay scaled with it, no reset and no forced IDR, so the picture does not stall. A refusal is logged once and
 the stream keeps its bitrate. Other encoders keep the client's bitrate (`encoder_kbps` stays `null`). The service's

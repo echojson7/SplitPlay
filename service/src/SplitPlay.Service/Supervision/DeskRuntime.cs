@@ -62,6 +62,16 @@ internal sealed class DeskRuntime
     /// <summary>FEC share and bitrate cap (0: none) last sent to the current worker, in welcome or set_profile.</summary>
     public (int? FecPercent, int? BitrateCapKbps)? SentStreamSettings { get; set; }
 
+    /// <summary>Serialises set_profile pushes, so that the last one sent is always the newest wanted state.</summary>
+    public SemaphoreSlim PushGate { get; } = new(1, 1);
+
+    /// <summary>
+    /// The profile the worker should have now: the desk's, with the adaptation's FEC share and per-stream cap while it
+    /// is on. Caller holds <see cref="Gate"/>.
+    /// </summary>
+    public IpcProfile WantedProfile() =>
+        ToIpcProfile(Config.Profile, Config.Profile.AdaptiveStreamEnabled ? Adaptive : null, Streams.Count);
+
     /// <summary>The stream ids the adaptation last saw: a change starts the bitrate over.</summary>
     public string AdaptedStreams { get; set; } = "";
 
@@ -442,6 +452,9 @@ internal sealed class DeskRuntime
         return dto;
     }
 
+    /// <summary>The largest <c>bitrate_cap_kbps</c> the worker accepts (ipc.md).</summary>
+    public const int MaxBitrateCapKbps = 1_000_000;
+
     /// <summary>
     /// What the stream adaptation reads from a heartbeat: the mapped metrics and the stream list (requested bitrates,
     /// whether every client sends FEC reports). Caller holds <see cref="Gate"/>.
@@ -464,9 +477,10 @@ internal sealed class DeskRuntime
     /// Converts the configuration profile to the pipe's snake_case profile object. The stream settings the worker
     /// applies (FEC, minimum fps, DPB, pacing, bitrate cap) are always sent, with the service defaults where the desk
     /// sets none, so that clearing a value of a running desk restores the default instead of keeping the old value.
-    /// With <paramref name="adaptive"/> its FEC share and bitrate cap are sent instead (0: no cap).
+    /// With <paramref name="adaptive"/> its FEC share and bitrate cap are sent instead (0: no cap). The cap is the
+    /// desk's; the worker applies it to each stream, so it is split between <paramref name="streams"/>.
     /// </summary>
-    public static IpcProfile ToIpcProfile(ProfileConfig p, AdaptiveState? adaptive = null) => new()
+    public static IpcProfile ToIpcProfile(ProfileConfig p, AdaptiveState? adaptive = null, int streams = 1) => new()
     {
         Fps = p.Fps,
         Width = p.Width,
@@ -478,7 +492,7 @@ internal sealed class DeskRuntime
         DpbFrames = p.DpbFrames ?? ProfileConfig.DefaultDpbFrames,
         PacingMbps = p.PacingMbps ?? ProfileConfig.DefaultPacingMbps,
         CaptureMode = p.CaptureMode ?? ProfileConfig.DefaultCaptureMode,
-        BitrateCapKbps = adaptive?.BitrateCapKbps ?? 0,
+        BitrateCapKbps = adaptive?.BitrateCapKbps is int cap ? Math.Clamp(cap / Math.Max(1, streams), 1, MaxBitrateCapKbps) : 0,
         GpuPriority = p.GpuPriority,
         GpuLuid = p.GpuLuid,
         CpuSet = p.CpuSet,

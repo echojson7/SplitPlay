@@ -673,7 +673,6 @@ public sealed class DeskSupervisor : IHostedService
             ApplyComposeInterval();
 
             IpcConnection? connection;
-            IpcProfile? pushed = null;
             lock (rt.Gate)
             {
                 rt.Config = saved;
@@ -690,15 +689,12 @@ public sealed class DeskSupervisor : IHostedService
                     {
                         rt.Adaptive = adaptive with { FecPercent = saved.Profile.FecPercent ?? rt.Adaptation.FecPercent };
                     }
-
-                    pushed = DeskRuntime.ToIpcProfile(saved.Profile, rt.Adaptive);
-                    rt.SentStreamSettings = (pushed.FecPercent, pushed.BitrateCapKbps);
                 }
             }
 
-            if (connection is not null && pushed is not null)
+            if (connection is not null)
             {
-                _ = PushProfileAsync(id, connection, pushed);
+                _ = PushProfileAsync(rt, connection, adaptive: false);
             }
 
             // A new resolution for a running desk: resize the RDP session if the seat can, else it applies at the next start.
@@ -2299,9 +2295,10 @@ public sealed class DeskSupervisor : IHostedService
             }
         }
 
-        // The adapter lookup reads the system's adapter list (cached), so it runs outside the desk's gate.
+        // The adapter lookup reads the system's adapter list (cached), so it runs outside the desk's gate. A share is
+        // only worth anything when the encoder can follow a cap.
         int? share = null;
-        if (enabled && sample.Clients > 0 && FindLink(address) is { } link)
+        if (enabled && sample.Clients > 0 && sample.EncoderKbps is not null && FindLink(address) is { } link)
         {
             _budget.Set(rt.Id, link.Id, link.BitsPerSecond, sample.RequestedKbps);
             share = _budget.ShareKbps(rt.Id);
@@ -2311,12 +2308,14 @@ public sealed class DeskSupervisor : IHostedService
             _budget.Remove(rt.Id);
         }
 
-        IpcProfile? push = null;
+        var push = false;
         bool changed;
         lock (rt.Gate)
         {
             if (!rt.IsCurrent(connection))
             {
+                // The worker went away meanwhile: its stop already dropped the budget entry that was just set.
+                _budget.Remove(rt.Id);
                 return false;
             }
 
@@ -2337,23 +2336,49 @@ public sealed class DeskSupervisor : IHostedService
             }
 
             rt.Adaptive = next;
-            var ipc = DeskRuntime.ToIpcProfile(profile, next);
-            if (rt.SentStreamSettings != (ipc.FecPercent, ipc.BitrateCapKbps))
-            {
-                rt.SentStreamSettings = (ipc.FecPercent, ipc.BitrateCapKbps);
-                push = ipc;
-            }
+            var wanted = rt.WantedProfile();
+            push = rt.SentStreamSettings != (wanted.FecPercent, wanted.BitrateCapKbps);
         }
 
-        if (push is not null)
+        if (push)
         {
-            _ = PushProfileAsync(rt.Id, connection, push, adaptive: true);
+            _ = PushProfileAsync(rt, connection, adaptive: true);
         }
 
         return changed;
     }
 
-    private async Task PushProfileAsync(string id, IpcConnection connection, IpcProfile profile, bool adaptive = false)
+    /// <summary>
+    /// Sends the worker the profile it should have now (<see cref="DeskRuntime.WantedProfile"/>). Pushes of one desk
+    /// are serialised and each reads the wanted state only when its turn comes, so a configuration change and an
+    /// adaptation step can never arrive in the wrong order.
+    /// </summary>
+    private async Task PushProfileAsync(DeskRuntime rt, IpcConnection connection, bool adaptive)
+    {
+        await rt.PushGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            IpcProfile profile;
+            lock (rt.Gate)
+            {
+                if (!rt.IsCurrent(connection))
+                {
+                    return;
+                }
+
+                profile = rt.WantedProfile();
+                rt.SentStreamSettings = (profile.FecPercent, profile.BitrateCapKbps);
+            }
+
+            await SendProfileAsync(rt.Id, connection, profile, adaptive).ConfigureAwait(false);
+        }
+        finally
+        {
+            rt.PushGate.Release();
+        }
+    }
+
+    private async Task SendProfileAsync(string id, IpcConnection connection, IpcProfile profile, bool adaptive)
     {
         try
         {

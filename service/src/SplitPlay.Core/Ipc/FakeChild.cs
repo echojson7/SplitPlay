@@ -381,6 +381,7 @@ public static class FakeChild
         private bool _streaming;
         private DateTimeOffset _startedAt;
         private int _fecPercent = 20;
+        private int _startFecPercent = 20;
         private int _capKbps;
 
         private const int RequestedKbps = 50_000;
@@ -407,8 +408,15 @@ public static class FakeChild
         /// <summary>The encoder bitrate of a worker with patch 0025 (profile.cpp encode_bitrate_kbps). Caller holds the gate.</summary>
         private int EncoderKbps()
         {
-            var stream = RequestedKbps * (100 - Math.Min(_fecPercent, 80)) / 100;
-            return _capKbps > 0 ? Math.Min(stream, Math.Max(500, _capKbps * 100 / (100 + _fecPercent))) : stream;
+            // Set up at the stream's start with the FEC share then (rtsp.cpp); the traffic never grows beyond that.
+            var stream = RequestedKbps * (100 - Math.Min(_startFecPercent, 80)) / 100;
+            var budget = (long)stream * (100 + _startFecPercent) / 100;
+            if (_capKbps > 0)
+            {
+                budget = Math.Min(budget, _capKbps);
+            }
+
+            return (int)Math.Min(stream, Math.Max(500, budget * 100 / (100 + _fecPercent)));
         }
 
         public void Dispose() => _order.Dispose();
@@ -423,6 +431,7 @@ public static class FakeChild
                 {
                     _streaming = true;
                     _startedAt = DateTimeOffset.UtcNow;
+                    _startFecPercent = _fecPercent;
                 }
 
                 await connection.SendAsync(new EventMessage { Name = IpcProtocol.Events.ClientConnected, Data = SessionEvent() }, ct)

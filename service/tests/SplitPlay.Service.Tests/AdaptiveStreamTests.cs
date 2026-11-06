@@ -36,6 +36,17 @@ public sealed class AdaptiveStreamTests
         return svc;
     }
 
+    /// <summary>Waits until a set_profile the fake worker received matches (the desk shows a change before it is sent).</summary>
+    private static async Task WaitPushedAsync(TestService svc, Func<IpcProfile, bool> match, string what)
+    {
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (!Pushed(svc).Any(match))
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the worker never got " + what);
+            await Task.Delay(25);
+        }
+    }
+
     private static List<IpcProfile> Pushed(TestService svc) =>
         svc.Launcher.Received.Where(m => m.Role != IpcProtocol.Roles.Seat).Select(m => m.Message).OfType<SetProfileMessage>()
             .Select(m => m.Profile!).ToList();
@@ -57,9 +68,8 @@ public sealed class AdaptiveStreamTests
         Assert.NotNull(limited.Metrics.EncoderKbps);
 
         // The worker got the new FEC share and the cap.
-        var pushed = Pushed(svc);
-        Assert.Contains(pushed, p => p.FecPercent > 20);
-        Assert.Contains(pushed, p => p.BitrateCapKbps is > 0 and < 50_000);
+        await WaitPushedAsync(svc, p => p.FecPercent > 20, "a higher FEC share");
+        await WaitPushedAsync(svc, p => p.BitrateCapKbps is > 0 and < 50_000, "a bitrate cap");
 
         var json = await svc.Client.GetStringAsync("/api/v1/desks/desk-1");
         Assert.Contains("\"adaptive\":{\"fecPercent\":", json, StringComparison.Ordinal);
@@ -70,11 +80,16 @@ public sealed class AdaptiveStreamTests
         Assert.Equal(HttpStatusCode.OK, put.StatusCode);
         var off = await svc.WaitForAsync("desk-1", d => d.Adaptive is null, what: "adaptation off");
         Assert.False(off.Profile.AdaptiveStreamEnabled);
-        var last = Pushed(svc)[^1];
-        Assert.Equal((20, 0), (last.FecPercent, last.BitrateCapKbps));
-        var count = Pushed(svc).Count;
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10);
+        while (Pushed(svc)[^1] is not { FecPercent: 20, BitrateCapKbps: 0 })
+        {
+            Assert.True(DateTime.UtcNow < deadline, "the desk values were not sent back");
+            await Task.Delay(25);
+        }
+
         await Task.Delay(500);
-        Assert.Equal(count, Pushed(svc).Count);
+        var last = Pushed(svc)[^1];
+        Assert.Equal((20, 0), (last.FecPercent, last.BitrateCapKbps)); // and nothing adapts any more
 
         await svc.PostDeskActionAsync("desk-1", "stop");
         var stopped = await svc.WaitForStateAsync("desk-1", DeskState.Stopped);
@@ -92,7 +107,7 @@ public sealed class AdaptiveStreamTests
         var low = await svc.WaitForAsync("desk-1", d => d.Adaptive is { FecPercent: StreamAdaptation.MinFecPercent }, what: "FEC at its minimum");
         Assert.Null(low.Adaptive!.BitrateCapKbps);
         Assert.Equal("none", low.Adaptive.Limit);
-        Assert.Contains(Pushed(svc), p => p.FecPercent == StreamAdaptation.MinFecPercent && p.BitrateCapKbps == 0);
+        await WaitPushedAsync(svc, p => p.FecPercent == StreamAdaptation.MinFecPercent && p.BitrateCapKbps == 0, "5 % FEC");
         await svc.WaitForAsync("desk-1", d => d.Metrics.FecPercent == StreamAdaptation.MinFecPercent, what: "the worker at 5 % FEC");
     }
 
@@ -118,7 +133,7 @@ public sealed class AdaptiveStreamTests
         // 80 % of 30 Mbit/s for a client that asks for 50.
         var shared = await svc.WaitForAsync("desk-1", d => d.Adaptive is { Limit: "network" }, what: "the network share");
         Assert.Equal(24_000, shared.Adaptive!.BitrateCapKbps);
-        Assert.Contains(Pushed(svc), p => p.BitrateCapKbps == 24_000);
+        await WaitPushedAsync(svc, p => p.BitrateCapKbps == 24_000, "the network share");
     }
 
     [Fact]
@@ -152,6 +167,11 @@ public sealed class AdaptiveStreamTests
         var adapted = DeskRuntime.ToIpcProfile(profile, new AdaptiveState(30, 25_000, AdaptiveLimit.Loss));
         Assert.Equal((30, 25_000), (adapted.FecPercent, adapted.BitrateCapKbps));
         Assert.Equal(0, DeskRuntime.ToIpcProfile(profile, new AdaptiveState(30, null, AdaptiveLimit.None)).BitrateCapKbps);
+
+        // The cap is the desk's: split between its streams, and never more than the worker accepts.
+        Assert.Equal(12_500, DeskRuntime.ToIpcProfile(profile, new AdaptiveState(30, 25_000, AdaptiveLimit.Loss), streams: 2).BitrateCapKbps);
+        Assert.Equal(DeskRuntime.MaxBitrateCapKbps,
+            DeskRuntime.ToIpcProfile(profile, new AdaptiveState(30, 3_000_000, AdaptiveLimit.Network)).BitrateCapKbps);
 
         var json = IpcCodec.EncodeToString(new SetProfileMessage { Id = 1, Profile = adapted });
         Assert.Contains("\"bitrate_cap_kbps\":25000", json, StringComparison.Ordinal);

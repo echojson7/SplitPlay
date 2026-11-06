@@ -212,7 +212,7 @@ What the worker applies (worker/README.md, *Stream profile*), from `welcome` and
 | `pacing_mbps` | 1–100000, send pacing of one stream | next frame |
 | `capture_mode` | `"slot"` (take the newest frame at the stream's next frame slot) or `"arrival"` (take each frame as soon as DWM composes it, at most the stream's fps on average) | next frame |
 | `dpb_frames` | 1–16 (AV1 at most 8), 0 = codec default; only for clients that leave the reference count to the host | next stream |
-| `bitrate_cap_kbps` | 0–1000000, 0 = no cap: the most video traffic one stream may send, FEC included; the encoder bitrate becomes `min(stream's own, cap × 100 / (100 + fec_percent))`, at least 500 (patch 0025) | next frame, native NVENC only |
+| `bitrate_cap_kbps` | 0–1000000, 0 = no cap: the most video traffic one stream may send, FEC included; the encoder bitrate becomes `min(stream's own, min(stream's own traffic at its starting FEC share, cap) × 100 / (100 + fec_percent))`, at least 500, so a higher FEC share never adds traffic either (patch 0025). The service splits the desk's cap between its streams | next frame, native NVENC only |
 
 `null` restores the worker's default (Sunshine's: FEC 20 %, half the stream's fps, 800 Mbit/s, DPB 5 or 8). A value
 of the wrong type or out of range fails `set_profile` with `bad_request` and nothing is applied. The other fields

@@ -108,6 +108,10 @@ public sealed class StreamAdaptation
     private int _clean;
     private int _sinceCut = int.MaxValue / 2;
     private double? _minRtt;
+    private int _noEncoder;
+
+    /// <summary>Heartbeats in a row without a live encoder after which the cap is dropped.</summary>
+    public const int NoEncoderToDrop = 3;
 
     /// <summary>The FEC share for the next frames.</summary>
     public int FecPercent => _fec;
@@ -135,6 +139,7 @@ public sealed class StreamAdaptation
         _clean = 0;
         _sinceCut = int.MaxValue / 2;
         _minRtt = null;
+        _noEncoder = 0;
     }
 
     /// <summary>One heartbeat. A heartbeat without a stream changes nothing.</summary>
@@ -204,10 +209,17 @@ public sealed class StreamAdaptation
     {
         if (s.EncoderKbps is null)
         {
-            // The encoder keeps the client's bitrate whatever the cap: a cap would only drift down to the floor.
-            _cap = null;
+            // The encoder keeps the client's bitrate whatever the cap: a cap would only drift down to the floor. One
+            // heartbeat without it (an encoder being re-created) keeps what was learned; a few in a row drop it.
+            if (++_noEncoder >= NoEncoderToDrop)
+            {
+                _cap = null;
+            }
+
             return;
         }
+
+        _noEncoder = 0;
 
         var requested = s.RequestedKbps > 0 ? s.RequestedKbps : (int)Math.Max(0, s.WireKbps);
         if (requested <= 0)

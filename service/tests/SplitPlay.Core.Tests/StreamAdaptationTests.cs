@@ -179,6 +179,14 @@ public sealed class StreamAdaptationTests
         var a = new StreamAdaptation();
         Run(a, Lossy(8, 20) with { EncoderKbps = null }, 10);
         Assert.Null(a.LossCapKbps);
+
+        // A heartbeat or two without it (the encoder re-created) keep the cap; three in a row drop it.
+        Run(a, Lossy(6, 20), 2);
+        Assert.Equal(36_000, a.LossCapKbps);
+        Run(a, Clean() with { EncoderKbps = null }, StreamAdaptation.NoEncoderToDrop - 1);
+        Assert.Equal(36_000, a.LossCapKbps);
+        a.Update(Clean() with { EncoderKbps = null }, adaptFec: true);
+        Assert.Null(a.LossCapKbps);
     }
 
     [Fact]
@@ -228,8 +236,8 @@ public sealed class NetworkBudgetTests
         b.Set("a", "eth0", 100_000_000, 60_000);
         b.Set("b", "eth0", 100_000_000, 20_000);
         b.Set("c", "wifi", 100_000_000, 60_000); // another adapter: not counted
-        Assert.Equal(60_000, b.ShareKbps("a"));
-        Assert.Equal(20_000, b.ShareKbps("b"));
+        Assert.Null(b.ShareKbps("a")); // exactly 80 Mbit/s fits
+        Assert.Null(b.ShareKbps("b"));
         Assert.Null(b.ShareKbps("c"));
 
         b.Set("d", "eth0", 100_000_000, 80_000);

@@ -288,6 +288,31 @@ export interface HostSettings {
   logLevel: string
   /** Keep the PC from sleeping while a client streams (default true; older services leave it out). */
   keepAwake?: boolean
+  /** Which processor cores desk processes may use (default `off`; older services leave it out). */
+  deskCores?: DeskCoresMode
+}
+
+export const DESK_CORES_MODES = ['off', 'auto'] as const
+export type DeskCoresMode = (typeof DESK_CORES_MODES)[number]
+
+/** How `auto` splits this CPU: `ccd`/`x3d` one L3 cache (CCD) per desk, `hybrid` the P-cores, `uniform` nothing. */
+export type CpuKind = 'uniform' | 'hybrid' | 'ccd' | 'x3d'
+
+/** The processors of one desk; null: every processor (not restricted). */
+export interface DeskCpu {
+  id: string
+  cpus: number[] | null
+}
+
+/** GET /host/cpu: the CPU and the processors each desk gets now (`desks`) and would get with `auto`. */
+export interface HostCpu {
+  name: string | null
+  cores: number
+  threads: number
+  kind: CpuKind
+  mode: DeskCoresMode
+  desks: DeskCpu[]
+  auto: DeskCpu[]
 }
 
 /** Events pushed over GET /ws. */

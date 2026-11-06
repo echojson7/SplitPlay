@@ -58,6 +58,9 @@ internal sealed class DeskRuntime
     /// <summary>Cancelled when the seat's session ends (stops the per-session janitor).</summary>
     public CancellationTokenSource? SeatScope { get; set; }
 
+    /// <summary>The desk user the session janitors run for (set when they start).</summary>
+    public string? JanitorUser { get; set; }
+
     /// <summary>Set to end the current worker run without a worker fault (e.g. the session changed after a reconnect).</summary>
     public TaskCompletionSource<string>? WorkerAbort { get; set; }
 

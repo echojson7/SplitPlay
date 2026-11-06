@@ -102,6 +102,7 @@ export const en = {
   'live.ping': 'Ping',
   'live.encode': 'Encoding',
   'live.loss': 'Loss',
+  'live.compose': 'Composition',
   'live.none': 'No one is connected',
   'live.unknownDevice': 'Unknown device',
   'live.encodeValue': '{p50} / {p99} ms',
@@ -164,6 +165,9 @@ export const en = {
   'adv.minFps': 'Minimum FPS',
   'adv.pacing': 'Send rate, Mbit/s',
   'adv.gpuPriority': 'GPU priority',
+  'adv.captureMode': 'Frame capture',
+  'adv.capture.slot': 'On the stream slot',
+  'adv.capture.arrival': 'As soon as ready',
   'adv.workerSettings': 'Sunshine settings',
   'adv.workerSettingsHint': 'key=value, one per line',
   'adv.default': 'Default',
@@ -231,8 +235,9 @@ export const en = {
   'settings.lanAccess': 'Access from the local network',
   'settings.basePortStart': 'First base port',
   'settings.basePortStride': 'Port step',
-  'settings.composeInterval': 'Composition interval',
+  'settings.composeInterval': 'Composition rate',
   'settings.composeHz': '{ms} ms ({hz} Hz)',
+  'settings.composeAuto': 'Auto',
   'settings.logLevel': 'Log level',
   'settings.backup': 'Backup',
   'settings.export': 'Export',
@@ -288,6 +293,7 @@ export const en = {
   'unit.gb': '{value} GB',
   'unit.percent': '{value} %',
   'unit.fps': '{value} FPS',
+  'unit.hz': '{value} Hz',
 } as const
 
 export type MessageKey = keyof typeof en
@@ -393,6 +399,7 @@ export const ru: Partial<Messages> = {
   'live.ping': 'Пинг',
   'live.encode': 'Кодирование',
   'live.loss': 'Потери',
+  'live.compose': 'Композиция',
   'live.none': 'Никто не подключён',
   'live.unknownDevice': 'Неизвестное устройство',
   'live.encodeValue': '{p50} / {p99} мс',
@@ -455,6 +462,9 @@ export const ru: Partial<Messages> = {
   'adv.minFps': 'Минимальный FPS',
   'adv.pacing': 'Скорость отправки, Мбит/с',
   'adv.gpuPriority': 'Приоритет GPU',
+  'adv.captureMode': 'Захват кадра',
+  'adv.capture.slot': 'По слоту потока',
+  'adv.capture.arrival': 'Сразу по готовности',
   'adv.workerSettings': 'Параметры Sunshine',
   'adv.workerSettingsHint': 'ключ=значение, по одному в строке',
   'adv.default': 'По умолчанию',
@@ -522,8 +532,9 @@ export const ru: Partial<Messages> = {
   'settings.lanAccess': 'Доступ из локальной сети',
   'settings.basePortStart': 'Первый базовый порт',
   'settings.basePortStride': 'Шаг портов',
-  'settings.composeInterval': 'Интервал композиции',
+  'settings.composeInterval': 'Частота композиции',
   'settings.composeHz': '{ms} мс ({hz} Гц)',
+  'settings.composeAuto': 'Авто',
   'settings.logLevel': 'Уровень логов',
   'settings.backup': 'Резервная копия',
   'settings.export': 'Экспорт',
@@ -579,6 +590,7 @@ export const ru: Partial<Messages> = {
   'unit.gb': '{value} ГБ',
   'unit.percent': '{value} %',
   'unit.fps': '{value} FPS',
+  'unit.hz': '{value} Гц',
 }
 
 export const LOCALES = { ru, en } as const

@@ -3,7 +3,16 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
 import { deskToConfig } from '../api/client'
-import { CODECS, GPU_PRIORITIES, type Desk, type DeskConfig, type GpuInfo, type GpuPriority } from '../api/types'
+import {
+  CAPTURE_MODES,
+  CODECS,
+  GPU_PRIORITIES,
+  type CaptureMode,
+  type Desk,
+  type DeskConfig,
+  type GpuInfo,
+  type GpuPriority,
+} from '../api/types'
 import { hasErrors, validateDeskConfig, type DeskConfigErrors } from '../api/validate'
 import { t } from '../i18n'
 
@@ -31,6 +40,7 @@ const form = reactive({
   minFps: d.profile.minFps === undefined ? '' : String(d.profile.minFps),
   pacingMbps: d.profile.pacingMbps === undefined ? '' : String(d.profile.pacingMbps),
   gpuPriority: (d.profile.gpuPriority ?? '') as GpuPriority | '',
+  captureMode: (d.profile.captureMode ?? '') as CaptureMode | '',
   // Stored as the worker's `gamepad` setting (keys are case-insensitive); the service defaults it to ds4.
   gamepad: gamepadSetting(d.workerSettings),
   workerSettings: Object.entries(d.workerSettings ?? {})
@@ -80,6 +90,8 @@ function toConfig(): DeskConfig {
   else profile.pacingMbps = Number(form.pacingMbps)
   if (form.gpuPriority) profile.gpuPriority = form.gpuPriority
   else delete profile.gpuPriority
+  if (form.captureMode) profile.captureMode = form.captureMode
+  else delete profile.captureMode
   const config: DeskConfig = { ...base, profile }
   // Sent only when changed: an account SplitPlay did not create is hidden only on the owner's explicit request.
   if (form.hideFromLogon !== (props.desk.hideFromLogon ?? props.desk.userManaged !== false))
@@ -237,6 +249,13 @@ const gpuOptions = computed(() => {
         <select id="adv-prio" v-model="form.gpuPriority" name="gpuPriority">
           <option value="">{{ t('adv.default') }}</option>
           <option v-for="p in GPU_PRIORITIES" :key="p" :value="p">{{ p }}</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="adv-capture">{{ t('adv.captureMode') }}</label>
+        <select id="adv-capture" v-model="form.captureMode" name="captureMode">
+          <option value="">{{ t('adv.default') }}</option>
+          <option v-for="m in CAPTURE_MODES" :key="m" :value="m">{{ t(`adv.capture.${m}`) }}</option>
         </select>
       </div>
     </div>

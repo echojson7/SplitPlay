@@ -194,6 +194,27 @@ public sealed class HostTuningTests : IDisposable
         Assert.True(Tuner().Status(Options(compose: 4)).Ready); // the recorded value wins over the default
     }
 
+    [Fact]
+    public void Auto_is_prepared_as_250_hz()
+    {
+        Tuner().Prepare(Options(skip: true, compose: ComposeInterval.Auto));
+        Assert.Equal("4", _registry.Get(HostTuner.WinStationsKey, "DWMFRAMEINTERVAL")!.Data);
+    }
+
+    [Theory]
+    [InlineData(4, 240, 4)] // a configured value is used as is
+    [InlineData(1, 0, 1)]
+    [InlineData(0, 0, 4)] // Auto without a known frame rate: 250 Hz
+    [InlineData(0, 30, 4)]
+    [InlineData(0, 60, 4)]
+    [InlineData(0, 120, 4)]
+    [InlineData(0, 144, 3)]
+    [InlineData(0, 165, 3)]
+    [InlineData(0, 240, 2)]
+    [InlineData(0, 500, 2)]
+    public void Auto_composes_at_least_twice_per_stream_frame(int configured, int fps, int expected) =>
+        Assert.Equal(expected, ComposeInterval.Resolve(configured, fps));
+
     private static readonly Guid Balanced = new("381b4222-f694-41f0-9685-ff5bb260df2e");
 
     private HostTuner PowerTuner() => new(_registry, _services, StateFile, _time, _power);

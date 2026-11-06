@@ -64,6 +64,12 @@ public sealed class DeskMetricsDto
 
     public double Clients { get; set; }
 
+    /// <summary>
+    /// Frames DWM composed per second in the desk session, as Desktop Duplication reports them: the real composition
+    /// rate (at most 1000 / <c>DWMFRAMEINTERVAL</c>, less when the game renders slower). Null without a stream.
+    /// </summary>
+    public double? CaptureFps { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
 }
@@ -294,7 +300,8 @@ public sealed record DeskMetricsEntryDto(
     double EncodeMsP99,
     double LossPct,
     double? RttMs,
-    double Clients)
+    double Clients,
+    double? CaptureFps)
 {
     /// <summary>The desk session's GPU load (busiest engine, all its processes), percent; null when not measured.</summary>
     public double? GpuPercent { get; init; }
@@ -308,7 +315,7 @@ public sealed record DeskMetricsEntryDto(
     public static DeskMetricsEntryDto From(string id, DeskMetricsDto m)
     {
         ArgumentNullException.ThrowIfNull(m);
-        return new(id, m.Fps, m.BitrateKbps, m.EncodeMsP50, m.EncodeMsP99, m.LossPct, m.RttMs, m.Clients);
+        return new(id, m.Fps, m.BitrateKbps, m.EncodeMsP50, m.EncodeMsP99, m.LossPct, m.RttMs, m.Clients, m.CaptureFps);
     }
 }
 

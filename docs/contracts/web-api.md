@@ -154,7 +154,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
   "autostart": true,
   "gpu": "auto",
   "profile": { "fps": 120, "width": 1920, "height": 1080, "bitrateKbps": 60000, "codec": "hevc" },
-  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": null, "clients": 0 },
+  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": null, "clients": 0, "captureFps": null },
   "stream": null,
   "lastError": null
 }
@@ -165,7 +165,7 @@ A streaming desk:
 ```json
 {
   "state": "Streaming",
-  "metrics": { "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4, "lossPct": 0, "rttMs": 4, "clients": 1 },
+  "metrics": { "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4, "lossPct": 0, "rttMs": 4, "clients": 1, "captureFps": 238.4 },
   "stream": {
     "client": "Living room PC", "clientId": "…", "address": "192.168.1.37",
     "width": 1920, "height": 1080, "fps": 120, "codec": "hevc", "bitrateKbps": 50000, "hdr": false,
@@ -192,8 +192,9 @@ restarts. `state` follows it: `Ready` → `Streaming` while a stream runs, back 
 
 `metrics` are the worker's live numbers over the last second (definitions in ipc.md): `fps` and `bitrateKbps` actually
 sent, `encodeMsP50`/`encodeMsP99` host processing latency (capture to encoded frame), `lossPct` frames the client
-reported lost, `rttMs` round-trip time to the client (`null` until one is measured). All 0 (`rttMs` `null`) when
-nothing streams.
+reported lost, `rttMs` round-trip time to the client (`null` until one is measured), `captureFps` frames DWM composed
+per second in the desk session (the real composition rate, `null` without a stream). All 0 (`rttMs` and `captureFps`
+`null`) when nothing streams.
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.
@@ -255,11 +256,12 @@ The host cannot take V-Sync latency out of the client, only recommend settings t
                "encoderPercent": 12, "vramUsedMb": 6230, "vramTotalMb": 16376 }]
   },
   "desks": [{ "id": "desk-1", "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4,
-              "lossPct": 0, "rttMs": 4, "clients": 1, "gpuPercent": 34, "encoderPercent": 12, "vramMb": 2900 }]
+              "lossPct": 0, "rttMs": 4, "clients": 1, "captureFps": 238.4, "gpuPercent": 34, "encoderPercent": 12, "vramMb": 2900 }]
 }
 ```
 
-Values that are not measured yet are `null`. Software adapters (Microsoft Basic Render Driver) are not listed.
+`composeHz` is the composition rate the host is set to (`host.composeIntervalMs`, Auto resolved; config.md), each desk's
+`captureFps` the rate DWM actually composes at. Values that are not measured yet are `null`. Software adapters (Microsoft Basic Render Driver) are not listed.
 
 GPU numbers come from the performance counters Task Manager reads (`GPU Engine`, `GPU Process Memory`,
 `GPU Adapter Memory`), sampled once a second while someone reads metrics and not at all 30 s after the last read.

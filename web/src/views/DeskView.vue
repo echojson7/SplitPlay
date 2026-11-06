@@ -25,6 +25,7 @@ import {
   RESOLUTION_PRESETS,
   resolutionKey,
   streamSummary,
+  hdrLabel,
 } from '../desk'
 import { fmtDateTime, fmtNumber, t } from '../i18n'
 import { store } from '../store'
@@ -47,6 +48,7 @@ const error = computed(() => (desk.value ? deskError(desk.value) : null))
 
 // ---- now: the connected device and live numbers (desk events and the 2 s metrics push)
 const stream = computed(() => (desk.value ? liveStream(desk.value) : null))
+const hdr = computed(() => (running.value ? hdrLabel(desk.value?.hdr) : null))
 const live = computed(() => {
   const m = desk.value?.metrics
   if (!m) return null
@@ -307,7 +309,7 @@ async function remove(): Promise<void> {
           <div class="srow compact">
             <AppIcon name="monitor" :size="16" />
             <div class="text"><span class="title">{{ t('live.stream') }}</span></div>
-            <div class="ctl val" data-live-stream>{{ streamSummary(stream) }}</div>
+            <div class="ctl val" data-live-stream>{{ streamSummary(stream, desk.hdr) }}</div>
           </div>
           <div class="srow compact">
             <AppIcon name="activity" :size="16" />
@@ -330,6 +332,11 @@ async function remove(): Promise<void> {
             <div class="ctl val" data-live-loss>{{ live?.loss }}</div>
           </div>
         </template>
+        <div v-if="hdr" class="srow compact" data-live-hdr-row>
+          <AppIcon name="monitor" :size="16" />
+          <div class="text"><span class="title">{{ t('live.hdr') }}</span></div>
+          <div class="ctl val" data-live-hdr :title="desk.hdr?.adapter ?? undefined">{{ hdr }}</div>
+        </div>
       </div>
 
       <h2 class="group-title">{{ t('desk.connection') }}</h2>

@@ -64,6 +64,8 @@ describe('app smoke', () => {
     expect(w.find('[data-live-ping]').text()).toMatch(/^\d+ мс$/)
     expect(w.find('[data-live-encode]').text()).toMatch(/^\d+,\d \/ \d+,\d мс$/)
     expect(w.find('[data-live-loss]').text()).toMatch(/ %$/)
+    // The desk display's HDR state, as the worker measured it: an RDP display is SDR only.
+    expect(w.find('[data-live-hdr]').text()).toBe('Недоступен')
     expect(w.find('[data-address]').text()).toBe('192.168.1.20:48089')
     expect(w.find('details.more').attributes('open')).toBeUndefined()
 

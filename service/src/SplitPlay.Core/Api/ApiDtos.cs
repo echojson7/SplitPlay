@@ -101,6 +101,40 @@ public sealed record DeskStreamDto
     public DateTimeOffset? StartedAt { get; init; }
 }
 
+/// <summary>
+/// The HDR state of a desk session's display (<c>desk.hdr</c>), from the worker's <c>display_hdr</c> probe.
+/// <see cref="State"/> is <c>enabled</c> (Windows composes the display in HDR10, so a Moonlight client that asks for HDR
+/// gets HDR), <c>off</c> (the display supports HDR but it is switched off), <c>unsupported</c> or <c>unknown</c>; see
+/// <see cref="DeskHdrStates"/>. The other fields describe the desk's first display; null when not reported.
+/// </summary>
+public sealed record DeskHdrDto
+{
+    public string State { get; init; } = DeskHdrStates.Unknown;
+
+    /// <summary>The display's name as Windows shows it (an RDP session's display usually has none).</summary>
+    public string? Monitor { get; init; }
+
+    /// <summary>The GPU that renders the session.</summary>
+    public string? Adapter { get; init; }
+
+    public int? BitsPerColor { get; init; }
+
+    /// <summary>The display's peak luminance as DXGI reports it, nits.</summary>
+    public double? MaxNits { get; init; }
+
+    /// <summary>When the worker last reported a change.</summary>
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+/// <summary>Values of <see cref="DeskHdrDto.State"/>.</summary>
+public static class DeskHdrStates
+{
+    public const string Enabled = "enabled";
+    public const string Off = "off";
+    public const string Unsupported = "unsupported";
+    public const string Unknown = "unknown";
+}
+
 /// <summary>Desk object returned by the desk endpoints.</summary>
 public sealed class DeskDto
 {
@@ -150,6 +184,9 @@ public sealed class DeskDto
 
     /// <summary>The stream the desk is serving, null when no Moonlight client is connected (the earliest one if several are).</summary>
     public DeskStreamDto? Stream { get; set; }
+
+    /// <summary>The HDR state of the desk session's display; null while no worker has reported it.</summary>
+    public DeskHdrDto? Hdr { get; set; }
 
     public string? LastError { get; set; }
 }

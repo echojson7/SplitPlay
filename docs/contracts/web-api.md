@@ -169,9 +169,18 @@ A streaming desk:
     "client": "Living room PC", "clientId": "…", "address": "192.168.1.37",
     "width": 1920, "height": 1080, "fps": 120, "codec": "hevc", "bitrateKbps": 50000, "hdr": false,
     "startedAt": "2026-10-29T18:00:00+00:00"
-  }
+  },
+  "hdr": { "state": "unsupported", "monitor": null, "adapter": "NVIDIA GeForce RTX 5070", "bitsPerColor": 8, "maxNits": 270,
+           "updatedAt": "2026-11-06T18:00:00+00:00" }
 }
 ```
+
+`hdr` is the HDR state of the desk session's display as the worker measures it (`display_hdr` in ipc.md), `null` (or
+absent) while the desk's worker has not reported it and after it stops. `state`: `enabled` (Windows composes the
+display in HDR10, so a client that asks for HDR gets HDR), `off` (the display supports HDR, but it is switched off in
+Windows), `unsupported` (SDR only: what Microsoft's RDP display gives a seat that connects without RDP GFX) or
+`unknown`. `monitor`, `adapter`, `bitsPerColor` and `maxNits` describe that display, `null` when not reported. With
+`stream.hdr` true and `hdr.state` `off` or `unsupported` the stream is SDR (10-bit), and the UI says "SDR instead of HDR".
 
 `stream` is the Moonlight stream the desk serves, `null` when nobody is connected (with several, the earliest).
 `client` and `clientId` name the paired client (`clientId` as in `GET /desks/{id}/clients`), `null` when the worker does

@@ -32,7 +32,7 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 - The worker runs as SYSTEM with `TokenSessionId` = the desk session, `lpDesktop` `winsta0\default`,
   `CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT`, in the desk's job object. Diagnostics only:
   `splitplay-worker.exe --desk-dir <dir> --self-test <seconds>` (not with `--pipe`) checks capture, input and audio in
-  the session and writes `<desk-dir>\self-test.json`. The full settings list is in worker/README.md. The seat runs as SYSTEM in session 0.
+  the session, then tries to switch HDR on and back off (`hdr` in the result), and writes `<desk-dir>\self-test.json`. The full settings list is in worker/README.md. The seat runs as SYSTEM in session 0.
 - Exit codes: 0 after `shutdown`, 2 invalid command line, 3 handshake failed or pipe lost, 4 (seat) gave up reconnecting
   the RDP session; anything else is a crash.
 
@@ -57,6 +57,7 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 {"type":"event","name":"client_connected","data":{"id":2,"client":"Living room PC","client_uuid":"…","address":"192.168.1.37","width":1920,"height":1080,"fps_requested":120,"codec":"hevc","bitrate_kbps_requested":50000,"hdr":false,"started_at":"2026-10-29T18:00:00Z"}}
 {"type":"event","name":"client_disconnected","data":{ …same fields as client_connected… }}
 {"type":"event","name":"mode_requested","data":{"width":2560,"height":1440,"fps":120}}
+{"type":"event","name":"display_hdr","data":{"state":"unsupported","displays":[{"name":"\\\\.\\DISPLAY1","monitor":"","adapter":"NVIDIA GeForce RTX 5070","hdr_supported":false,"hdr_enabled":false,"limited_by_policy":false,"color_mode":"sdr","bits_per_color":8,"dxgi_hdr":false,"max_nits":270.0}]}}
 {"type":"event","name":"session_lost","data":{"reason":"..."}}
 {"type":"event","name":"session_restored","data":{"session":3}}
 ```
@@ -72,6 +73,16 @@ Events by role:
   `data`; the service then drops its only stream, if it has exactly one.
 - worker `mode_requested`: a Moonlight client launched with this mode. The service forwards it to the seat as
   `set_mode`. The worker waits up to 3 s for the desktop size to change and carries on either way.
+- worker `display_hdr`: the HDR state of the session's displays (patch 0019). The worker probes on its first heartbeat
+  and on every fifth one and sends the event whenever the result differs from the last one sent, so once per worker
+  run at least. `state` is `enabled` (a display composes in HDR10, which is what decides whether a stream that asks
+  for HDR is encoded as HDR), `off` (a display supports HDR but it is switched off), `unsupported` (no display
+  supports it) or `unknown`. Each display: `name` (GDI device name), `monitor`, `adapter` (the GPU rendering it),
+  `hdr_supported`, `hdr_enabled` (Display Configuration API), `limited_by_policy`, `color_mode` (`sdr`, `wcg`, `hdr`),
+  `bits_per_color`, `dxgi_hdr` (DXGI colour space is HDR10), `max_nits`; a value the worker could not read is `null`,
+  and `query_error` carries the Win32 error of a failed display query. The service shows it as `desk.hdr` (web-api.md)
+  and forgets it when the worker stops. A client that asks for HDR on a display that is not in HDR gets SDR in 10 bits
+  (upstream behaviour; the worker logs a warning).
 - seat `session_lost`: the RDP connection dropped; the seat is reconnecting. The service keeps the worker running.
 - seat `session_restored`: reconnected. If the session id changed, the service restarts the worker in the new session.
 

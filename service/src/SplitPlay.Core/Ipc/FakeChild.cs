@@ -66,6 +66,9 @@ public sealed record FakeChildOptions
     /// <summary>With <see cref="SimulateClient"/>: the client disconnects after this long (<c>client_disconnected</c>).</summary>
     public TimeSpan? SimulatedClientDuration { get; init; }
 
+    /// <summary>Worker: send <c>display_hdr</c> with this state (one display on "Fake GPU") right after ready.</summary>
+    public string? DisplayHdr { get; init; }
+
     /// <summary>Worker: send <c>mode_requested</c> with this mode right after ready.</summary>
     public (int Width, int Height, int Fps)? RequestMode { get; init; }
 
@@ -173,6 +176,15 @@ public static class FakeChild
             {
                 await Task.Delay(options.HeartbeatInterval, cancellationToken).ConfigureAwait(false);
                 await SendEventAsync(connection, IpcProtocol.Events.SessionLost, """{"reason":"simulated hang"}""", cancellationToken).ConfigureAwait(false);
+            }
+
+            if (options.DisplayHdr is { } hdrState)
+            {
+                var enabled = hdrState == "enabled" ? "true" : "false";
+                var supported = hdrState is "enabled" or "off" ? "true" : "false";
+                await SendEventAsync(connection, IpcProtocol.Events.DisplayHdr,
+                    $$"""{"state":"{{hdrState}}","displays":[{"name":"\\\\.\\DISPLAY1","monitor":"","adapter":"Fake GPU","hdr_supported":{{supported}},"hdr_enabled":{{enabled}},"limited_by_policy":false,"color_mode":"sdr","bits_per_color":8,"dxgi_hdr":{{enabled}},"max_nits":270.0}]}""",
+                    cancellationToken).ConfigureAwait(false);
             }
 
             if (options.RequestMode is { } mode)

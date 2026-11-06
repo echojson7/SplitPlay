@@ -105,6 +105,11 @@ export const en = {
   'live.none': 'No one is connected',
   'live.unknownDevice': 'Unknown device',
   'live.encodeValue': '{p50} / {p99} ms',
+  'live.hdr': 'HDR',
+  'live.hdrOn': 'On',
+  'live.hdrOff': 'Off in Windows',
+  'live.hdrUnsupported': 'Not available',
+  'live.sdrNotHdr': 'SDR instead of HDR',
 
   'pack.title': 'Moonlight settings',
   'pack.resolution': 'Resolution and FPS',
@@ -380,6 +385,11 @@ export const ru: Partial<Messages> = {
   'live.none': 'Никто не подключён',
   'live.unknownDevice': 'Неизвестное устройство',
   'live.encodeValue': '{p50} / {p99} мс',
+  'live.hdr': 'HDR',
+  'live.hdrOn': 'Включён',
+  'live.hdrOff': 'Выключен в Windows',
+  'live.hdrUnsupported': 'Недоступен',
+  'live.sdrNotHdr': 'SDR вместо HDR',
 
   'pack.title': 'Настройки Moonlight',
   'pack.resolution': 'Разрешение и FPS',

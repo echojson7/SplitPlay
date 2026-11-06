@@ -297,4 +297,105 @@ public sealed class NvidiaProfilesTests : IDisposable
         Assert.False(result.Driver);
         Assert.True(result.Held);
     }
+
+    // ------------------------------------------------------------------ game FPS limits (per executable)
+
+    private const uint Frl = DrsSettings.FrameRateLimit;
+
+    private static DrsAppSpec Game(string exe, uint fps) => new(exe, new Dictionary<uint, uint> { [Frl] = fps });
+
+    [Fact]
+    public void A_game_no_profile_lists_gets_a_profile_of_its_own_which_goes_when_the_game_does()
+    {
+        var result = Profiles().Apply(Stopped, [Game("foo.exe", 60)]);
+
+        var profile = NvidiaProfiles.GameProfile("foo.exe");
+        Assert.True(_drs.HasProfile(profile));
+        Assert.Contains("foo.exe", _drs.Applications(profile));
+        Assert.Equal(60u, _drs.Get(profile, Frl));
+        var app = Assert.Single(result.Apps!);
+        Assert.Equal(new DrsAppResult("foo.exe", profile, DrsAppStatus.Set), app);
+
+        // A new limit replaces the value; no limit wanted any more: the profile is deleted.
+        Profiles().Apply(Stopped, [Game("foo.exe", 120)]);
+        Assert.Equal(120u, _drs.Get(profile, Frl));
+        Profiles().Apply(Stopped);
+        Assert.False(_drs.HasProfile(profile));
+        Assert.True(_drs.HasProfile(NvidiaProfiles.WorkerProfile));
+    }
+
+    [Fact]
+    public void A_game_in_a_profile_of_nvidia_gets_the_limit_there_and_the_predefined_value_back()
+    {
+        _drs.AddProfile("Elden Ring", "eldenring.exe", "start_protected_game.exe");
+        _drs.Predefine("Elden Ring", Frl, 0);
+
+        var result = Profiles().Apply(Stopped, [Game("eldenring.exe", 60), Game("start_protected_game.exe", 90)]);
+        Assert.False(_drs.HasProfile(NvidiaProfiles.GameProfile("eldenring.exe")));
+        // Two executables of one profile: the larger limit.
+        Assert.Equal(90u, _drs.Get("Elden Ring", Frl));
+        Assert.All(result.Apps!, a => Assert.Equal(("Elden Ring", DrsAppStatus.Set), (a.Profile!, a.Status)));
+        Assert.True(Assert.Single(Profiles().LoadState().Settings, s => s.Profile == "Elden Ring").PreviousPredefined);
+
+        Profiles().Apply(Stopped);
+        Assert.Equal(0u, _drs.Get("Elden Ring", Frl));
+        Assert.True(_drs.HasProfile("Elden Ring"));
+        Assert.DoesNotContain(Profiles().LoadState().Settings, s => s.Profile == "Elden Ring");
+    }
+
+    [Fact]
+    public void A_limit_the_owner_set_for_a_game_is_left_alone()
+    {
+        _drs.AddProfile("My game", "mine.exe");
+        _drs.Set("My game", Frl, 144);
+
+        var result = Profiles().Apply(Stopped, [Game("mine.exe", 60)]);
+        Assert.Equal(144u, _drs.Get("My game", Frl));
+        Assert.Equal(DrsAppStatus.Owner, Assert.Single(result.Apps!).Status);
+        Assert.DoesNotContain(Profiles().LoadState().Settings, s => s.Profile == "My game");
+
+        // Given back without a record: still the owner's.
+        Profiles().Apply(Stopped);
+        Assert.Equal(144u, _drs.Get("My game", Frl));
+    }
+
+    [Fact]
+    public void A_limit_the_owner_changes_after_splitplay_set_it_becomes_theirs()
+    {
+        _drs.AddProfile("Game", "g.exe");
+        Profiles().Apply(Stopped, [Game("g.exe", 60)]);
+        Assert.Equal(60u, _drs.Get("Game", Frl));
+
+        _drs.Set("Game", Frl, 30);
+        var again = Profiles().Apply(Stopped, [Game("g.exe", 60)]);
+        Assert.Equal(30u, _drs.Get("Game", Frl));
+        Assert.Equal(DrsAppStatus.Owner, Assert.Single(again.Apps!).Status);
+
+        Profiles().Apply(Stopped);
+        Assert.Equal(30u, _drs.Get("Game", Frl));
+    }
+
+    [Fact]
+    public void An_explicit_off_in_a_game_profile_is_not_the_owners_limit()
+    {
+        _drs.AddProfile("Game", "g.exe");
+        _drs.Set("Game", Frl, 0);
+        Assert.Equal(DrsAppStatus.Set, Assert.Single(Profiles().Apply(Stopped, [Game("g.exe", 60)]).Apps!).Status);
+        Assert.Equal(60u, _drs.Get("Game", Frl));
+
+        Profiles().Apply(Stopped);
+        Assert.Equal(0u, _drs.Get("Game", Frl));
+    }
+
+    [Fact]
+    public void Uninstall_gives_the_game_limits_back_too()
+    {
+        _drs.AddProfile("Game", "g.exe");
+        Profiles().Apply(Running, [Game("g.exe", 60), Game("own.exe", 60)]);
+        Profiles().Apply([]);
+
+        Assert.Null(_drs.Get("Game", Frl));
+        Assert.False(_drs.HasProfile(NvidiaProfiles.GameProfile("own.exe")));
+        Assert.False(File.Exists(StateFile));
+    }
 }

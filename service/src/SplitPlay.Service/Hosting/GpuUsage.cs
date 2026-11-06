@@ -27,12 +27,21 @@ public sealed record GpuAdapterUsage(double UtilizationPercent, double? EncoderP
 /// <summary>Live GPU use of all processes in one Windows session (one desk), summed over adapters.</summary>
 public sealed record GpuSessionUsage(double GpuPercent, double? EncoderPercent, double VramMb);
 
+/// <summary>
+/// Live GPU use of one process in a known session: its busiest engine other than the video ones (the 3D engine for a
+/// game), summed over adapters' engines, and its dedicated VRAM.
+/// </summary>
+public sealed record GpuProcessUsage(int Pid, int Session, double GpuPercent, double VramMb);
+
 /// <summary>Adapters by LUID (as <see cref="GpuInventory.FormatLuid"/>) and sessions by id.</summary>
 public sealed record GpuUsageSnapshot(
     IReadOnlyDictionary<string, GpuAdapterUsage> Adapters,
     IReadOnlyDictionary<int, GpuSessionUsage> Sessions)
 {
     public static GpuUsageSnapshot Empty { get; } = new(new Dictionary<string, GpuAdapterUsage>(), new Dictionary<int, GpuSessionUsage>());
+
+    /// <summary>Processes with GPU engine load or VRAM whose session is known (for the game detection).</summary>
+    public IReadOnlyList<GpuProcessUsage> Processes { get; init; } = [];
 }
 
 /// <summary>
@@ -103,6 +112,9 @@ public static partial class GpuUsageMath
         engineType.Contains("Encode", StringComparison.OrdinalIgnoreCase)
         || engineType.StartsWith("VideoCodec", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>Video encode, decode and processing engines: a video player or the stream, not rendering.</summary>
+    public static bool IsVideo(string engineType) => engineType.StartsWith("Video", StringComparison.OrdinalIgnoreCase) || IsEncoder(engineType);
+
     /// <summary>
     /// Per-adapter and per-session numbers. An engine's load is the sum over processes (capped at 100); a load figure
     /// is the busiest engine, as in Task Manager. Processes whose session <paramref name="sessionOf"/> cannot tell are
@@ -127,6 +139,7 @@ public static partial class GpuUsageMath
         // Engine load summed over processes: per adapter, and per (session, adapter).
         var engines = new Dictionary<(string Luid, int Phys, int Engine), (double Sum, bool Encoder)>();
         var sessionEngines = new Dictionary<(int Session, string Luid, int Phys, int Engine), (double Sum, bool Encoder)>();
+        var processEngines = new Dictionary<(int Pid, string Luid, int Phys, int Engine), double>();
         foreach (var e in sample.Engines)
         {
             var value = Math.Max(0, e.Percent);
@@ -137,6 +150,11 @@ public static partial class GpuUsageMath
             {
                 var skey = (s, e.Luid, e.Phys, e.Engine);
                 sessionEngines[skey] = (sessionEngines.GetValueOrDefault(skey).Sum + value, encoder);
+                if (!IsVideo(e.EngineType))
+                {
+                    var pkey = (e.Pid, e.Luid, e.Phys, e.Engine);
+                    processEngines[pkey] = processEngines.GetValueOrDefault(pkey) + value;
+                }
             }
         }
 
@@ -147,11 +165,13 @@ public static partial class GpuUsageMath
         }
 
         var sessionVram = new Dictionary<int, double>();
+        var processVram = new Dictionary<int, double>();
         foreach (var p in sample.ProcessMemory)
         {
             if (Session(p.Pid) is int s)
             {
                 sessionVram[s] = sessionVram.GetValueOrDefault(s) + Math.Max(0, p.DedicatedBytes);
+                processVram[p.Pid] = processVram.GetValueOrDefault(p.Pid) + Math.Max(0, p.DedicatedBytes);
             }
         }
 
@@ -177,7 +197,18 @@ public static partial class GpuUsageMath
                 Mb(sessionVram.GetValueOrDefault(s)));
         }
 
-        return new GpuUsageSnapshot(adapters, result);
+        var processLoad = new Dictionary<int, double>();
+        foreach (var (key, sum) in processEngines)
+        {
+            processLoad[key.Pid] = Math.Max(processLoad.GetValueOrDefault(key.Pid), sum);
+        }
+
+        var processes = processLoad.Keys.Concat(processVram.Keys).Distinct()
+            .Where(pid => pid != 0 && Session(pid) is not null)
+            .Select(pid => new GpuProcessUsage(pid, Session(pid)!.Value, Percent(processLoad.GetValueOrDefault(pid)), Mb(processVram.GetValueOrDefault(pid))))
+            .OrderBy(p => p.Pid)
+            .ToList();
+        return new GpuUsageSnapshot(adapters, result) { Processes = processes };
     }
 
     private static double Percent(double value) => Math.Round(Math.Clamp(value, 0, 100));

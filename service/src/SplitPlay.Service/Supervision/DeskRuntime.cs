@@ -121,6 +121,7 @@ internal sealed class DeskRuntime
                 Profile = Config.Profile,
                 DisableBluetoothUserService = Config.DisableBluetoothUserService,
                 SteamIsolation = Config.SteamIsolationEnabled,
+                GameFpsLimit = Config.GameFpsLimit,
                 HideFromLogon = Config.HidesFromLogon(Config.UserManaged != false),
                 WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,

@@ -513,6 +513,32 @@ public sealed class DeskSupervisor : IHostedService
         return new MetricsDto(host, desks);
     }
 
+    /// <summary>
+    /// For the game FPS limits: every configured desk with its session (null when it has none, or runs on the console)
+    /// and the frame rate its first Moonlight client asked for (null without a client).
+    /// </summary>
+    public IReadOnlyList<GameDeskView> GameDesks()
+    {
+        var console = _platform.ConsoleSessionId();
+        var list = new List<GameDeskView>();
+        foreach (var desk in _config.Snapshot().Desks)
+        {
+            if (!_desks.TryGetValue(desk.Id, out var rt))
+            {
+                continue;
+            }
+
+            lock (rt.Gate)
+            {
+                var session = rt.SessionId is int s && s > 0 && s != console && !rt.Machine.State.IsIdle() ? s : (int?)null;
+                var fps = rt.Streams.Count > 0 && rt.Streams[0].FpsRequested > 0 ? rt.Streams[0].FpsRequested : (int?)null;
+                list.Add(new GameDeskView(desk.Id, session, fps));
+            }
+        }
+
+        return list;
+    }
+
     /// <summary>The DXGI adapter list with live load, encoder and VRAM use filled in where the counters have them.</summary>
     private IReadOnlyList<GpuDto> GpusWithUsage(GpuUsageSnapshot? usage)
     {

@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging.Console;
 using Microsoft.Extensions.Options;
 using SplitPlay.Core;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Games;
 using SplitPlay.Core.Nvidia;
 using SplitPlay.Service.Api;
 using SplitPlay.Service.Configuration;
@@ -112,9 +113,11 @@ public static class ServiceHost
             OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
                 ? new NvApiDrs()
                 : sp.GetRequiredService<FakeDrs>());
+        builder.Services.AddSingleton(sp => new GameCatalog(GameCatalog.FileIn(sp.GetRequiredService<DataPaths>().Root)));
         builder.Services.AddSingleton(sp => new NvidiaDriverSettings(sp.GetRequiredService<ConfigService>(), sp.GetRequiredService<DataPaths>(),
             sp.GetRequiredService<IDrsProvider>(), sp.GetRequiredService<ILogger<NvidiaDriverSettings>>(),
-            sp.GetRequiredService<IDrsProvider>() is FakeDrs ? null : NvidiaProfiles.DefaultLegacyUndoFile()));
+            sp.GetRequiredService<IDrsProvider>() is FakeDrs ? null : NvidiaProfiles.DefaultLegacyUndoFile(),
+            sp.GetRequiredService<GameCatalog>()));
         // Before the supervisor, so that it stops after every worker (the global value is given back last).
         builder.Services.AddHostedService(sp => sp.GetRequiredService<NvidiaDriverSettings>());
         builder.Services.AddSingleton<DeskSupervisor>();
@@ -152,6 +155,13 @@ public static class ServiceHost
                 : sp.GetRequiredService<FakeGpuCounterSource>());
         builder.Services.AddSingleton<GpuUsageMonitor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<GpuUsageMonitor>());
+        builder.Services.AddSingleton<FakeProcessImages>();
+        builder.Services.AddSingleton<IProcessImages>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? new WindowsProcessImages()
+                : sp.GetRequiredService<FakeProcessImages>());
+        builder.Services.AddSingleton<GameWatcher>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<GameWatcher>());
         builder.Services.AddSingleton<FakeHostNetworkStatus>();
         builder.Services.AddSingleton<IHostNetworkStatus>(sp =>
             OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"

@@ -9,9 +9,11 @@ using System.Text.RegularExpressions;
 using SplitPlay.Core;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Games;
 using SplitPlay.Core.Host;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Json;
+using SplitPlay.Core.Nvidia;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Hosting;
 using SplitPlay.Service.Logging;
@@ -355,17 +357,65 @@ public static partial class ApiEndpoints
 
         api.MapPost("/desks", async (HttpRequest request, DeskSupervisor s) =>
         {
-            var (desk, password) = await ReadDeskBodyAsync(request).ConfigureAwait(false);
+            var (desk, password, _) = await ReadDeskBodyAsync(request).ConfigureAwait(false);
             var created = s.Create(desk, password);
             return Results.Json(created, Ctx.DeskDto, statusCode: StatusCodes.Status201Created);
         });
 
         api.MapGet("/desks/{id}", (string id, DeskSupervisor s) => Results.Json(s.Get(id), Ctx.DeskDto));
 
-        api.MapPut("/desks/{id}", async (string id, HttpRequest request, DeskSupervisor s) =>
+        api.MapPut("/desks/{id}", async (string id, HttpRequest request, DeskSupervisor s, GameWatcher games) =>
         {
-            var (desk, password) = await ReadDeskBodyAsync(request).ConfigureAwait(false);
-            return Results.Json(s.Replace(id, desk, password), Ctx.DeskDto);
+            var (desk, password, gameFpsLimitGiven) = await ReadDeskBodyAsync(request).ConfigureAwait(false);
+            if (!gameFpsLimitGiven)
+            {
+                desk.GameFpsLimit = s.Get(id).GameFpsLimit;
+            }
+
+            var saved = s.Replace(id, desk, password);
+            // The desk's game FPS limit may have changed.
+            games.Nudge();
+            return Results.Json(saved, Ctx.DeskDto);
+        });
+
+        // ---- games seen in desks and their FPS limits
+        api.MapGet("/games", (GameCatalog catalog, ConfigService config, NvidiaDriverSettings nvidia) =>
+        {
+            var state = catalog.Snapshot();
+            var snapshot = config.Snapshot();
+            return Results.Json(state.Games.OrderByDescending(g => g.LastSeen).Select(g => ToGameDto(g, state, snapshot, nvidia)).ToList(),
+                Ctx.ListGameDto);
+        });
+
+        api.MapPut("/games/{exe}", async (string exe, HttpRequest request, GameCatalog catalog, ConfigService config, NvidiaDriverSettings nvidia) =>
+        {
+            var body = await ReadBodyAsync(request, Ctx.GameUpdateRequest).ConfigureAwait(false);
+            if (body.Excluded is not bool excluded)
+            {
+                throw ApiException.Validation("excluded is required");
+            }
+
+            if (!catalog.SetExcluded(exe, excluded))
+            {
+                throw ApiException.NotFound($"game '{exe}' not found");
+            }
+
+            await Task.Run(() => nvidia.EnsureApplied($"game {exe} {(excluded ? "excluded" : "included")}")).ConfigureAwait(false);
+            var state = catalog.Snapshot();
+            var game = state.Games.FirstOrDefault(g => string.Equals(g.Exe, exe, StringComparison.OrdinalIgnoreCase))
+                       ?? throw ApiException.NotFound($"game '{exe}' not found");
+            return Results.Json(ToGameDto(game, state, config.Snapshot(), nvidia), Ctx.GameDto);
+        });
+
+        api.MapDelete("/games/{exe}", async (string exe, GameCatalog catalog, NvidiaDriverSettings nvidia) =>
+        {
+            if (!catalog.Forget(exe))
+            {
+                throw ApiException.NotFound($"game '{exe}' not found");
+            }
+
+            await Task.Run(() => nvidia.EnsureApplied($"game {exe} forgotten")).ConfigureAwait(false);
+            return Results.NoContent();
         });
 
         api.MapDelete("/desks/{id}", (string id, bool? deleteUser, DeskSupervisor s) =>
@@ -502,6 +552,26 @@ public static partial class ApiEndpoints
         return context.Response.WriteAsJsonAsync(ApiErrorResponse.Of(code, message), Ctx.ApiErrorResponse);
     }
 
+    /// <summary>One game for the API: the limit SplitPlay wants and what the driver made of it.</summary>
+    private static GameDto ToGameDto(GameRecord game, GameCatalogState state, SplitPlayConfig config, NvidiaDriverSettings nvidia)
+    {
+        var limit = GameLimits.Limit(config, state, game);
+        var applied = nvidia.GameStatus(game.Exe);
+        var status = !config.Host.NvidiaProfiles ? "disabled"
+            : game.Excluded ? "excluded"
+            : limit is null ? "off"
+            : nvidia.DriverPresent == false ? "noDriver"
+            : applied is null || nvidia.AppliedLimits?.GetValueOrDefault(game.Exe) != limit ? "pending"
+            : applied.Status switch
+            {
+                DrsAppStatus.Set => "limited",
+                DrsAppStatus.Owner => "owner",
+                _ => "failed",
+            };
+        return new GameDto(game.Exe, game.Path, [.. game.Desks], limit, status, game.Excluded, game.FirstSeen, game.LastSeen,
+            status is "limited" or "owner" ? applied?.Profile : null);
+    }
+
     private static async Task<T> ReadBodyAsync<T>(HttpRequest request, JsonTypeInfo<T> typeInfo)
     {
         if (request.ContentType is not null && !request.ContentType.Contains("json", StringComparison.OrdinalIgnoreCase))
@@ -528,7 +598,7 @@ public static partial class ApiEndpoints
     /// <c>user</c>). The password is taken out before the rest is read as <see cref="DeskConfig"/>, so it can never
     /// reach config.json; server-owned fields (<c>hasPassword</c>) are ignored.
     /// </summary>
-    private static async Task<(DeskConfig Desk, string? Password)> ReadDeskBodyAsync(HttpRequest request)
+    private static async Task<(DeskConfig Desk, string? Password, bool GameFpsLimitGiven)> ReadDeskBodyAsync(HttpRequest request)
     {
         if (request.ContentType is not null && !request.ContentType.Contains("json", StringComparison.OrdinalIgnoreCase))
         {
@@ -578,8 +648,10 @@ public static partial class ApiEndpoints
 
         try
         {
+            // Null is Auto, so "left out" (an older client) is told apart from it: a desk update without it keeps the value.
+            var gameFpsLimitGiven = body.ContainsKey("gameFpsLimit");
             var desk = body.Deserialize(Ctx.DeskConfig) ?? throw ApiException.BadRequest("the request body must be a JSON object");
-            return (desk, password);
+            return (desk, password, gameFpsLimitGiven);
         }
         catch (JsonException ex)
         {

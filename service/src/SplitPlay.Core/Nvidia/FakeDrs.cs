@@ -14,6 +14,9 @@ public sealed class FakeDrs : IDrsProvider
 
     private Dictionary<string, HashSet<string>> _apps = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>NVIDIA's predefined values: (profile, setting) → value.</summary>
+    private readonly Dictionary<(string Profile, uint Id), uint> _predefined = new(new PredefinedKeyComparer());
+
     public bool Driver { get; set; } = true;
 
     /// <summary>Sessions opened so far.</summary>
@@ -36,7 +39,7 @@ public sealed class FakeDrs : IDrsProvider
 
             Opens++;
             return new Session(this, Copy(_settings), _apps.ToDictionary(kv => kv.Key, kv => new HashSet<string>(kv.Value, StringComparer.OrdinalIgnoreCase),
-                StringComparer.OrdinalIgnoreCase));
+                StringComparer.OrdinalIgnoreCase), new Dictionary<(string Profile, uint Id), uint>(_predefined, new PredefinedKeyComparer()));
         }
     }
 
@@ -98,10 +101,37 @@ public sealed class FakeDrs : IDrsProvider
         }
     }
 
+    /// <summary>
+    /// A predefined value of NVIDIA's in <paramref name="profile"/> (created when missing): the profile holds it, and
+    /// deleting the setting brings it back.
+    /// </summary>
+    public void Predefine(string profile, uint id, uint value)
+    {
+        lock (_gate)
+        {
+            if (!_apps.ContainsKey(profile))
+            {
+                _apps[profile] = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            }
+
+            _predefined[(profile, id)] = value;
+            (_settings.TryGetValue(profile, out var s) ? s : _settings[profile] = [])[id] = value;
+        }
+    }
+
     private static Dictionary<string, Dictionary<uint, uint>> Copy(Dictionary<string, Dictionary<uint, uint>> source) =>
         source.ToDictionary(kv => kv.Key, kv => new Dictionary<uint, uint>(kv.Value), StringComparer.OrdinalIgnoreCase);
 
-    private sealed class Session(FakeDrs owner, Dictionary<string, Dictionary<uint, uint>> settings, Dictionary<string, HashSet<string>> apps)
+    private sealed class PredefinedKeyComparer : IEqualityComparer<(string Profile, uint Id)>
+    {
+        public bool Equals((string Profile, uint Id) x, (string Profile, uint Id) y) =>
+            x.Id == y.Id && string.Equals(x.Profile, y.Profile, StringComparison.OrdinalIgnoreCase);
+
+        public int GetHashCode((string Profile, uint Id) obj) => HashCode.Combine(StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Profile), obj.Id);
+    }
+
+    private sealed class Session(FakeDrs owner, Dictionary<string, Dictionary<uint, uint>> settings, Dictionary<string, HashSet<string>> apps,
+        Dictionary<(string Profile, uint Id), uint> predefined)
         : IDrsSession
     {
         public bool ProfileExists(string name) => apps.ContainsKey(name);
@@ -136,11 +166,28 @@ public sealed class FakeDrs : IDrsProvider
             apps[profile].Add(executable);
         }
 
+        public string? FindApplicationProfile(string executable) =>
+            apps.Where(kv => kv.Value.Contains(executable)).Select(kv => kv.Key).FirstOrDefault();
+
+        public bool IsPredefined(string? profile, uint settingId) =>
+            profile is not null && predefined.TryGetValue((profile, settingId), out var p)
+            && Profile(profile).TryGetValue(settingId, out var v) && v == p;
+
         public uint? GetSetting(string? profile, uint settingId) => Profile(profile).TryGetValue(settingId, out var v) ? v : null;
 
         public void SetSetting(string? profile, uint settingId, uint value) => Profile(profile)[settingId] = value;
 
-        public void DeleteSetting(string? profile, uint settingId) => Profile(profile).Remove(settingId);
+        public void DeleteSetting(string? profile, uint settingId)
+        {
+            if (profile is not null && predefined.TryGetValue((profile, settingId), out var p))
+            {
+                Profile(profile)[settingId] = p;
+            }
+            else
+            {
+                Profile(profile).Remove(settingId);
+            }
+        }
 
         public void Save()
         {

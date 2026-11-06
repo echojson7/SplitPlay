@@ -33,6 +33,8 @@ public sealed class NvApiDrs : IDrsProvider
     private const uint IdGetSetting = 0x73BF8338;
     private const uint IdDeleteProfileSetting = 0xE4A26362;
     private const uint IdGetBaseProfile = 0xDA8466A0;
+    private const uint IdFindApplicationByName = 0xEEE566B2;
+    private const uint IdGetProfileInfo = 0x61CD6FD6;
 
     // NvAPI_Status values (nvapi_lite_common.h).
     internal const int Ok = 0;
@@ -52,6 +54,7 @@ public sealed class NvApiDrs : IDrsProvider
     internal const int SettingIdOffset = 4 + UnicodeStringBytes;            // 4100
     internal const int SettingTypeOffset = SettingIdOffset + 4;             // 4104
     internal const int SettingLocationOffset = SettingTypeOffset + 4;       // 4108
+    internal const int SettingIsCurrentPredefinedOffset = SettingLocationOffset + 4; // 4112
     internal const int SettingCurrentValueOffset = 8224;                    // 4120 + 4104
     internal const uint SettingVersion1 = SettingSize | (1u << 16);         // NVDRS_SETTING_VER1 = 0x13028
     private const uint DwordType = 0;                                       // NVDRS_DWORD_TYPE
@@ -91,6 +94,9 @@ public sealed class NvApiDrs : IDrsProvider
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int SessionProfileFn(IntPtr session, IntPtr profile);
+
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    private delegate int SessionNameOutHandleBufferFn(IntPtr session, [In] byte[] name, out IntPtr profile, [In, Out] byte[] buffer);
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     private delegate int SessionProfileBufferFn(IntPtr session, IntPtr profile, [In, Out] byte[] buffer);
@@ -156,6 +162,15 @@ public sealed class NvApiDrs : IDrsProvider
         var buffer = new byte[UnicodeStringBytes];
         WriteString(buffer, 0, value);
         return buffer;
+    }
+
+    /// <summary>A NUL-terminated NvAPI_UnicodeString at <paramref name="offset"/>.</summary>
+    internal static string ReadString(byte[] buffer, int offset)
+    {
+        var span = buffer.AsSpan(offset, UnicodeStringBytes);
+        var chars = MemoryMarshal.Cast<byte, char>(span);
+        var end = chars.IndexOf('\0');
+        return new string(end < 0 ? chars : chars[..end]);
     }
 
     internal static void WriteString(byte[] buffer, int offset, string value)
@@ -294,6 +309,47 @@ public sealed class NvApiDrs : IDrsProvider
             WriteString(app, ApplicationLauncherOffset, "");
             api.Check(api.Fn<SessionProfileBufferFn>(IdCreateApplication)(_session, Require(profile), app),
                 $"NvAPI_DRS_CreateApplication({profile}, {executable})");
+        }
+
+        public string? FindApplicationProfile(string executable)
+        {
+            var app = new byte[ApplicationSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(app.AsSpan(0), ApplicationVersion1);
+            var status = api.Fn<SessionNameOutHandleBufferFn>(IdFindApplicationByName)(_session, UnicodeString(executable), out var handle, app);
+            if (status == ExecutableNotFound)
+            {
+                return null;
+            }
+
+            api.Check(status, $"NvAPI_DRS_FindApplicationByName({executable})");
+            var profile = new byte[ProfileSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(profile.AsSpan(0), ProfileVersion1);
+            api.Check(api.Fn<SessionProfileBufferFn>(IdGetProfileInfo)(_session, handle, profile), $"NvAPI_DRS_GetProfileInfo({executable})");
+            var name = ReadString(profile, 4);
+            return name.Length > 0 ? name : throw new NvidiaDrsException($"NvAPI_DRS_GetProfileInfo({executable}): profile without a name");
+        }
+
+        public bool IsPredefined(string? profile, uint settingId)
+        {
+            var setting = ReadSetting(profile, settingId);
+            return setting is not null
+                   && BinaryPrimitives.ReadUInt32LittleEndian(setting.AsSpan(SettingLocationOffset)) == CurrentProfileLocation
+                   && BinaryPrimitives.ReadUInt32LittleEndian(setting.AsSpan(SettingIsCurrentPredefinedOffset)) != 0;
+        }
+
+        /// <summary>The raw <c>NVDRS_SETTING_V1</c>, or null when neither the profile nor anything it inherits sets it.</summary>
+        private byte[]? ReadSetting(string? profile, uint settingId)
+        {
+            var setting = new byte[SettingSize];
+            BinaryPrimitives.WriteUInt32LittleEndian(setting.AsSpan(0), SettingVersion1);
+            var status = api.Fn<SessionProfileIdBufferFn>(IdGetSetting)(_session, Handle(profile), settingId, setting);
+            if (status == SettingNotFound)
+            {
+                return null;
+            }
+
+            api.Check(status, $"NvAPI_DRS_GetSetting({profile ?? "base"}, 0x{settingId:X8})");
+            return setting;
         }
 
         public uint? GetSetting(string? profile, uint settingId)

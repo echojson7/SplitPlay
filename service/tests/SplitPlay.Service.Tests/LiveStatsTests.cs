@@ -38,6 +38,7 @@ public sealed class LiveStatsTests
             ["loss_pct"] = Json("0.5"),
             ["rtt_ms"] = Json("4"),
             ["clients"] = Json("1"),
+            ["capture_fps"] = Json("239.6"),
             ["future_key"] = Json("\"x\""),
         };
 
@@ -50,12 +51,14 @@ public sealed class LiveStatsTests
         Assert.Equal(0.5, dto.LossPct);
         Assert.Equal(4.0, dto.RttMs);
         Assert.Equal(1, dto.Clients);
+        Assert.Equal(239.6, dto.CaptureFps);
         Assert.Equal(["future_key"], dto.Extra!.Keys);
 
         var json = JsonSerializer.Serialize(DeskMetricsEntryDto.From("desk-1", dto), Core.Json.SplitPlayJsonContext.Default.DeskMetricsEntryDto);
         Assert.Contains("\"encodeMsP50\":3.4", json, StringComparison.Ordinal);
         Assert.Contains("\"lossPct\":0.5", json, StringComparison.Ordinal);
         Assert.Contains("\"rttMs\":4", json, StringComparison.Ordinal);
+        Assert.Contains("\"captureFps\":239.6", json, StringComparison.Ordinal);
         Assert.DoesNotContain("_", json, StringComparison.Ordinal);
     }
 
@@ -67,9 +70,11 @@ public sealed class LiveStatsTests
             ["fps"] = Json("0"),
             ["rtt_ms"] = Json("null"),
             ["clients"] = Json("0"),
+            ["capture_fps"] = Json("null"),
         });
 
         Assert.Null(dto.RttMs);
+        Assert.Null(dto.CaptureFps);
         Assert.Null(dto.Extra);
         Assert.Null(DeskRuntime.MapMetrics(null).RttMs);
         var json = JsonSerializer.Serialize(DeskMetricsEntryDto.From("desk-1", dto), Core.Json.SplitPlayJsonContext.Default.DeskMetricsEntryDto);

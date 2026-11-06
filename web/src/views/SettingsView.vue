@@ -20,7 +20,8 @@ const networkPublic = computed(() => network.value?.profile === 'Public')
 const mdnsOff = computed(() => network.value?.mdnsAllowed === false)
 const busy = ref(false)
 
-const COMPOSE_INTERVALS = [2, 3, 4, 5, 7, 8, 16]
+/** 0 is Auto: the service picks the interval from the fastest desk. */
+const COMPOSE_INTERVALS = [0, 2, 3, 4, 5, 7, 8, 16]
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error']
 const LANGUAGES: ReadonlyArray<{ value: Locale; label: string }> = [
   { value: 'ru', label: 'Русский' },
@@ -247,7 +248,7 @@ function importConfig(): Promise<void> {
               <label for="h-comp">{{ t('settings.composeInterval') }}</label>
               <select id="h-comp" v-model.number="host.composeIntervalMs">
                 <option v-for="ms in COMPOSE_INTERVALS" :key="ms" :value="ms">
-                  {{ t('settings.composeHz', { ms, hz: Math.round(1000 / ms) }) }}
+                  {{ ms === 0 ? t('settings.composeAuto') : t('settings.composeHz', { ms, hz: Math.round(1000 / ms) }) }}
                 </option>
               </select>
             </div>

@@ -229,9 +229,9 @@ public static partial class ConfigValidator
             errors.Add(new("host.basePortStride", $"must be at least {BasePortAllocator.PortSpan} so that desks do not overlap"));
         }
 
-        if (host.ComposeIntervalMs is < 1 or > 100)
+        if (host.ComposeIntervalMs is < 0 or > 100)
         {
-            errors.Add(new("host.composeIntervalMs", "must be between 1 and 100"));
+            errors.Add(new("host.composeIntervalMs", "must be 0 (auto) or between 1 and 100"));
         }
 
         if (host.LogLevel is null || !LogLevels.Contains(host.LogLevel))
@@ -363,6 +363,11 @@ public static partial class ConfigValidator
         if (p.PacingMbps is < 1 or > 100_000)
         {
             errors.Add(new($"{path}.pacingMbps", "must be between 1 and 100000"));
+        }
+
+        if (p.CaptureMode is not null && !ProfileConfig.CaptureModes.Contains(p.CaptureMode))
+        {
+            errors.Add(new($"{path}.captureMode", "must be one of slot, arrival"));
         }
 
         if (p.GpuPriority is not null && !GpuPriorities.Contains(p.GpuPriority))

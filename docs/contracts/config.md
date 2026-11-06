@@ -12,7 +12,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
     "lanAccess": false,
     "basePortStart": 48089,
     "basePortStride": 100,
-    "composeIntervalMs": 4,
+    "composeIntervalMs": 0,
     "logLevel": "info",
     "keepAwake": true
   },
@@ -38,6 +38,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
         "minFps": 15,
         "dpbFrames": 16,
         "pacingMbps": 800,
+        "captureMode": "arrival",
         "gpuPriority": "high"
       }
     }
@@ -117,7 +118,16 @@ Rules:
   about 200 MB per desk at 4K with 16, so it is opt-in and not in the web UI); `pacingMbps` 1–100000, default 800 (Sunshine's fixed value; lower it when a
   Wi-Fi client loses frames on large frames, raise it on 2.5 GbE and faster). In the web UI: Дополнительно → FEC,
   Минимальный FPS, Скорость отправки.
-- `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz).
+- `profile.captureMode` (live): `slot` (default, Sunshine's loop: the newest frame at the stream's next frame slot,
+  half a stream interval later on average) or `arrival` (each frame as soon as DWM composes it, at most `fps` on
+  average; worker/README.md, *Capture on arrival*). The default stays `slot` until the lab measures `arrival`. In the
+  web UI: Дополнительно → Захват кадра.
+- `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz), 1–100. `0`
+  (default, «Частота композиции: Авто»): the service composes at least twice per frame of the fastest desk and never
+  slower than 250 Hz: 4 ms up to 125 fps, 3 ms for 144 fps, 2 ms from 165 fps. The fastest desk is the highest
+  `profile.fps` or the highest frame rate a Moonlight client asked for since the service started. DWM reads the value
+  when a session logs on, so a change applies to desk sessions that log on afterwards. `GET /metrics` reports the
+  resolved rate as `host.composeHz`; each desk's measured rate is `captureFps`.
 - `host.keepAwake` (default `true`; left out = `true`): while a Moonlight client streams from any desk the service holds
   a system-required power request (`powercfg /requests` lists it), so Windows does not sleep on its own. Sleeping by
   hand still works: before sleep every worker is shut down and its desk waits (state `Recovering`, not a failure, the

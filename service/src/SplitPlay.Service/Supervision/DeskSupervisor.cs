@@ -5,6 +5,7 @@ using System.IO.Pipes;
 using Microsoft.Extensions.Options;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Host;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Lifecycle;
 using SplitPlay.Core.Steam;
@@ -62,6 +63,9 @@ public sealed class DeskSupervisor : IHostedService
     private readonly RequiredServicesStarter _requiredServices;
     private Task _startup = Task.CompletedTask;
     private readonly object _powerGate = new();
+    private readonly object _composeGate = new();
+    private int _fastestClientFps;
+    private int? _appliedComposeMs;
     private TaskCompletionSource _sleep = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource _wake = Completed();
 
@@ -191,6 +195,66 @@ public sealed class DeskSupervisor : IHostedService
         {
             _logger.LogWarning("The start-up check of Remote Desktop Services failed: {Message}", ex.Message);
         }
+
+        // host.composeIntervalMs = Auto follows the desks' frame rates; a configured value is written once more.
+        ApplyComposeInterval();
+    }
+
+    // ------------------------------------------------------------------ composition interval
+
+    /// <summary>
+    /// The <c>DWMFRAMEINTERVAL</c> the host should have: <c>host.composeIntervalMs</c>, or for Auto the interval for the
+    /// fastest desk (the highest profile fps, or the highest frame rate a Moonlight client asked for since the service
+    /// started).
+    /// </summary>
+    public int EffectiveComposeIntervalMs()
+    {
+        var cfg = _config.Snapshot();
+        var fastest = Math.Max(Volatile.Read(ref _fastestClientFps), cfg.Desks.Select(d => d.Profile.Fps ?? 0).DefaultIfEmpty(0).Max());
+        return ComposeInterval.Resolve(cfg.Host.ComposeIntervalMs, fastest);
+    }
+
+    /// <summary>
+    /// Writes <see cref="EffectiveComposeIntervalMs"/> when it changed (prepared hosts only). DWM reads it when a session
+    /// logs on, so it applies to desk sessions that log on from then on. Never throws.
+    /// </summary>
+    public void ApplyComposeInterval()
+    {
+        lock (_composeGate)
+        {
+            var ms = EffectiveComposeIntervalMs();
+            if (_appliedComposeMs == ms)
+            {
+                return;
+            }
+
+            try
+            {
+                _platform.ApplyComposeInterval(ms);
+                _appliedComposeMs = ms;
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HostTuningException or System.Security.SecurityException)
+            {
+                _logger.LogWarning("Could not set the composition interval to {Interval} ms: {Message}", ms, ex.Message);
+            }
+        }
+    }
+
+    /// <summary>A client asked for <paramref name="fps"/>: Auto composes faster when it is the fastest stream so far.</summary>
+    private void NoteClientFps(int fps)
+    {
+        int seen;
+        do
+        {
+            seen = Volatile.Read(ref _fastestClientFps);
+            if (fps <= seen)
+            {
+                return;
+            }
+        }
+        while (Interlocked.CompareExchange(ref _fastestClientFps, fps, seen) != seen);
+
+        ApplyComposeInterval();
     }
 
     /// <summary>
@@ -408,7 +472,7 @@ public sealed class DeskSupervisor : IHostedService
         }
 
         var (memoryUsedMb, memoryTotalMb) = GpuInventory.PhysicalMemory();
-        var composeMs = _config.Snapshot().Host.ComposeIntervalMs;
+        var composeMs = EffectiveComposeIntervalMs();
         var host = new HostMetricsDto(
             Math.Round(Math.Clamp(cpuPercent, 0, 100), 1),
             memoryUsedMb,
@@ -461,6 +525,7 @@ public sealed class DeskSupervisor : IHostedService
 
             var rt = AddRuntime(saved);
             _logger.LogInformation("Created desk {Desk} (base port {Port}, user {User})", saved.Id, saved.BasePort, saved.User);
+            ApplyComposeInterval();
             _ = Task.Run(() =>
             {
                 try
@@ -555,6 +620,8 @@ public sealed class DeskSupervisor : IHostedService
                 _platform.UpdateLogonListing(saved);
             }
 
+            ApplyComposeInterval();
+
             IpcConnection? connection;
             lock (rt.Gate)
             {
@@ -625,6 +692,7 @@ public sealed class DeskSupervisor : IHostedService
             _desks.TryRemove(id, out _);
             TryDeleteDirectory(_paths.DeskDirectory(id));
             _logger.LogInformation("Deleted desk {Desk}{User}", id, deleteUser ? $" and Windows account {config.User}" : "");
+            ApplyComposeInterval();
         }
     }
 
@@ -652,6 +720,7 @@ public sealed class DeskSupervisor : IHostedService
             }
 
             _logger.LogInformation("Imported configuration with {Count} desk(s)", config.Desks.Count);
+            ApplyComposeInterval();
         }
 
         return List();
@@ -1905,6 +1974,7 @@ public sealed class DeskSupervisor : IHostedService
 
                 _logger.LogInformation("Desk {Desk}: {Client} ({Address}) connected, {Width}x{Height}@{Fps} {Codec}", rt.Id,
                     stream.Client ?? "unnamed client", stream.Address ?? "?", stream.Width, stream.Height, stream.FpsRequested, stream.Codec ?? "?");
+                NoteClientFps(stream.FpsRequested);
                 if (update == WorkerUpdate.Publish)
                 {
                     Publish(rt);

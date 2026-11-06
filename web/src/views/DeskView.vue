@@ -58,6 +58,7 @@ const live = computed(() => {
         ? t('live.encodeValue', { p50: fmtNumber(m.encodeMsP50, 1, 1), p99: fmtNumber(m.encodeMsP99 ?? 0, 1, 1) })
         : fmtMs(m.encodeMsP99 ?? 0),
     loss: m.lossPct !== undefined ? t('unit.percent', { value: fmtNumber(m.lossPct, 1) }) : t('common.none'),
+    compose: m.captureFps != null ? t('unit.hz', { value: fmtNumber(m.captureFps) }) : t('common.none'),
   }
 })
 
@@ -328,6 +329,11 @@ async function remove(): Promise<void> {
             <span class="row-pad" />
             <div class="text"><span class="title">{{ t('live.loss') }}</span></div>
             <div class="ctl val" data-live-loss>{{ live?.loss }}</div>
+          </div>
+          <div class="srow compact">
+            <span class="row-pad" />
+            <div class="text"><span class="title">{{ t('live.compose') }}</span></div>
+            <div class="ctl val" data-live-compose>{{ live?.compose }}</div>
           </div>
         </template>
       </div>

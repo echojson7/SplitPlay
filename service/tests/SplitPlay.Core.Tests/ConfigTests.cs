@@ -94,6 +94,21 @@ public sealed class ConfigTests : IDisposable
         Assert.Contains(ConfigValidator.Validate(config), e => e.Path == "desks[0].id");
     }
 
+    [Fact]
+    public void Capture_mode_and_auto_composition_are_validated()
+    {
+        Assert.Equal(0, new SplitPlayConfig().Host.ComposeIntervalMs); // Auto by default
+        Assert.Empty(ConfigValidator.Validate(OneDesk(d => d.Profile.CaptureMode = "arrival")));
+        Assert.Empty(ConfigValidator.Validate(OneDesk(d => d.Profile.CaptureMode = "slot")));
+        Assert.Contains(ConfigValidator.Validate(OneDesk(d => d.Profile.CaptureMode = "fast")), e => e.Path == "desks[0].profile.captureMode");
+
+        var config = new SplitPlayConfig();
+        config.Host.ComposeIntervalMs = -1;
+        Assert.Contains(ConfigValidator.Validate(config), e => e.Path == "host.composeIntervalMs");
+        config.Host.ComposeIntervalMs = 101;
+        Assert.Contains(ConfigValidator.Validate(config), e => e.Path == "host.composeIntervalMs");
+    }
+
     [Theory]
     [InlineData(9)]
     [InlineData(501)]

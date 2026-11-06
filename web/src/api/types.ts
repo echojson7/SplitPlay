@@ -24,6 +24,9 @@ export type Codec = (typeof CODECS)[number]
 export const GPU_PRIORITIES = ['normal', 'high', 'realtime'] as const
 export type GpuPriority = (typeof GPU_PRIORITIES)[number]
 
+export const CAPTURE_MODES = ['slot', 'arrival'] as const
+export type CaptureMode = (typeof CAPTURE_MODES)[number]
+
 /** Desk streaming profile (config.md `desks[].profile`). */
 export interface DeskProfile {
   fps: number
@@ -35,6 +38,8 @@ export interface DeskProfile {
   minFps?: number
   dpbFrames?: number
   pacingMbps?: number
+  /** When the worker takes a new frame: at the stream's frame slot (default) or as soon as DWM composes it. */
+  captureMode?: CaptureMode
   gpuPriority?: GpuPriority
 }
 
@@ -153,6 +158,8 @@ export interface DeskMetrics {
   /** Round-trip time to the Moonlight client, ms; null until one is measured (older services: absent). */
   rttMs?: number | null
   clients: number
+  /** Frames DWM composed per second in the desk session (the real composition rate); null without a stream. */
+  captureFps?: number | null
 }
 
 /** The Moonlight stream a desk is serving (`desk.stream`): who is connected and what it asked for. */

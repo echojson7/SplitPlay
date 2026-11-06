@@ -3,6 +3,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using Microsoft.Extensions.DependencyInjection;
+using SplitPlay.Core.Api;
 using SplitPlay.Core.Games;
 using SplitPlay.Core.Json;
 using SplitPlay.Core.Lifecycle;
@@ -136,7 +137,7 @@ public sealed class GameLimitsServiceTests
         Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
     }
 
-    private static string Profile(Core.Api.DeskDto desk) => System.Text.Json.JsonSerializer.Serialize(desk.Profile, SplitPlayJsonContext.Default.ProfileConfig);
+    private static string Profile(DeskDto desk) => System.Text.Json.JsonSerializer.Serialize(desk.Profile, SplitPlayJsonContext.Default.ProfileConfig);
 
     private static StringContent Json(string body) => new(body, Encoding.UTF8, "application/json");
 }

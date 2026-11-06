@@ -17,9 +17,7 @@ public sealed class GameLimitsTests : IDisposable
         }
         catch (IOException)
         {
-        }
-        catch (DirectoryNotFoundException)
-        {
+            // Also a directory that was never created.
         }
     }
 

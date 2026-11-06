@@ -133,8 +133,7 @@ void SeatApp::publish_input_flags(bool ready) {
   if (!input_ring_) return;
   uint32_t flags = 0;
   if (ready) {
-    flags = SP_INPUT_RING_READY;
-    if (connector_->supports_relative_mouse()) flags |= SP_INPUT_RING_REL_MOUSE;
+    flags = SP_INPUT_RING_READY | connector_->input_caps();
   }
   const uint32_t old = input::get_flags(input_ring_->ring());
   if (old == flags) return;

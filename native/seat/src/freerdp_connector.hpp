@@ -53,6 +53,7 @@ class FreeRdpConnector final : public IRdpConnector {
   bool set_mode(uint32_t width, uint32_t height, std::string* error) override;
   bool inject(const SpInputEvent& event) override;
   bool supports_relative_mouse() const override { return relative_mouse_.load(); }
+  uint32_t input_caps() const override { return input_caps_.load(); }
   bool send_sas(std::string* error) override;
   InputStats input_stats() const override;
 
@@ -97,6 +98,7 @@ class FreeRdpConnector final : public IRdpConnector {
   rdp::InputMapper mapper_;
   std::vector<rdp::Op> ops_;
   std::atomic<bool> relative_mouse_{false};
+  std::atomic<uint32_t> input_caps_{0};
   std::atomic<uint64_t> input_sent_{0};
   std::atomic<uint64_t> input_unsupported_{0};
   std::atomic<uint64_t> input_not_connected_{0};

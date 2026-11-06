@@ -669,6 +669,8 @@ void FreeRdpConnector::open_input() {
   mapper_.reset(caps);
   input_open_ = true;
   relative_mouse_ = caps.relative_mouse;
+  input_caps_ = (caps.relative_mouse ? SP_INPUT_RING_REL_MOUSE : 0u) | (caps.extended_mouse ? SP_INPUT_RING_XBUTTONS : 0u) |
+                (caps.horizontal_wheel ? SP_INPUT_RING_HWHEEL : 0u);
   log_info("RDP: input open (relative mouse {}, horizontal wheel {}, X buttons {}, unicode {}, fast-path {})",
            caps.relative_mouse ? "yes" : "no", caps.horizontal_wheel ? "yes" : "no",
            caps.extended_mouse ? "yes" : "no", caps.unicode ? "yes" : "no",
@@ -712,8 +714,15 @@ bool FreeRdpConnector::send_ops() {
 }
 
 bool FreeRdpConnector::inject(const SpInputEvent& event) {
-  std::lock_guard lock(context_mutex_);
-  if (!context_ || !input_open_) {
+  std::unique_lock lock(context_mutex_);
+  // While the server reactivates the connection (a legacy-graphics resize does) FreeRDP drops input silently; wait
+  // for it (events queue up in the ring meanwhile) instead of losing a key-up.
+  for (int i = 0; i < 100 && context_ && input_open_ && !freerdp_is_active_state(context_); ++i) {
+    lock.unlock();
+    Sleep(10);
+    lock.lock();
+  }
+  if (!context_ || !input_open_ || !freerdp_is_active_state(context_)) {
     const uint64_t n = ++input_not_connected_;
     if (n == 1 || n % 1000 == 0) log_warn("RDP: {} input event(s) arrived without a connection", n);
     return false;
@@ -726,7 +735,10 @@ bool FreeRdpConnector::inject(const SpInputEvent& event) {
                input::input_type_name(event.type), event.a, event.b, n);
     return false;
   }
-  if (ops_.empty()) return true;
+  if (ops_.empty()) {
+    ++input_sent_;  // handled, nothing to send (e.g. release-all with nothing held)
+    return true;
+  }
   if (!send_ops()) {
     const uint64_t n = ++input_failed_;
     if (n <= 8 || n % 1000 == 0) log_warn("RDP: sending input {} failed ({} so far)", input::input_type_name(event.type), n);

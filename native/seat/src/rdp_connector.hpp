@@ -73,6 +73,8 @@ class IRdpConnector {
   // True if the current connection's server accepts relative mouse PDUs (SP_INPUT_RING_REL_MOUSE). Known once the
   // connection is up (state logged_on).
   virtual bool supports_relative_mouse() const = 0;
+  // SP_INPUT_RING_* capability bits of the current connection (REL_MOUSE, XBUTTONS, HWHEEL).
+  virtual uint32_t input_caps() const { return supports_relative_mouse() ? SP_INPUT_RING_REL_MOUSE : 0u; }
   // Ctrl+Alt+Del into the session. Returns false if the connector cannot do it.
   virtual bool send_sas(std::string* error) = 0;
   virtual InputStats input_stats() const { return {}; }

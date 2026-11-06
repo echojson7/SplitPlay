@@ -198,12 +198,14 @@ calling SendInput, and the seat sends them into the session as RDP input PDUs ov
 session sees a real remote keyboard and mouse: no "injected" flag, UAC prompts and Ctrl+Alt+Del work.
 
 - The seat creates the ring at start with no flags. It sets `SP_INPUT_RING_READY` while its connection is logged on,
-  and `SP_INPUT_RING_REL_MOUSE` when the server's input capabilities accept relative mouse PDUs
-  (`INPUT_FLAG_MOUSE_RELATIVE`); both are cleared when the connection drops and when the seat exits.
+  plus the server's input capabilities: `SP_INPUT_RING_REL_MOUSE` (relative mouse PDUs, `INPUT_FLAG_MOUSE_RELATIVE`),
+  `SP_INPUT_RING_XBUTTONS`, `SP_INPUT_RING_HWHEEL`; all are cleared when the connection drops and when the seat exits.
+  While the server reactivates the connection (a resize) the seat holds input back for up to 1 s instead of losing it.
 - The worker reads the flags before every event. Without `READY` (no seat, connection down), with a seat process
   that is gone, or with a full ring, the event goes to SendInput as before, so input never stops. Without
-  `REL_MOUSE` relative motion stays on SendInput (raw input keeps its deltas) and clicks and wheel carry the real
-  cursor position (`SP_IN_FLAG_POS`).
+  `REL_MOUSE` relative motion stays on SendInput (raw input keeps its deltas), and so do clicks and wheel while the
+  pointer moves that way (an RDP pointer PDU carries a position, which would pull the cursor back). X buttons and the
+  horizontal wheel go over RDP only with their flags.
 - Keys go as set-1 scancodes (with key repeat), text as Unicode key events, absolute motion in desktop pixels,
   buttons and wheels as pointer PDUs (relative ones while the pointer moves relatively). Touch, pen and gamepads are
   unchanged.

@@ -226,7 +226,7 @@ index aaa6c3a215c9fec03f6b9b7c01b1a14070858827..474c0c1ae2c8cddc59b35d99fdf73e0c
                  {"seq", ++seq},
 diff --git a/src/splitplay/rdp_input.cpp b/src/splitplay/rdp_input.cpp
 new file mode 100644
-index 0000000000000000000000000000000000000000..7dc6cb78a3ace2799bb427743fb3705103624187
+index 0000000000000000000000000000000000000000..1740ebd9aaa408a8a86eb65222b4d5e3d143fbe4
 --- /dev/null
 +++ b/src/splitplay/rdp_input.cpp
 @@ -0,0 +1,358 @@
@@ -281,6 +281,10 @@ index 0000000000000000000000000000000000000000..7dc6cb78a3ace2799bb427743fb37051
 +    std::uint64_t write_index = 0;
 +    bool producer_started = false;
 +    std::uint32_t seq = 1;
++    /// The pointer was last moved through SendInput (relative motion without relative mouse PDUs). Clicks and wheel
++    /// then stay on SendInput too: an RDP pointer PDU carries a position, and one read now would be stale by the time
++    /// the PDU arrives, pulling back the motion SendInput delivered meanwhile.
++    bool motion_on_sendinput = false;
 +
 +    // poll() only, under poll_mutex.
 +    std::mutex poll_mutex;
@@ -313,7 +317,12 @@ index 0000000000000000000000000000000000000000..7dc6cb78a3ace2799bb427743fb37051
 +        write_index = shared(ring->write_index).load(std::memory_order_acquire);
 +        producer_started = true;
 +      }
-+      const std::uint64_t used = write_index - shared(ring->read_index).load(std::memory_order_acquire);
++      const std::uint64_t read_index = shared(ring->read_index).load(std::memory_order_acquire);
++      if (read_index > write_index) {
++        // The seat reinitialised a ring it did not recognise (input_ring.h): follow its indices.
++        write_index = shared(ring->write_index).load(std::memory_order_acquire);
++      }
++      const std::uint64_t used = write_index - read_index;
 +      return used >= SP_INPUT_RING_CAPACITY ? 0 : SP_INPUT_RING_CAPACITY - used;
 +    }
 +
@@ -349,30 +358,19 @@ index 0000000000000000000000000000000000000000..7dc6cb78a3ace2799bb427743fb37051
 +    }
 +
 +    /**
-+     * @brief The cursor position in desktop pixels (relative to the virtual screen's top left), if Windows tells.
-+     * On the secure desktop the input thread may not see it; the seat then uses the last position it sent.
++     * @brief Button or wheel through the ring, at the position the seat last sent (no SP_IN_FLAG_POS: every motion
++     * that reached the session went through the ring too, so the seat's position is the newest one).
++     * @param needed Ring flag the server must have announced for this event, or 0.
 +     */
-+    bool cursor_position(std::int32_t &x, std::int32_t &y) {
-+      POINT p;
-+      if (!GetCursorPos(&p)) {
-+        return false;
-+      }
-+      x = p.x - GetSystemMetrics(SM_XVIRTUALSCREEN);
-+      y = p.y - GetSystemMetrics(SM_YVIRTUALSCREEN);
-+      return true;
-+    }
-+
-+    bool push_pointer(std::uint32_t type, std::int32_t a, std::uint32_t flags) {
++    bool push_pointer(std::uint32_t type, std::int32_t a, std::uint32_t flags, std::uint32_t needed = 0) {
 +      SpInputRing *ring = usable();
-+      if (!ring) {
++      if (!ring || motion_on_sendinput) {
 +        return false;
 +      }
-+      std::int32_t x = 0;
-+      std::int32_t y = 0;
-+      if (cursor_position(x, y)) {
-+        flags |= SP_IN_FLAG_POS;
++      if (needed && (shared(ring->flags).load(std::memory_order_acquire) & needed) == 0) {
++        return false;
 +      }
-+      if (!push(ring, type, a, static_cast<std::int32_t>(flags), x, y)) {
++      if (!push(ring, type, a, static_cast<std::int32_t>(flags))) {
 +        return false;
 +      }
 +      signal();
@@ -557,20 +555,22 @@ index 0000000000000000000000000000000000000000..7dc6cb78a3ace2799bb427743fb37051
 +  bool try_mouse_abs(int x, int y) {
 +    SpInputRing *ring = usable();
 +    if (!ring || !push(ring, SP_IN_MOUSE_ABS, x < 0 ? 0 : x, y < 0 ? 0 : y)) {
++      motion_on_sendinput = true;
 +      return false;
 +    }
++    motion_on_sendinput = false;
 +    signal();
 +    return true;
 +  }
 +
 +  bool try_mouse_rel(int dx, int dy) {
 +    SpInputRing *ring = usable();
-+    if (!ring || (shared(ring->flags).load(std::memory_order_acquire) & SP_INPUT_RING_REL_MOUSE) == 0) {
-+      return false;  // the server has no relative mouse PDUs: raw input keeps its deltas through SendInput
-+    }
-+    if (!push(ring, SP_IN_MOUSE_REL, dx, dy)) {
++    if (!ring || (shared(ring->flags).load(std::memory_order_acquire) & SP_INPUT_RING_REL_MOUSE) == 0 || !push(ring, SP_IN_MOUSE_REL, dx, dy)) {
++      // No relative mouse PDUs (raw input keeps its deltas through SendInput), or the ring is not usable
++      motion_on_sendinput = true;
 +      return false;
 +    }
++    motion_on_sendinput = false;
 +    signal();
 +    return true;
 +  }
@@ -581,19 +581,19 @@ index 0000000000000000000000000000000000000000..7dc6cb78a3ace2799bb427743fb37051
 +    if (ring_button < 1 || ring_button > 5) {
 +      return false;
 +    }
-+    return push_pointer(SP_IN_BUTTON, ring_button, release ? SP_IN_FLAG_UP : 0);
++    return push_pointer(SP_IN_BUTTON, ring_button, release ? SP_IN_FLAG_UP : 0, ring_button >= 4 ? SP_INPUT_RING_XBUTTONS : 0);
 +  }
 +
 +  bool try_wheel(int delta, bool horizontal) {
-+    return push_pointer(horizontal ? SP_IN_HWHEEL : SP_IN_WHEEL, delta, 0);
++    return push_pointer(horizontal ? SP_IN_HWHEEL : SP_IN_WHEEL, delta, 0, horizontal ? SP_INPUT_RING_HWHEEL : 0);
 +  }
 +}  // namespace splitplay::rdp_input
 diff --git a/src/splitplay/rdp_input.h b/src/splitplay/rdp_input.h
 new file mode 100644
-index 0000000000000000000000000000000000000000..6834d4f7602689bd613937a032a09b3186c9e578
+index 0000000000000000000000000000000000000000..b30829f2e8d310925206fa98fb42574c9caea4d9
 --- /dev/null
 +++ b/src/splitplay/rdp_input.h
-@@ -0,0 +1,95 @@
+@@ -0,0 +1,97 @@
 +/**
 + * @file src/splitplay/rdp_input.h
 + * @brief Keyboard and mouse through the seat's RDP connection (the Profile's `input`, docs/contracts/ipc.md).
@@ -604,7 +604,9 @@ index 0000000000000000000000000000000000000000..6834d4f7602689bd613937a032a09b31
 + * keyboard and mouse (no "injected" flag), UAC prompts and Ctrl+Alt+Del work.
 + *
 + * - Relative motion goes over RDP only when the server accepts relative mouse PDUs (the ring's
-+ *   SP_INPUT_RING_REL_MOUSE); otherwise it stays on SendInput, and clicks and wheel carry the real cursor position.
++ *   SP_INPUT_RING_REL_MOUSE); otherwise it stays on SendInput, and so do clicks and wheel while the pointer moves that
++ *   way (an RDP pointer PDU carries a position, which would pull the cursor back). X buttons and the horizontal wheel
++ *   go over RDP only when the server announced them (SP_INPUT_RING_XBUTTONS, SP_INPUT_RING_HWHEEL).
 + * - Whenever the ring is not usable (no seat, the seat's connection is down, the seat died, the ring is full) the
 + *   event goes to SendInput as before, so input never stops.
 + * - Touch, pen and gamepads are unchanged.

@@ -292,9 +292,10 @@ The Profile's `input` (string, live, `null` = `windows`) chooses where keyboard 
   contract `input_ring.h`) and signals `Global\SplitPlay.InputReady.<desk>`; the seat sends it into the session over
   its loopback RDP connection. Keys go as scancodes (upstream's VK to scancode map, `MapVirtualKey` for the rest,
   Pause as E1 1D 45, Print Screen as E0 37), text as Unicode key events, absolute motion in desktop pixels, buttons and
-  wheels with the cursor position from `GetCursorPos`. Relative motion goes over RDP only when the ring's
+  wheels at the position the seat last sent. Relative motion goes over RDP only when the ring's
   `SP_INPUT_RING_REL_MOUSE` is set (the server takes relative mouse PDUs); otherwise it stays on SendInput, so games
-  reading raw input keep their deltas.
+  reading raw input keep their deltas, and clicks and wheel follow it to SendInput while the pointer moves that way.
+  X buttons and the horizontal wheel need `SP_INPUT_RING_XBUTTONS` and `SP_INPUT_RING_HWHEEL`.
 
 Every event the ring cannot take goes to SendInput as before: no seat ring yet, the seat's connection is not logged on
 (`SP_INPUT_RING_READY` clear), the seat's process is gone, or the ring is full (`input_fallbacks`). Leaving `rdp`

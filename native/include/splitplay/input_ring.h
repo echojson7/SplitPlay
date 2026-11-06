@@ -15,8 +15,8 @@
 // A seat that restarts while a worker still maps the section reopens the same section: it keeps write_index, sets
 // read_index to it (queued events are dropped) and rewrites flags and consumer_pid, so the producer carries on.
 // The producer reads `flags` before every event: it only uses the ring while SP_INPUT_RING_READY is set (the seat's
-// RDP connection is logged on and can send input) and keeps relative mouse motion on SendInput unless
-// SP_INPUT_RING_REL_MOUSE is set.
+// RDP connection is logged on and can send input), keeps relative mouse motion on SendInput unless
+// SP_INPUT_RING_REL_MOUSE is set, and X buttons and the horizontal wheel unless their flags are set.
 #pragma once
 
 #include <stdint.h>
@@ -32,12 +32,15 @@ extern "C" {
 /* SpInputRing::flags, written by the consumer (seat) at any time. */
 #define SP_INPUT_RING_REL_MOUSE 0x1u  /* the RDP server accepts relative mouse PDUs (TS_FP_RELPOINTER_EVENT) */
 #define SP_INPUT_RING_READY     0x2u  /* the seat's RDP connection is logged on and sends what it reads */
+#define SP_INPUT_RING_XBUTTONS  0x4u  /* the server takes X1/X2 buttons (INPUT_FLAG_MOUSEX) */
+#define SP_INPUT_RING_HWHEEL    0x8u  /* the server takes the horizontal wheel (TS_INPUT_FLAG_MOUSE_HWHEEL) */
 
 /* Bits of SpInputEvent::b. */
 #define SP_IN_FLAG_UP       0x1u  /* KEY, UNICODE, BUTTON: release */
 #define SP_IN_FLAG_EXTENDED 0x2u  /* KEY: E0 prefix */
 #define SP_IN_FLAG_E1       0x4u  /* KEY: E1 prefix (Pause) */
-#define SP_IN_FLAG_POS      0x8u  /* BUTTON, WHEEL, HWHEEL: x, y hold the pointer position in desktop pixels */
+#define SP_IN_FLAG_POS      0x8u  /* BUTTON, WHEEL, HWHEEL: x, y hold the pointer position in desktop pixels (the
+                                     worker sends none: every motion it puts in the ring is the newest position) */
 
 typedef enum SpInputType {
   SP_IN_KEY = 1,        /* a = scancode (set 1), b = SP_IN_FLAG_UP | SP_IN_FLAG_EXTENDED | SP_IN_FLAG_E1 */

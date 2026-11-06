@@ -502,6 +502,7 @@ int run_rdp(const std::string& exe, const RdpScenario& sc) {
     send(*transport, ipc::make_request("set_mode", 11, {{"width", 0}}));
     check_error_result(inbox.result(11, 5s), ipc::kErrBadRequest, "set_mode without a size");
     // Input over RDP, then Ctrl+Alt+Del (the server opens the SAS screen; Escape closes it again).
+    std::this_thread::sleep_for(2s);  // the resize reactivates the connection; let it settle first
     check_rdp_input(inbox, desk, sid);
     send(*transport, ipc::make_request("send_sas", 12));
     auto sas = inbox.result(12, 5s);

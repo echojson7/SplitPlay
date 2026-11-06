@@ -264,4 +264,37 @@ public sealed class NvidiaProfilesTests : IDisposable
         Profiles().Apply(Stopped);
         Assert.Equal(0u, _drs.Get(null, Present));
     }
+
+    [Fact]
+    public void An_unsaved_value_still_counts_as_SplitPlays_when_a_later_step_fails()
+    {
+        // The reviewer's case: 60 saved, 120 not saved, then the spec fails before writing; the original 0 must come back.
+        _drs.AddProfile("Game", "a.exe");
+        _drs.Set("Game", DrsSettings.FrameRateLimit, 0);
+        DrsProfileSpec Limit(uint fps, params string[] apps) => new("Game", apps, new Dictionary<uint, uint> { [DrsSettings.FrameRateLimit] = fps });
+
+        Profiles().Apply([Limit(60, "a.exe")]);
+        _drs.FailNextSave = true;
+        Assert.Throws<NvidiaDrsException>(() => Profiles().Apply([Limit(120, "a.exe")]));
+        _drs.FailNextSave = true;
+        Assert.Throws<NvidiaDrsException>(() => Profiles().Apply([Limit(150, "a.exe")]));
+        _drs.AddProfile("Other", "b.exe");
+        var failing = Profiles().Apply([Limit(150, "a.exe", "b.exe")]);
+        Assert.Equal(1, failing.Failed);
+        Assert.Equal(60u, _drs.Get("Game", DrsSettings.FrameRateLimit));
+
+        Profiles().Apply([]);
+        Assert.Equal(0u, _drs.Get("Game", DrsSettings.FrameRateLimit));
+        Assert.True(_drs.HasProfile("Game"));
+    }
+
+    [Fact]
+    public void Without_a_driver_a_held_record_is_reported()
+    {
+        Profiles().Apply(Running);
+        _drs.Driver = false;
+        var result = Profiles().Apply([]);
+        Assert.False(result.Driver);
+        Assert.True(result.Held);
+    }
 }

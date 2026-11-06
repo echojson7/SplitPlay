@@ -116,10 +116,14 @@ public static class UninstallCleanup
                 }
 
                 // A failed step keeps its record in nvidia-profiles.json, which the installer then keeps for a later cleanup.
-                var failure = result.Notes.FirstOrDefault(n => n.Contains(" failed: ", StringComparison.Ordinal));
-                if (failure is not null)
+                if (result.Failed > 0)
                 {
-                    failed.Add($"NVIDIA driver settings: {failure}");
+                    failed.Add($"NVIDIA driver settings: {string.Join("; ", result.Notes.Where(n => n.Contains(" failed: ", StringComparison.Ordinal)))}");
+                }
+                else if (!result.Driver && result.Held)
+                {
+                    // The record is all a reinstall with the driver back has to give the values back.
+                    failed.Add("NVIDIA driver settings: no NVIDIA driver now, but SplitPlay's changes are still on record (nvidia-profiles.json kept)");
                 }
                 else
                 {

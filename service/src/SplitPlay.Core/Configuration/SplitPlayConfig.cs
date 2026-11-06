@@ -119,6 +119,15 @@ public sealed class DeskConfig
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? HideFromLogon { get; set; }
 
+    /// <summary>
+    /// The NVIDIA driver's frame rate limit for the games the service sees in this desk (<see cref="Games.GameLimits"/>):
+    /// null (default) Auto, the frame rate of the Moonlight client; 0 off; otherwise frames per second
+    /// (<see cref="Games.GameLimits.MinFps"/>–<see cref="Games.GameLimits.MaxFps"/>). Changes apply while the desk runs,
+    /// to the next start of each game.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? GameFpsLimit { get; set; }
+
     /// <summary>The effective <see cref="HideFromLogon"/> for an account that SplitPlay did (or did not) create.</summary>
     public bool HidesFromLogon(bool createdBySplitPlay) => HideFromLogon ?? (createdBySplitPlay && UserManaged != false);
 

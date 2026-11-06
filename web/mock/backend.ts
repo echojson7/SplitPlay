@@ -8,6 +8,7 @@ import type {
   DeskHdr,
   DeskMetrics,
   DeskState,
+  Game,
   HostCpu,
   HostService,
   HostSettings,
@@ -211,6 +212,10 @@ export class MockBackend {
     deskCores: 'off',
   }
   private clientSeq = 1
+  private games: Array<Pick<Game, 'exe' | 'path' | 'desks' | 'excluded'> & { owner?: boolean }> = [
+    { exe: 'eldenring.exe', path: 'D:\\Games\\ELDEN RING\\Game\\eldenring.exe', desks: ['anna'], excluded: false },
+    { exe: 'factorio.exe', path: 'D:\\Games\\Factorio\\bin\\x64\\factorio.exe', desks: ['anna'], excluded: false, owner: true },
+  ]
   private readonly services = new Map<string, ServiceEntry>()
   private readonly network: { profile: 'Public' | 'Private' | 'Domain' | null; mdnsAllowed: boolean | null }
 
@@ -487,9 +492,14 @@ export class MockBackend {
           if (problem) return err(400, 'invalid_config', problem)
           const c = req.body as DeskConfig
           if (c.id !== id) return err(400, 'invalid_config', 'id cannot be changed')
+          const limit = c.gameFpsLimit
+          if (limit !== undefined && limit !== null && limit !== 0 && (typeof limit !== 'number' || limit < 10 || limit > 1000))
+            return err(400, 'validation_failed', 'gameFpsLimit must be null, 0 or 10..1000')
+          // Left out: kept (null is Auto).
+          if (!('gameFpsLimit' in c) && e.desk.gameFpsLimit !== undefined) c.gameFpsLimit = e.desk.gameFpsLimit
           if (running) {
             // The sign-in screen entry may change while the desk runs.
-            const { profile: _p, hideFromLogon: _h, ...rest } = c
+            const { profile: _p, hideFromLogon: _h, gameFpsLimit: _g, ...rest } = c
             const { profile: _q, ...cur } = deskConfigOf(e.desk)
             if (JSON.stringify(rest) !== JSON.stringify(cur))
               return err(409, 'desk_running', 'Only the profile can change while the desk runs')
@@ -553,6 +563,26 @@ export class MockBackend {
           pairedAt: new Date(this.now()).toISOString(),
         })
         e.desk.pinRequest = null
+        return { status: 204 }
+      }
+      return err(405, 'method_not_allowed', `${method} ${path}`)
+    }
+
+    // --- games and their FPS limits
+    if (path === '/games' && method === 'GET') return ok(this.gameList())
+    const gm = /^\/games\/([^/]+)$/.exec(path)
+    if (gm) {
+      const exe = decodeURIComponent(gm[1]!).toLowerCase()
+      const g = this.games.find((x) => x.exe.toLowerCase() === exe)
+      if (!g) return err(404, 'not_found', `game '${exe}' not found`)
+      if (method === 'PUT') {
+        const b = (req.body ?? {}) as { excluded?: unknown }
+        if (typeof b.excluded !== 'boolean') return err(400, 'validation_failed', 'excluded is required')
+        g.excluded = b.excluded
+        return ok(this.gameList().find((x) => x.exe === g.exe))
+      }
+      if (method === 'DELETE') {
+        this.games = this.games.filter((x) => x !== g)
         return { status: 204 }
       }
       return err(405, 'method_not_allowed', `${method} ${path}`)
@@ -644,6 +674,19 @@ export class MockBackend {
   }
 
   /** A Ryzen 9 7950X3D (CCD 1 has the 3D V-Cache): with auto, desks take the CCDs in turn, the V-Cache one first. */
+  /** Games with the limit the service would compute: the largest of their desks' limits (Auto = the client's fps). */
+  private gameList(): Game[] {
+    return this.games.map((g) => {
+      const limits = g.desks
+        .map((id) => this.desks.get(id)?.desk)
+        .filter((d): d is Desk => d !== undefined && d.gameFpsLimit !== 0)
+        .map((d) => d.gameFpsLimit ?? d.stream?.fps ?? d.profile.fps)
+      const limit = limits.length ? Math.max(...limits) : null
+      const status = this.host.nvidiaProfiles === false ? 'disabled' : g.excluded ? 'excluded' : limit === null ? 'off' : g.owner ? 'owner' : 'limited'
+      return { ...clone(g), limit, status, firstSeen: '2026-11-01T18:00:00Z', lastSeen: '2026-11-06T20:00:00Z' }
+    }).map(({ owner: _o, ...g }) => g as Game)
+  }
+
   private cpu(): HostCpu {
     const ccd = (n: number) => Array.from({ length: 16 }, (_, i) => n * 16 + i)
     const auto = [...this.desks.values()].map((e, i) => ({ id: e.desk.id, cpus: ccd(i % 2 === 0 ? 1 : 0) }))

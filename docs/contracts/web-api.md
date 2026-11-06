@@ -92,13 +92,16 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 | GET | `/desks` | array of desks with live state |
 | POST | `/desks` | create a desk (body = desk config, see config.md, plus optional `password`: the Windows password of `user`, verified when the account exists, used for a new account otherwise) |
 | GET | `/desks/{id}` | one desk with live state |
-| PUT | `/desks/{id}` | replace desk config (only while stopped, except `profile`); optional `password` as for POST. A `profile.width/height` change on a running desk is sent to the seat as `set_mode` |
+| PUT | `/desks/{id}` | replace desk config (only while stopped, except `profile`, `gameFpsLimit` and `hideFromLogon`; `gameFpsLimit` left out keeps the current value); optional `password` as for POST. A `profile.width/height` change on a running desk is sent to the seat as `set_mode` |
 | DELETE | `/desks/{id}` | delete a stopped desk (`?deleteUser=true` also removes the Windows account; 409 `user_not_managed` for an account SplitPlay did not create) |
 | POST | `/desks/{id}/start`, `/desks/{id}/stop`, `/desks/{id}/restart` | lifecycle; return 202 with the desk. Starting a desk that is not `Stopped`/`Defined` gives 409 `invalid_state` (a `Faulted` desk must be stopped first); stop is accepted in every state and is a no-op on a stopped desk |
 | GET | `/desks/{id}/clients` | array of paired Moonlight clients `{"id","name","pairedAt"?}` (409 `child_unavailable` when the desk is not running) |
 | POST | `/desks/{id}/pair` | `{"pin":"1234","name":"Laptop"}` |
 | DELETE | `/desks/{id}/clients/{clientId}` | revoke a client |
 | GET | `/desks/{id}/client-pack`, `/desks/{id}/client-pack/{windows,linux}` | Moonlight settings recommended for the desk and its launch scripts, see [Client launch pack](#client-launch-pack) |
+| GET | `/games` | the games the service found in desks and their FPS limits (config.md `gameFpsLimit`), latest first: `[{"exe":"eldenring.exe","path":"D:\\Games\\ELDEN RING\\Game\\eldenring.exe","desks":["anna"],"limit":120,"status":"limited","excluded":false,"firstSeen":"…","lastSeen":"…","profile":"Elden Ring"}]`. `limit`: the limit SplitPlay wants (null: none). `status`: `limited` (the driver holds it, in `profile`), `owner` (a limit the owner set in NVIDIA Control Panel is left alone), `failed`, `pending` (not applied yet), `off` (its desks have the limit off), `excluded`, `noDriver` (no NVIDIA driver), `disabled` (`host.nvidiaProfiles` is off) |
+| PUT | `/games/{exe}` | `{"excluded":true}` turns the limit off for that game (`false`: on again); applied to the driver before the reply; 200 with the game, 404 for an unknown game |
+| DELETE | `/games/{exe}` | forget a game (its limit goes); 204, 404 for an unknown game. Found again, it comes back |
 | GET | `/metrics` | host-level metrics plus per-desk metrics |
 | GET | `/logs?component=service&desk=desk-1&tail=200` | array of `{"time","level","component","desk"?,"message"}` |
 | GET | `/config/export` | zip download (secrets excluded unless `?includeSecrets=true&password=...`) |
@@ -148,6 +151,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
   "resolutionPendingRestart": false,
   "steamIsolation": true,
   "hideFromLogon": true,
+  "gameFpsLimit": null,
   "state": "Stopped",
   "sessionId": null,
   "basePort": 48089,

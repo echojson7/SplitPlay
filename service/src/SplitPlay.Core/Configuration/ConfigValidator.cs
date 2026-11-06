@@ -280,6 +280,12 @@ public static partial class ConfigValidator
             errors.Add(new($"{path}.gpu", "must be \"auto\" or an adapter LUID \"0x…\""));
         }
 
+        if (desk.GameFpsLimit is int limit && limit != Games.GameLimits.Off && limit is < Games.GameLimits.MinFps or > Games.GameLimits.MaxFps)
+        {
+            errors.Add(new($"{path}.gameFpsLimit",
+                $"must be null (auto), 0 (off) or between {Games.GameLimits.MinFps} and {Games.GameLimits.MaxFps}"));
+        }
+
         if (desk.WorkerSettings is not null)
         {
             foreach (var (name, value) in desk.WorkerSettings)

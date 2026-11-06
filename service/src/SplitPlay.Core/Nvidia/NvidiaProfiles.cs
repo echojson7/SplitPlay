@@ -8,13 +8,46 @@ namespace SplitPlay.Core.Nvidia;
 /// What SplitPlay wants in one driver profile: the profile (null = the base, global profile), the executables it must
 /// contain (a named profile is created by SplitPlay when missing) and its DWORD settings.
 /// </summary>
-public sealed record DrsProfileSpec(string? Profile, IReadOnlyList<string> Applications, IReadOnlyDictionary<uint, uint> Settings);
+/// <param name="YieldToOwner">
+/// A value the owner set (not SplitPlay's, not NVIDIA's predefined one) is left alone, and SplitPlay forgets its own
+/// record of it: used for games, where a limit set in NVIDIA Control Panel wins.
+/// </param>
+public sealed record DrsProfileSpec(string? Profile, IReadOnlyList<string> Applications, IReadOnlyDictionary<uint, uint> Settings,
+    bool YieldToOwner = false);
+
+/// <summary>
+/// DWORD settings for one executable, wherever the driver keeps it: in the profile that already lists it (often one of
+/// NVIDIA's predefined game profiles; its values are recorded and given back like the global ones), otherwise in a
+/// profile SplitPlay creates for it ("SplitPlay game &lt;exe&gt;"). Values the owner set there are left alone.
+/// </summary>
+/// <param name="Path">
+/// The executable's full path when known: NvAPI then finds exactly the profile the driver applies to it (entries tied
+/// to a folder, generic names such as <c>game.exe</c> in several profiles); otherwise the file name is looked up.
+/// </param>
+public sealed record DrsAppSpec(string Executable, IReadOnlyDictionary<uint, uint> Settings, string? Path = null);
+
+/// <summary>What became of one <see cref="DrsAppSpec"/>.</summary>
+public enum DrsAppStatus
+{
+    /// <summary>The driver holds SplitPlay's values.</summary>
+    Set,
+
+    /// <summary>The owner set a value of their own there; left alone.</summary>
+    Owner,
+
+    /// <summary>A driver call failed (see the notes); tried again at the next apply.</summary>
+    Failed,
+}
+
+/// <param name="Profile">The driver profile that holds the executable's settings (null when it could not be found).</param>
+public sealed record DrsAppResult(string Executable, string? Profile, DrsAppStatus Status);
 
 /// <summary>What <see cref="NvidiaProfiles.Apply"/> did: one line per change, notes for what it left alone or could not do.</summary>
 /// <param name="Driver">False when there is no NVIDIA driver (nothing was done).</param>
 /// <param name="Failed">Steps that failed (also in <paramref name="Notes"/>); their records are kept for a later attempt.</param>
+/// <param name="Apps">One entry per <see cref="DrsAppSpec"/> (empty without a driver).</param>
 public sealed record NvidiaProfilesResult(bool Driver, IReadOnlyList<string> Changes, IReadOnlyList<string> Notes, int Failed = 0,
-    bool Held = false);
+    bool Held = false, IReadOnlyList<DrsAppResult>? Apps = null);
 
 /// <summary>
 /// The service's owner of the NVIDIA driver settings (NvAPI DRS): the only writer, so desks no longer race on one
@@ -43,6 +76,12 @@ public sealed class NvidiaProfiles
     public const string WorkerProfile = "SplitPlay worker";
 
     public const string WorkerExecutable = "splitplay-worker.exe";
+
+    /// <summary>The profile SplitPlay creates for a game no driver profile lists yet: this prefix and the file name.</summary>
+    public const string GamePrefix = OwnPrefix + "game ";
+
+    /// <summary>The name of SplitPlay's own profile for <paramref name="executable"/>.</summary>
+    public static string GameProfile(string executable) => GamePrefix + executable;
 
     private readonly object _gate = new();
     private readonly IDrsProvider _drs;
@@ -102,9 +141,14 @@ public sealed class NvidiaProfiles
     /// a failed driver save throws <see cref="NvidiaDrsException"/> and leaves the record as it was.
     /// </para>
     /// </summary>
-    public NvidiaProfilesResult Apply(IReadOnlyList<DrsProfileSpec> wanted)
+    /// <param name="apps">
+    /// Settings per executable (the game FPS limits): each is resolved to the profile that lists the executable and then
+    /// handled like <paramref name="wanted"/>; executables no longer listed are given back the same way.
+    /// </param>
+    public NvidiaProfilesResult Apply(IReadOnlyList<DrsProfileSpec> wanted, IReadOnlyList<DrsAppSpec>? apps = null)
     {
         ArgumentNullException.ThrowIfNull(wanted);
+        apps ??= [];
         lock (_gate)
         {
             var changes = new List<string>();
@@ -113,7 +157,7 @@ public sealed class NvidiaProfiles
             if (drs is null)
             {
                 var held = Load() is { } record && (record.Settings.Count > 0 || record.CreatedProfiles.Count > 0);
-                return new NvidiaProfilesResult(false, changes, ["no NVIDIA driver"], Held: held);
+                return new NvidiaProfilesResult(false, changes, ["no NVIDIA driver"], Held: held, Apps: []);
             }
 
             // disk: what nvidia-profiles.json says until the driver saved (only grows); state: the record after it.
@@ -124,17 +168,88 @@ public sealed class NvidiaProfiles
             var failed = 0;
             var confirmed = new HashSet<OwnedSetting>();
 
-            void Step(string what, Action action)
+            bool Step(string what, Action action)
             {
                 try
                 {
                     action();
+                    return true;
                 }
                 catch (NvidiaDrsException ex)
                 {
                     failed++;
                     notes.Add($"{what} failed: {ex.Message}");
+                    return false;
                 }
+            }
+
+            // ---- executables to the profiles that hold them
+            var appProfiles = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+            var appSpecs = new List<DrsProfileSpec>();
+            var lookupFailed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var app in apps)
+            {
+                string? found = null;
+                // NvAPI documents a full path as "c:/Folder1/Folder2/App.exe".
+                var name = app.Path is { Length: > 0 } path ? path.Replace('\\', '/') : app.Executable;
+                if (!Step($"finding the profile of {app.Executable}", () => found = drs.FindApplicationProfile(name)))
+                {
+                    // Keep it where it was last time, so a passing NvAPI error does not give its limit back.
+                    lookupFailed.Add(app.Executable);
+                    if (!state.AppProfiles.TryGetValue(app.Executable, out var known))
+                    {
+                        appProfiles[app.Executable] = null;
+                        continue;
+                    }
+
+                    found = known;
+                }
+
+                // Not listed anywhere (or in a profile of SplitPlay's): SplitPlay's own profile for it.
+                var own = found is null || IsOwnName(found);
+                var profile = own ? found ?? GameProfile(app.Executable) : found!;
+                appProfiles[app.Executable] = profile;
+                state.AppProfiles[app.Executable] = profile;
+                var index = appSpecs.FindIndex(a => SameProfile(a.Profile, profile));
+                if (index < 0)
+                {
+                    appSpecs.Add(new DrsProfileSpec(profile, own ? [app.Executable] : [], app.Settings, YieldToOwner: true));
+                    continue;
+                }
+
+                // Two executables of one profile (a game and its launcher in NVIDIA's profile): the larger value wins.
+                var merged = new Dictionary<uint, uint>(appSpecs[index].Settings);
+                foreach (var (id, value) in app.Settings)
+                {
+                    merged[id] = merged.TryGetValue(id, out var other) ? Math.Max(other, value) : value;
+                }
+
+                appSpecs[index] = appSpecs[index] with
+                {
+                    Applications = own ? [.. appSpecs[index].Applications, app.Executable] : appSpecs[index].Applications,
+                    Settings = merged,
+                };
+            }
+
+            // A game profile can never replace one of the fixed specs.
+            appSpecs.RemoveAll(a => wanted.Any(w => SameProfile(w.Profile, a.Profile)));
+            wanted = [.. wanted, .. appSpecs];
+            foreach (var exe in state.AppProfiles.Keys.Where(e => !apps.Any(a => string.Equals(a.Executable, e, StringComparison.OrdinalIgnoreCase))).ToList())
+            {
+                state.AppProfiles.Remove(exe);
+            }
+
+            // The owner's own global frame rate cap (NVIDIA Control Panel, global settings) is not raised per game.
+            var ownerCaps = new Dictionary<uint, uint>();
+            foreach (var id in appSpecs.SelectMany(a => a.Settings.Keys).Distinct())
+            {
+                Step($"reading global {DrsSettings.Name(id)}", () =>
+                {
+                    if (drs.GetSetting(null, id) is { } global && global != 0 && Find(state, null, id) is null)
+                    {
+                        ownerCaps[id] = global;
+                    }
+                });
             }
 
             // ---- give back what is no longer wanted (first, so that a value moving between profiles ends up clean)
@@ -143,6 +258,7 @@ public sealed class NvidiaProfiles
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             bool Wanted(OwnedSetting s) => wanted.Any(w => SameProfile(w.Profile, s.Profile) && w.Settings.ContainsKey(s.Id));
 
+            var ownedBefore = state.Settings.ToList();
             foreach (var owned in state.Settings.Where(s => !Wanted(s)).ToList())
             {
                 // A value in a profile that is deleted below goes with it.
@@ -164,7 +280,14 @@ public sealed class NvidiaProfiles
             {
                 Step($"deleting profile \"{profile}\"", () =>
                 {
-                    if (drs.ProfileExists(profile))
+                    if (profile.StartsWith(GamePrefix, StringComparison.OrdinalIgnoreCase) && drs.ProfileExists(profile)
+                        && drs.GetSetting(profile, DrsSettings.FrameRateLimit) is { } limit && limit != 0
+                        && !ownedBefore.Any(o => SameProfile(o.Profile, profile) && o.Id == DrsSettings.FrameRateLimit && o.IsOurs(limit)))
+                    {
+                        // The owner set a limit of their own there: the profile is theirs now.
+                        notes.Add($"profile \"{profile}\" kept: it holds a limit set outside SplitPlay");
+                    }
+                    else if (drs.ProfileExists(profile))
                     {
                         drs.DeleteProfile(profile);
                         changes.Add($"profile \"{profile}\" deleted");
@@ -177,9 +300,14 @@ public sealed class NvidiaProfiles
             }
 
             // ---- set what is wanted, one spec at a time
+            var failedProfiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var yielded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var spec in wanted)
             {
-                Step(Where(spec.Profile), () => dirty |= SetWanted(drs, spec, disk, state, confirmed, changes, notes));
+                if (!Step(Where(spec.Profile), () => dirty |= SetWanted(drs, spec, disk, state, confirmed, changes, notes, yielded, ownerCaps)))
+                {
+                    failedProfiles.Add(spec.Profile ?? "");
+                }
             }
 
             if (dirty)
@@ -196,13 +324,21 @@ public sealed class NvidiaProfiles
 
             Save(state);
             var stillHeld = state.Settings.Count > 0 || state.CreatedProfiles.Count > 0;
-            return new NvidiaProfilesResult(true, changes, notes, failed, stillHeld);
+            var appResults = apps.Select(a => appProfiles.GetValueOrDefault(a.Executable) is not { } profile
+                    ? new DrsAppResult(a.Executable, null, DrsAppStatus.Failed)
+                    : new DrsAppResult(a.Executable, profile,
+                        failedProfiles.Contains(profile) || lookupFailed.Contains(a.Executable) ? DrsAppStatus.Failed
+                        : yielded.Contains(profile) ? DrsAppStatus.Owner
+                        : DrsAppStatus.Set))
+                .ToList();
+            return new NvidiaProfilesResult(true, changes, notes, failed, stillHeld, appResults);
         }
     }
 
     /// <summary>One wanted profile; returns true when the driver changed. Additions are recorded on disk first.</summary>
     private bool SetWanted(IDrsSession drs, DrsProfileSpec spec, NvidiaProfilesState disk, NvidiaProfilesState state,
-        HashSet<OwnedSetting> confirmed, List<string> changes, List<string> notes)
+        HashSet<OwnedSetting> confirmed, List<string> changes, List<string> notes, HashSet<string> yielded,
+        IReadOnlyDictionary<uint, uint>? ownerCaps = null)
     {
         var dirty = false;
         if (spec.Profile is { } name)
@@ -250,14 +386,48 @@ public sealed class NvidiaProfiles
             var owned = Find(state, spec.Profile, id);
             var existed = owned is not null;
             var ours = owned is not null && owned.IsOurs(current);
+            var predefined = current is not null && !ours && drs.IsPredefined(spec.Profile, id);
+            if (spec.YieldToOwner && ownerCaps is not null && ownerCaps.TryGetValue(id, out var cap) && (current is null || ours))
+            {
+                // A cap the owner set for every program: SplitPlay's own value goes (the game then gets the owner's).
+                if (owned is not null && current is not null)
+                {
+                    dirty |= GiveBack(drs, owned, changes, notes);
+                }
+
+                if (owned is not null)
+                {
+                    state.Settings.Remove(owned);
+                }
+
+                yielded.Add(spec.Profile ?? "");
+                notes.Add($"{Where(spec.Profile)}: the global {DrsSettings.Name(id)} {cap} was set outside SplitPlay; left to it");
+                continue;
+            }
+
+            if (spec.YieldToOwner && current is { } theirs && theirs != 0 && !ours && !predefined)
+            {
+                // The owner's own value (NVIDIA Control Panel, Profile Inspector): theirs to keep. 0 is "off", which
+                // NVIDIA Control Panel also writes when a limit is switched off again: not a choice to keep. SplitPlay's record
+                // goes (there is nothing of SplitPlay's left to give back); the driver is not touched.
+                if (owned is not null)
+                {
+                    state.Settings.Remove(owned);
+                }
+
+                yielded.Add(spec.Profile ?? "");
+                notes.Add($"{Where(spec.Profile)}: {DrsSettings.Name(id)} is {Show(theirs)}, set outside SplitPlay; left alone");
+                continue;
+            }
+
             if (owned is null)
             {
                 // Remember what was there before the first change (also in SplitPlay's own profiles, so that a value no
                 // longer wanted there is removed).
-                owned = new OwnedSetting { Profile = spec.Profile, Id = id, Ours = value, Previous = current };
+                owned = new OwnedSetting { Profile = spec.Profile, Id = id, Ours = value, Previous = current, PreviousPredefined = predefined };
                 state.Settings.Add(owned);
                 disk.Settings.RemoveAll(s => SameProfile(s.Profile, spec.Profile) && s.Id == id);
-                disk.Settings.Add(new OwnedSetting { Profile = spec.Profile, Id = id, Ours = value, Previous = current });
+                disk.Settings.Add(new OwnedSetting { Profile = spec.Profile, Id = id, Ours = value, Previous = current, PreviousPredefined = predefined });
                 Save(disk);
             }
             else if (owned.Ours != value)
@@ -300,8 +470,17 @@ public sealed class NvidiaProfiles
         state.Settings.FirstOrDefault(s => SameProfile(s.Profile, profile) && s.Id == id);
 
     private static NvidiaProfilesState Clone(NvidiaProfilesState state) =>
-        JsonSerializer.Deserialize(JsonSerializer.SerializeToUtf8Bytes(state, NvidiaProfilesJsonContext.Default.NvidiaProfilesState),
-            NvidiaProfilesJsonContext.Default.NvidiaProfilesState)!;
+        Normalize(JsonSerializer.Deserialize(JsonSerializer.SerializeToUtf8Bytes(state, NvidiaProfilesJsonContext.Default.NvidiaProfilesState),
+            NvidiaProfilesJsonContext.Default.NvidiaProfilesState)!);
+
+    /// <summary>Case-insensitive executables and no null lists after reading (hand edits, older files).</summary>
+    private static NvidiaProfilesState Normalize(NvidiaProfilesState state)
+    {
+        state.CreatedProfiles ??= [];
+        state.Settings ??= [];
+        state.AppProfiles = new Dictionary<string, string>(state.AppProfiles ?? [], StringComparer.OrdinalIgnoreCase);
+        return state;
+    }
 
     // ------------------------------------------------------------------ internals
 
@@ -321,12 +500,13 @@ public sealed class NvidiaProfiles
             return false;
         }
 
-        if (owned.Previous is { } previous)
+        if (owned.Previous is { } previous && !owned.PreviousPredefined)
         {
             drs.SetSetting(owned.Profile, owned.Id, previous);
         }
         else
         {
+            // Not set before, or NVIDIA's predefined value, which deleting the setting brings back.
             drs.DeleteSetting(owned.Profile, owned.Id);
         }
 
@@ -424,8 +604,8 @@ public sealed class NvidiaProfiles
 
         try
         {
-            return JsonSerializer.Deserialize(File.ReadAllBytes(_stateFile), NvidiaProfilesJsonContext.Default.NvidiaProfilesState)
-                   ?? new NvidiaProfilesState();
+            return Normalize(JsonSerializer.Deserialize(File.ReadAllBytes(_stateFile), NvidiaProfilesJsonContext.Default.NvidiaProfilesState)
+                   ?? new NvidiaProfilesState());
         }
         catch (JsonException ex)
         {
@@ -464,6 +644,12 @@ public sealed class NvidiaProfilesState
 
     /// <summary>Values SplitPlay set in profiles that are not its own (the global profile).</summary>
     public List<OwnedSetting> Settings { get; set; } = [];
+
+    /// <summary>
+    /// Executable → the profile its per-game settings went to last time: kept when a later lookup fails, so a passing
+    /// NvAPI error does not give a game's limit back.
+    /// </summary>
+    public Dictionary<string, string> AppProfiles { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
 /// <summary>One value SplitPlay set, with the value before (null: the profile did not set it).</summary>
@@ -495,6 +681,13 @@ public sealed class OwnedSetting
     }
 
     public uint? Previous { get; set; }
+
+    /// <summary>
+    /// <see cref="Previous"/> was NVIDIA's predefined value (in one of NVIDIA's game profiles): given back by deleting
+    /// the setting, so that the driver's later updates of that value still apply.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool PreviousPredefined { get; set; }
 }
 
 [JsonSourceGenerationOptions(

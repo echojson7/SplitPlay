@@ -23,6 +23,18 @@ public interface IDrsSession : IDisposable
     void AddApplication(string profile, string executable);
 
     /// <summary>
+    /// The profile the driver applies to <paramref name="executable"/> (<c>NvAPI_DRS_FindApplicationByName</c>), or null
+    /// when no profile lists it (the base profile applies). Games are often in one of NVIDIA's predefined profiles.
+    /// </summary>
+    string? FindApplicationProfile(string executable);
+
+    /// <summary>
+    /// True when the profile's own value of the setting is NVIDIA's predefined one (not changed by anybody):
+    /// <see cref="DeleteSetting"/> brings it back.
+    /// </summary>
+    bool IsPredefined(string? profile, uint settingId);
+
+    /// <summary>
     /// The DWORD value set in this profile itself, or null when the profile does not set it (the value then comes from
     /// the global profile or the driver default).
     /// </summary>
@@ -30,7 +42,10 @@ public interface IDrsSession : IDisposable
 
     void SetSetting(string? profile, uint settingId, uint value);
 
-    /// <summary>Removes the profile's own value (back to the inherited or default one); nothing when it is not set.</summary>
+    /// <summary>
+    /// Removes the profile's own value (back to the inherited or default one, or to NVIDIA's predefined value in a
+    /// predefined profile); nothing when it is not set.
+    /// </summary>
     void DeleteSetting(string? profile, uint settingId);
 
     void Save();
@@ -61,8 +76,11 @@ public static class DrsSettings
     /// <summary><c>OGL_CPL_PREFER_DXPRESENT_PREFER_ENABLED</c>: "Prefer layered on DXGI swapchain".</summary>
     public const uint OglPreferDxPresentEnabled = 0x00000001;
 
-    /// <summary>Frame rate limiter (<c>FRL_FPS_ID</c>, 0 = off); for the game FPS limits.</summary>
+    /// <summary>Frame rate limiter, "Max Frame Rate" in NVIDIA Control Panel (<c>FRL_FPS_ID</c>, 0 = off); for the game FPS limits.</summary>
     public const uint FrameRateLimit = 0x10835002;
+
+    /// <summary>The largest <see cref="FrameRateLimit"/> value (<c>FRL_FPS_MAX</c>).</summary>
+    public const uint FrameRateLimitMax = 0x3FF;
 
     /// <summary>A readable name for logs.</summary>
     public static string Name(uint id) => id switch

@@ -136,10 +136,10 @@ public sealed class DeskCoresServiceTests
         Assert.Equal(32L << 20, sizes[(0, 0)]);
         Assert.Equal(96L << 20, sizes[(0, 1)]);
 
-        // Processors 0-1 are the faster class: hybrid, and only their L3 counts.
+        // Two L3 caches of different size: X3D, whatever the efficiency classes say.
         var topology = new CpuTopology(null, cpus, sizes);
-        Assert.Equal(CpuKind.Hybrid, topology.Kind);
-        Assert.Equal([0, 1], topology.PerformanceCpus.Select(c => c.Index));
+        Assert.Equal(CpuKind.X3d, topology.Kind);
+        Assert.Equal([2, 3], topology.CacheGroups[0].Cpus);
 
         // A truncated entry stops the parse instead of reading past the buffer.
         Assert.Single(CpuTopologyReader.ParseCpuSets(sets.AsSpan(0, 40)));

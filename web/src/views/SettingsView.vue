@@ -142,10 +142,14 @@ const cpuPlan = computed(() =>
 
 function onDeskCores(e: Event): Promise<void> {
   const deskCores = (e.target as HTMLSelectElement).value as DeskCoresMode
+  const select = e.target as HTMLSelectElement
   return run(async () => {
     if (host.value) host.value = await api.updateHostSettings({ ...host.value, deskCores })
     await loadCpu()
-  }, t('common.saved'))
+  }, t('common.saved')).finally(() => {
+    // A refused change shows the saved value again.
+    select.value = host.value?.deskCores ?? 'off'
+  })
 }
 
 function onTheme(e: Event): void {

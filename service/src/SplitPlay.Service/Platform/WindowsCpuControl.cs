@@ -98,12 +98,15 @@ public static class CpuTopologyReader
 }
 
 /// <summary>
-/// The desk session's processes join a job object per desk session (no kill-on-close: closing it never ends a game).
-/// A restriction is the job's processor affinity (<c>JOB_OBJECT_LIMIT_AFFINITY</c>), which children inherit from the
-/// moment they start, so a game started from Explorer or Steam is on the desk's cores from its first instruction. A
-/// process that cannot join (protected, or in a job that forbids nesting) gets the same processors as its default CPU
-/// Sets instead. Only processes of the desk's user are touched; SYSTEM processes of the session (DWM, the worker, the
-/// seat) are left alone.
+/// Keeps the desk user's processes in the session on the desk's processors with default CPU Sets
+/// (<c>SetProcessDefaultCpuSets</c>). CPU Sets are soft: a game that pins its own threads (affinity) still can, nothing
+/// changes for <c>CREATE_BREAKAWAY_FROM_JOB</c>, and lifting them restores the process exactly. A job object with a
+/// processor affinity was the first design and was dropped: an empty job assigned to a process already in a job nests
+/// under it (a worker's kill-on-close job could then take Explorer and the game down), affinity is hard, and a job
+/// orphaned by a service restart keeps its processes on the old processors. CPU Sets are not inherited, so a new
+/// process is put on the desk's processors at the next sweep (every 2 s by default; a game spends that long loading).
+/// Only processes of the desk's user are touched; SYSTEM processes of the session (DWM, the worker, the seat) are
+/// left alone. Protected processes cannot be opened and keep running everywhere.
 /// </summary>
 [SupportedOSPlatform("windows")]
 public sealed class WindowsCpuControl : ICpuControl
@@ -146,10 +149,11 @@ public sealed class WindowsCpuControl : ICpuControl
             logger.LogInformation("CPU: {Name}, {Cores} cores / {Threads} threads, {Kind}, L3 groups: {Groups}", name ?? "unknown", topology.Cores,
                 cpus.Count, topology.Kind,
                 string.Join("; ", topology.CacheGroups.Select(g => $"{DeskCorePlanner.Format(g.Cpus)} ({g.L3Bytes >> 20} MB)")));
-            return (topology, sets.ToDictionary(s => s.Cpu.Index, s => s.Id));
+            return (topology, sets.GroupBy(s => s.Cpu.Index).ToDictionary(g => g.Key, g => g.First().Id));
         }
-        catch (Exception ex) when (ex is Win32Exception or IOException or UnauthorizedAccessException or System.Security.SecurityException)
+        catch (Exception ex)
         {
+            // Never cached as a failure of the Lazy: an unexpected buffer just means "nothing to split".
             logger.LogWarning("Could not read the CPU topology: {Message}", ex.Message);
             return (CpuTopology.Empty, new Dictionary<int, uint>());
         }
@@ -196,11 +200,11 @@ public sealed class WindowsCpuControl : ICpuControl
         private readonly string _deskId;
         private readonly int _session;
         private readonly SecurityIdentifier _user;
-        private readonly HashSet<int> _seen = [];
-        private readonly Dictionary<int, SafeProcessHandle> _outside = [];
-        private IntPtr _job;
-        private string? _applied;
-        private IReadOnlyList<int>? _cpus;
+
+        /// <summary>Processes handled in this scope and the set they got ("all" when cleared or untouched).</summary>
+        private readonly Dictionary<int, string> _seen = [];
+        private bool _first = true;
+        private string _logged = "all";
 
         public Scope(WindowsCpuControl owner, string deskId, int session, SecurityIdentifier user)
         {
@@ -215,159 +219,74 @@ public sealed class WindowsCpuControl : ICpuControl
         public int Sweep(IReadOnlyList<int>? cpus)
         {
             var key = DeskCorePlanner.Format(cpus);
-            if (_applied is null && cpus is null)
+            var ids = cpus is null ? null : CpuSetIds(cpus);
+            if (cpus is not null && ids is null)
             {
-                // Never restricted: leave the session's processes exactly as Windows made them.
                 return 0;
             }
 
-            if (key != _applied)
-            {
-                Apply(cpus);
-                _applied = key;
-                _cpus = cpus;
-                if (cpus is null)
-                {
-                    // Lifted: processes keep the job (now on every processor); new ones need nothing.
-                    _applied = null;
-                    return 0;
-                }
-            }
-
-            return JoinNewProcesses();
-        }
-
-        private void Apply(IReadOnlyList<int>? cpus)
-        {
-            _job = _job != IntPtr.Zero ? _job : CreateJob();
-            var limits = new JOBOBJECT_BASIC_LIMIT_INFORMATION { LimitFlags = JOB_OBJECT_LIMIT_AFFINITY, Affinity = (UIntPtr)AffinityMask(cpus) };
-            if (!SetInformationJobObject(_job, JobObjectBasicLimitInformation, ref limits, Marshal.SizeOf<JOBOBJECT_BASIC_LIMIT_INFORMATION>()))
-            {
-                Log.LogWarning("Desk {Desk}: could not set the processors of the session's job: {Message}", _deskId,
-                    new Win32Exception(Marshal.GetLastWin32Error()).Message);
-            }
-
-            foreach (var (pid, process) in _outside.ToList())
-            {
-                if (!SetCpuSets(process, cpus))
-                {
-                    process.Dispose();
-                    _outside.Remove(pid);
-                }
-            }
-
-            Log.LogInformation("Desk {Desk}: processes of session {Session} run on processors {Cpus}", _deskId, _session, DeskCorePlanner.Format(cpus));
-        }
-
-        /// <summary>The affinity mask for <paramref name="cpus"/>; every processor when null or not in group 0.</summary>
-        private ulong AffinityMask(IReadOnlyList<int>? cpus)
-        {
-            GetProcessAffinityMask(GetCurrentProcess(), out _, out var system);
-            var all = (ulong)system;
-            if (cpus is null)
-            {
-                return all;
-            }
-
-            var mask = 0UL;
-            foreach (var c in cpus)
-            {
-                if (c is >= 0 and < 64)
-                {
-                    mask |= 1UL << c;
-                }
-            }
-
-            mask &= all;
-            if (mask == 0)
-            {
-                Log.LogWarning("Desk {Desk}: processors {Cpus} are not in processor group 0; the session is not restricted", _deskId,
-                    DeskCorePlanner.Format(cpus));
-                return all;
-            }
-
-            return mask;
-        }
-
-        private int JoinNewProcesses()
-        {
-            var joined = 0;
+            var changed = 0;
             var present = new HashSet<int>();
             foreach (var pid in UserProcesses())
             {
                 present.Add(pid);
-                if (!_seen.Add(pid))
+                if (_seen.TryGetValue(pid, out var had) ? had == key : cpus is null && !_first)
                 {
+                    // Already on this set, or a new process while not restricted: nothing to do.
+                    _seen[pid] = had ?? key;
                     continue;
                 }
 
-                if (Join(pid))
+                // The first sweep of a scope also clears sets a previous service run left (off after a restart).
+                _seen[pid] = key;
+                if (Apply(pid, ids))
                 {
-                    joined++;
+                    changed++;
                 }
             }
 
-            _seen.IntersectWith(present);
-            foreach (var pid in _outside.Keys.Where(p => !present.Contains(p)).ToList())
+            foreach (var gone in _seen.Keys.Where(p => !present.Contains(p)).ToList())
             {
-                _outside[pid].Dispose();
-                _outside.Remove(pid);
+                _seen.Remove(gone);
             }
 
-            if (joined > 0)
+            _first = false;
+            if (key != _logged)
             {
-                Log.LogDebug("Desk {Desk}: {Count} new process(es) of session {Session} on processors {Cpus}", _deskId, joined, _session,
-                    DeskCorePlanner.Format(_cpus));
+                Log.LogInformation("Desk {Desk}: processes of session {Session} run on processors {Cpus}", _deskId, _session, key);
+                _logged = key;
+            }
+            else if (changed > 0)
+            {
+                Log.LogDebug("Desk {Desk}: {Count} process(es) of session {Session} put on processors {Cpus}", _deskId, changed, _session, key);
             }
 
-            return joined;
+            return changed;
         }
 
-        private bool Join(int pid)
+        /// <summary>The CPU Set ids of <paramref name="cpus"/>, or null (logged) when none of them exists.</summary>
+        private uint[]? CpuSetIds(IReadOnlyList<int> cpus)
         {
-            var process = OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_LIMITED_INFORMATION,
-                false, pid);
+            var map = _owner._cpu.Value.CpuSetIds;
+            var ids = cpus.Where(map.ContainsKey).Select(c => map[c]).ToArray();
+            if (ids.Length == 0)
+            {
+                Log.LogWarning("Desk {Desk}: processors {Cpus} do not exist; the session is not restricted", _deskId, DeskCorePlanner.Format(cpus));
+                return null;
+            }
+
+            return ids;
+        }
+
+        private static bool Apply(int pid, uint[]? ids)
+        {
+            using var process = OpenProcess(PROCESS_SET_LIMITED_INFORMATION, false, pid);
             if (process.IsInvalid)
             {
-                process.Dispose();
                 return false;
             }
 
-            if (IsProcessInJob(process, _job, out var inJob) && inJob)
-            {
-                // A child of a process that already joined: it inherited the job (and its processors).
-                process.Dispose();
-                return false;
-            }
-
-            if (AssignProcessToJobObject(_job, process))
-            {
-                process.Dispose();
-                return true;
-            }
-
-            var error = Marshal.GetLastWin32Error();
-            if (SetCpuSets(process, _cpus))
-            {
-                Log.LogDebug("Desk {Desk}: process {Pid} could not join the session's job ({Error}); using its CPU Sets", _deskId, pid, error);
-                _outside[pid] = process;
-                return true;
-            }
-
-            process.Dispose();
-            return false;
-        }
-
-        private bool SetCpuSets(SafeProcessHandle process, IReadOnlyList<int>? cpus)
-        {
-            if (cpus is null)
-            {
-                return SetProcessDefaultCpuSets(process, null, 0);
-            }
-
-            var ids = _owner._cpu.Value.CpuSetIds;
-            var sets = cpus.Where(ids.ContainsKey).Select(c => ids[c]).ToArray();
-            return sets.Length > 0 && SetProcessDefaultCpuSets(process, sets, (uint)sets.Length);
+            return ids is null ? SetProcessDefaultCpuSets(process, null, 0) : SetProcessDefaultCpuSets(process, ids, (uint)ids.Length);
         }
 
         /// <summary>Processes in the session that run as the desk user (WTSEnumerateProcesses).</summary>
@@ -401,57 +320,16 @@ public sealed class WindowsCpuControl : ICpuControl
             return pids;
         }
 
-        private IntPtr CreateJob()
-        {
-            var job = CreateJobObjectW(IntPtr.Zero, null);
-            if (job == IntPtr.Zero)
-            {
-                throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateJobObject");
-            }
-
-            return job;
-        }
-
+        /// <summary>Processes keep their CPU Sets: a desk session ending ends them anyway, a seat restart keeps them.</summary>
         public void Dispose()
         {
-            foreach (var process in _outside.Values)
-            {
-                process.Dispose();
-            }
-
-            _outside.Clear();
-            if (_job != IntPtr.Zero)
-            {
-                // No kill-on-close: the processes keep running (and keep the job and its processors until they exit).
-                CloseHandle(_job);
-                _job = IntPtr.Zero;
-            }
         }
     }
 
     // ------------------------------------------------------------------ interop
 
     private const int ERROR_INSUFFICIENT_BUFFER = 122;
-    private const int JobObjectBasicLimitInformation = 2;
-    private const uint JOB_OBJECT_LIMIT_AFFINITY = 0x00000010;
-    private const uint PROCESS_TERMINATE = 0x0001;
-    private const uint PROCESS_SET_QUOTA = 0x0100;
-    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
     private const uint PROCESS_SET_LIMITED_INFORMATION = 0x2000;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
-    {
-        public long PerProcessUserTimeLimit;
-        public long PerJobUserTimeLimit;
-        public uint LimitFlags;
-        public UIntPtr MinimumWorkingSetSize;
-        public UIntPtr MaximumWorkingSetSize;
-        public uint ActiveProcessLimit;
-        public UIntPtr Affinity;
-        public uint PriorityClass;
-        public uint SchedulingClass;
-    }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct WTS_PROCESS_INFOW
@@ -473,27 +351,6 @@ public sealed class WindowsCpuControl : ICpuControl
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern SafeProcessHandle OpenProcess(uint access, bool inherit, int pid);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool IsProcessInJob(SafeProcessHandle process, IntPtr job, out bool result);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool AssignProcessToJobObject(IntPtr job, SafeProcessHandle process);
-
-    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
-    private static extern IntPtr CreateJobObjectW(IntPtr attributes, string? name);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool SetInformationJobObject(IntPtr job, int infoClass, ref JOBOBJECT_BASIC_LIMIT_INFORMATION info, int length);
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool GetProcessAffinityMask(IntPtr process, out UIntPtr processMask, out UIntPtr systemMask);
-
-    [DllImport("kernel32.dll")]
-    private static extern IntPtr GetCurrentProcess();
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern bool CloseHandle(IntPtr handle);
 
     [DllImport("wtsapi32.dll", SetLastError = true)]
     private static extern bool WTSEnumerateProcessesW(IntPtr server, int reserved, int version, out IntPtr processes, out int count);

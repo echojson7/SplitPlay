@@ -127,13 +127,13 @@ Rules:
   seat and session are kept); after resume each paused desk gets a new worker (NVENC and capture are recreated).
   In the web UI: Settings → Power.
 - `host.deskCores` (default `"off"`; left out = `"off"`): which processor cores the desk user's processes (Explorer,
-  Steam, games and everything they start) may use. `"off"`: wherever Windows puts them. `"auto"`: on a CPU with
-  several L3 caches (Ryzen with two or more CCDs) the desks take the caches in turn in config order, the largest
-  (3D V-Cache) first, round-robin when there are more desks than caches; on an Intel hybrid CPU every desk gets the
-  P-cores; on any other CPU nothing changes. The console and SYSTEM processes (DWM, worker, seat) are never
-  restricted. The service puts the desk user's processes of the session into a job object (no kill-on-close) whose
-  processor affinity is the desk's set, so a process started later inherits it at once; it looks for new processes
-  every 2 s (`Supervisor:CpuSweepMs`). A process that cannot join the job gets the set as its default CPU Sets. A
-  change applies to running desks within one sweep; back to `"off"` gives them every processor again. Restricting
-  works on PCs with up to 64 logical processors (processor group 0). `GET /host/cpu` (web-api.md) shows the CPU and
-  each desk's processors. In the web UI: Settings → Processor → Cores for desks.
+  Steam, games and everything they start) prefer. `"off"`: wherever Windows puts them. `"auto"`: on a CPU with
+  several L3 caches (Ryzen with two or more CCDs) the desks take the caches in turn in config order (stopped desks
+  too, so a desk keeps its CCD), the largest (3D V-Cache) first, round-robin when there are more desks than caches; on
+  an Intel hybrid CPU with one L3 every desk gets the P-cores; on any other CPU nothing changes. The console and
+  SYSTEM processes (DWM, worker, seat) are never restricted. The service gives the desk user's processes in the
+  session default CPU Sets (`SetProcessDefaultCpuSets`): soft, so a game that pins its own threads still can, and
+  nothing is left behind when lifted. CPU Sets are not inherited: the service looks for new processes every 2 s
+  (`Supervisor:CpuSweepMs`). A change applies to running desks within one sweep; back to `"off"` clears the sets.
+  Protected processes cannot be opened and are left alone. `GET /host/cpu` (web-api.md) shows the CPU and each
+  desk's processors. In the web UI: Settings → Processor → Cores for desks.

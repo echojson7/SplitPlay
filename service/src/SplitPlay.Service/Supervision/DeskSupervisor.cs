@@ -1703,6 +1703,7 @@ public sealed class DeskSupervisor : IHostedService
                     _logger.LogWarning("Desk {Desk}: the RDP session came back as session {Now} (was {Before}); restarting the worker there",
                         rt.Id, now, before);
                     abort?.TrySetResult($"desk session changed from {before} to {now} after a reconnect");
+                    RestartSessionJanitor(rt, now);
                 }
                 else
                 {
@@ -1803,6 +1804,7 @@ public sealed class DeskSupervisor : IHostedService
         lock (rt.Gate)
         {
             rt.SeatScope = cts;
+            rt.JanitorUser = user;
         }
 
         if (config.DisableBluetoothUserService)
@@ -1811,6 +1813,23 @@ public sealed class DeskSupervisor : IHostedService
         }
 
         _ = Task.Run(() => CpuJanitorAsync(rt.Id, session, user, cts.Token), CancellationToken.None);
+    }
+
+    /// <summary>The seat's session came back under another id: the janitors follow it.</summary>
+    private void RestartSessionJanitor(DeskRuntime rt, int session)
+    {
+        DeskConfig config;
+        string? user;
+        lock (rt.Gate)
+        {
+            config = rt.Config;
+            user = rt.JanitorUser;
+        }
+
+        if (user is not null)
+        {
+            StartSessionJanitor(rt, config, session, user);
+        }
     }
 
     private void CancelSessionJanitor(DeskRuntime rt)
@@ -1847,16 +1866,19 @@ public sealed class DeskSupervisor : IHostedService
     {
         var period = TimeSpan.FromMilliseconds(Math.Max(100, _options.Value.CpuSweepMs));
         IDeskCpuScope? scope = null;
+        Task sweep = Task.CompletedTask;
         try
         {
             while (!ct.IsCancellationRequested)
             {
                 try
                 {
-                    scope ??= await Task.Run(() => _cpu.Open(deskId, session, user), ct).ConfigureAwait(false);
+                    scope ??= _cpu.Open(deskId, session, user);
                     var cpus = CpuPlan().GetValueOrDefault(deskId);
                     var current = scope;
-                    await Task.Run(() => current.Sweep(cpus), ct).WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
+                    // One sweep at a time: the next starts only after this one has ended, even when it is cancelled.
+                    sweep = Task.Run(() => current.Sweep(cpus), CancellationToken.None);
+                    await sweep.WaitAsync(ct).ConfigureAwait(false);
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
@@ -1871,6 +1893,15 @@ public sealed class DeskSupervisor : IHostedService
         }
         finally
         {
+            try
+            {
+                await sweep.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug("Desk {Desk}: processor sweep failed: {Message}", deskId, ex.Message);
+            }
+
             scope?.Dispose();
         }
     }

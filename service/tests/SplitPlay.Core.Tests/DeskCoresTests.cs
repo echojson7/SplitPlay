@@ -119,6 +119,18 @@ public sealed class DeskCoresTests
     }
 
     [Fact]
+    public void Ccds_count_even_when_windows_ranks_them_differently()
+    {
+        // Preferred-core ranking can give one CCD a higher efficiency class: still one CCD per desk.
+        var cpus = Ryzen(2).Cpus.Select(c => c with { EfficiencyClass = c.Cache == 0 ? 1 : 0 }).ToList();
+        var topology = new CpuTopology("Ryzen", cpus, Ryzen(2).L3Bytes);
+        Assert.Equal(CpuKind.Ccd, topology.Kind);
+        var plan = DeskCorePlanner.Plan(topology, DeskCoresMode.Auto, Desks("a", "b"));
+        Assert.Equal("0-15", Fmt(plan, "a"));
+        Assert.Equal("16-31", Fmt(plan, "b"));
+    }
+
+    [Fact]
     public void Format_writes_ranges()
     {
         Assert.Equal("all", DeskCorePlanner.Format(null));
@@ -133,12 +145,5 @@ public sealed class DeskCoresTests
         config.Host.DeskCores = DeskCoresMode.Auto;
         Assert.DoesNotContain(ConfigValidator.Validate(config), e => e.Path == "host.deskCores");
         Assert.Equal(DeskCoresMode.Off, new HostConfig().DeskCores);
-    }
-
-    [Fact]
-    public void Config_rejects_huge_cpu_indices()
-    {
-        var config = new SplitPlayConfig { Desks = [new DeskConfig { Id = "a", Profile = { CpuSet = [4096] } }] };
-        Assert.Contains(ConfigValidator.Validate(config), e => e.Path == "desks[0].profile.cpuSet");
     }
 }

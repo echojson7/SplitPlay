@@ -73,10 +73,15 @@ public sealed record CpuTopology(string? Name, IReadOnlyList<LogicalCpu> Cpus, I
 
     public bool IsHybrid => Cpus.Select(c => c.EfficiencyClass).Distinct().Count() > 1;
 
-    /// <summary>The performance processors grouped by L3 cache: larger cache first, then in processor order.</summary>
+    /// <summary>
+    /// The processors grouped by L3 cache: larger cache first, then in processor order. All processors, not only the
+    /// fastest class: Windows may report different efficiency classes for the CCDs of one Ryzen (preferred cores), and
+    /// a CCD is a CCD either way.
+    /// </summary>
     public IReadOnlyList<CpuCacheGroup> CacheGroups =>
     [
-        .. PerformanceCpus
+        .. Cpus
+            .OrderBy(c => c.Index)
             .GroupBy(c => (c.Group, c.Cache))
             .Select(g => new CpuCacheGroup(g.Key.Group, g.Key.Cache, L3Bytes.GetValueOrDefault(g.Key), [.. g.Select(c => c.Index)]))
             .OrderByDescending(g => g.L3Bytes)
@@ -108,8 +113,8 @@ public sealed record DeskCoreRequest(string Id, IReadOnlyList<int>? CpuSet);
 /// <list type="bullet">
 /// <item><c>off</c>: no desk is restricted, except one with an explicit <c>profile.cpuSet</c>.</item>
 /// <item><c>auto</c> on a CPU with several L3 caches (Ryzen with two or more CCDs): desks take the caches in turn, in
-/// config order, the largest cache (3D V-Cache) first; with more desks than caches they share round-robin. Only the
-/// performance cores are used if the CPU is also hybrid.</item>
+/// config order (stopped desks too, so that a desk keeps its CCD), the largest cache (3D V-Cache) first; with more
+/// desks than caches they share round-robin.</item>
 /// <item><c>auto</c> on a hybrid CPU with one L3 (Intel 12th gen and later): every desk gets the P-cores, so games stay
 /// off the E-cores. The console keeps all cores.</item>
 /// <item><c>auto</c> on any other CPU: nothing to split, no desk is restricted.</item>

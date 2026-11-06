@@ -182,7 +182,7 @@ public sealed record HostCpuDto(
     IReadOnlyList<DeskCpuDto> Desks,
     IReadOnlyList<DeskCpuDto> Auto);
 
-/// <summary>The performance processors that share one L3 cache (a CCD on Ryzen).</summary>
+/// <summary>The processors that share one L3 cache (a CCD on Ryzen).</summary>
 public sealed record CpuCacheGroupDto(IReadOnlyList<int> Cpus, double L3Mb);
 
 /// <summary>The processors of one desk; null: every processor (not restricted).</summary>

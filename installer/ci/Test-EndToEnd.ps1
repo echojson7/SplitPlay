@@ -94,6 +94,10 @@ try {
     foreach ($f in 'termwrap\TermWrap.dll', 'termwrap\UmWrap.dll') {
         if (-not (Test-Path (Join-Path $app $f))) { throw "missing $f" }
     }
+    # No drivers of our own and no TermService protocol provider (ARCHITECTURE.md §10): the desk below runs without them.
+    foreach ($f in 'drivers', 'native\splitplay-rdsprov.dll') {
+        if (Test-Path (Join-Path $app $f)) { throw "$f must not be installed" }
+    }
 
     Step 'host prepared by the installer (TermWrap skipped)'
     Invoke-Cli host status

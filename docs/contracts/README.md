@@ -9,7 +9,8 @@ Architecture rationale lives in [`../ARCHITECTURE.md`](../ARCHITECTURE.md). Code
 | Control IPC (named pipes, JSON lines) | [`ipc.md`](ipc.md) | service ↔ worker, service ↔ seat |
 | Web API (`http://127.0.0.1:38299/api/v1`) | [`web-api.md`](web-api.md) | service ↔ web UI, tray, CLI |
 | Configuration file | [`config.md`](config.md) | service, CLI, import/export |
-| Capture ring (shared memory + D3D11 shared textures) | [`../../native/include/splitplay/capture_ring.h`](../../native/include/splitplay/capture_ring.h) | IDD ↔ worker |
+| Capture ring (shared memory + D3D11 shared textures), frozen with the IDD | [`../../native/include/splitplay/capture_ring.h`](../../native/include/splitplay/capture_ring.h) | IDD ↔ worker |
+| Driver control interfaces, frozen (no own drivers) | [`drivers.md`](drivers.md) | service, worker ↔ drivers |
 | Input ring (shared memory) | [`../../native/include/splitplay/input_ring.h`](../../native/include/splitplay/input_ring.h) | worker ↔ seat |
 | Frame tracing | [`../../native/include/splitplay/trace.h`](../../native/include/splitplay/trace.h) | IDD, worker, seat |
 
@@ -20,8 +21,8 @@ LICENSE                 MIT, covers everything except worker/
 NOTICE.md               third-party components and their licences
 service/                .NET 10: SplitPlay.Core, SplitPlay.Service, SplitPlay.Cli, SplitPlay.Tray, tests
 web/                    Vue 3 + Vite SPA, built into service wwwroot
-native/                 CMake + MSVC: shared headers, splitplay-seat, splitplay-rdsprov, stub pipeline, tests
-drivers/                UMDF2 drivers built with the WDK NuGet packages: idd/ (remote-session IddCx), pad/ (VHF gamepads)
+native/                 CMake + MSVC: shared headers, splitplay-seat, stub pipeline, tests; splitplay-rdsprov (frozen, not installed)
+drivers/                frozen UMDF2 drivers (WDK NuGet packages): idd/ (remote-session IddCx), pad/ (VHF gamepads); not installed
 worker/                 GPL-3.0: pinned upstream Sunshine + patch queue + MSYS2 build script
 installer/              Inno Setup 6 script producing SplitPlay-Setup-<version>.exe
 .github/workflows/      one workflow per component plus the integration workflow

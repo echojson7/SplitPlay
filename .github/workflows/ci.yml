@@ -18,10 +18,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # The frozen drivers (drivers/**) are not part of the installer: drivers.yml runs on its own when they change.
   native:
     uses: ./.github/workflows/native.yml
-  drivers:
-    uses: ./.github/workflows/drivers.yml
   service:
     uses: ./.github/workflows/service.yml
   worker:
@@ -31,7 +30,7 @@ jobs:
 
   package:
     name: Installer (real artifacts)
-    needs: [native, drivers, service, worker, web-installer]
+    needs: [native, service, worker, web-installer]
     runs-on: windows-2022
     timeout-minutes: 30
     defaults:
@@ -45,7 +44,7 @@ jobs:
       - uses: actions/download-artifact@v5
         with:
           path: build/artifacts
-          pattern: '{native,drivers,service,worker}-win-x64'
+          pattern: '{native,service,worker}-win-x64'
 
       - uses: actions/download-artifact@v5
         with:
@@ -56,7 +55,7 @@ jobs:
         run: |
           $a = 'build/artifacts'; $s = 'build/stage'
           if (Test-Path $s) { Remove-Item -Recurse -Force $s }
-          foreach ($d in 'service', 'tray', 'native', 'worker', 'drivers') { New-Item -ItemType Directory -Force "$s/$d" | Out-Null }
+          foreach ($d in 'service', 'tray', 'native', 'worker') { New-Item -ItemType Directory -Force "$s/$d" | Out-Null }
           Copy-Item -Recurse "$a/service-win-x64/service/*" "$s/service"
           Copy-Item "$a/service-win-x64/cli/splitplay.exe" "$s/service"
           Remove-Item -Recurse -Force "$s/service/wwwroot"
@@ -65,14 +64,15 @@ jobs:
           Copy-Item -Recurse "$a/native-win-x64/*" "$s/native"
           # TermWrap is built with the native part but installed to its own folder.
           if (Test-Path "$s/native/termwrap") { Move-Item "$s/native/termwrap" "$s/termwrap" }
+          # The frozen TermService protocol provider is built and tested by native.yml but never shipped.
+          Remove-Item "$s/native/splitplay-rdsprov.*" -ErrorAction SilentlyContinue
           Copy-Item -Recurse "$a/worker-win-x64/*" "$s/worker"
-          Copy-Item -Recurse "$a/drivers-win-x64/*" "$s/drivers"
           foreach ($d in Get-ChildItem $s -Directory) {
             $files = Get-ChildItem $d.FullName -Recurse -File
             '{0}: {1} files, {2:N1} MB' -f $d.Name, $files.Count, (($files | Measure-Object Length -Sum).Sum / 1MB)
           }
 
-      # ViGEmBus (nefarius/ViGEmBus, BSD-3-Clause): interim gamepads until the Stage 4 pad driver. The official signed
+      # ViGEmBus (nefarius/ViGEmBus, BSD-3-Clause): the gamepads (SplitPlay has no pad driver of its own). The official signed
       # setup, pinned by URL and SHA256, bundled unmodified; setup runs it only when no ViGEmBus driver is present.
       - name: Stage ViGEmBus setup (pinned, SHA256-checked)
         env:

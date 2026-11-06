@@ -8,9 +8,8 @@ SplitPlay's own code is MIT-licensed (see `LICENSE`). The worker in `worker/` is
 | moonlight-common-c | worker | GPL-3.0 |
 | FreeRDP | seat (from Stage 3) | Apache-2.0 |
 | TermWrap | installer (from Stage 3) | MIT |
-| ViGEmBus 1.22.0 (official signed setup, unmodified) | installer (interim gamepads from Stage 3, installed only if missing) | BSD-3-Clause |
-| libvirtualgamepad | pad driver (from Stage 4) | MIT |
-| HidHide | installer (from Stage 4) | MIT |
+| ViGEmBus 1.22.0 (official signed setup, unmodified) | installer (gamepads, installed only if missing) | BSD-3-Clause |
+| libvirtualgamepad | frozen pad driver sources in `drivers/pad` (not shipped) | MIT |
 | nlohmann/json 3.11.3 | native (common library, seat, stub worker) | MIT |
 | Vue, Vue Router, Vite | web UI | MIT |
 | Inno Setup | installer (build tool, not redistributed as a library) | Inno Setup licence |

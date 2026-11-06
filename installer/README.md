@@ -33,13 +33,12 @@ Compilation fails with a clear error if a required staged file is missing.
     SplitPlay.Tray.exe        tray / GUI (WebView2)
   native\
     splitplay-seat.exe
-    splitplay-rdsprov.dll
     splitplay-stubworker.exe
+    (splitplay-rdsprov.*)     frozen protocol provider: never installed, even if staged (Excludes in splitplay.iss)
   worker\                     GPL-3.0 part, built from worker/
     splitplay-worker.exe      and its DLLs and assets
     COPYING                   GPL-3.0 text (required)
     README-source.txt         written source offer / link to the exact source and patch queue
-  drivers\                    driver packages (optional; copied to Program Files but not installed in Stage 2)
   termwrap\                   TermWrap x64 release build (llccd/TermWrap, MIT), installed as the "termwrap" component
     TermWrap.dll              loaded by TermService in place of termsrv.dll (concurrent sessions)
     UmWrap.dll                loaded by UmRdpService on Home and Server editions only
@@ -52,7 +51,7 @@ Compilation fails with a clear error if a required staged file is missing.
 ```
 
 Required files (checked at compile time): `service\SplitPlay.Service.exe`, `service\splitplay.exe`,
-`tray\SplitPlay.Tray.exe`, `service\wwwroot\index.html`, the three files in `native\`,
+`tray\SplitPlay.Tray.exe`, `service\wwwroot\index.html`, the two files in `native\`,
 `worker\splitplay-worker.exe`, `worker\COPYING`, `termwrap\TermWrap.dll`, `termwrap\UmWrap.dll` and the ViGEmBus
 setup in `vigembus\` (file name from `/DViGEmBusSetup`, default `ViGEmBus_1.22.0_x64_x86_arm64.exe`). The
 repository's `LICENSE` and `NOTICE.md` are added by the script.
@@ -68,8 +67,11 @@ repository's `LICENSE` and `NOTICE.md` are added by the script.
    sessions, which violates the Microsoft licence terms for Windows client editions, followed by `LICENSE`.
    English and Russian.
 3. Components: the SplitPlay host (fixed) and **TermWrap** (selected by default in both setup types).
-4. Installs to `%ProgramFiles%\SplitPlay\{service,tray,native,worker,drivers,termwrap}`. TermService keeps
-   `TermWrap.dll` loaded, so an upgrade replaces it at the next restart (`restartreplace`).
+4. Installs to `%ProgramFiles%\SplitPlay\{service,tray,native,worker,termwrap}`. TermService keeps
+   `TermWrap.dll` loaded, so an upgrade replaces it at the next restart (`restartreplace`). SplitPlay installs no
+   drivers of its own and no TermService protocol provider (owner's decision of 2026-10-30, ARCHITECTURE.md §10): the
+   frozen `drivers/` packages and `splitplay-rdsprov` are not shipped, and an upgrade deletes the files earlier
+   versions copied to `{app}\drivers` and `{app}\native`, by name, and the folders only if empty (`[InstallDelete]`).
 5. Creates `%ProgramData%\SplitPlay` (with `desks\` and `logs\`) and replaces its ACL with full control for
    SYSTEM and Administrators only, inherited by everything below.
 6. Adds the firewall rule `SplitPlay Web UI` (TCP 38299 inbound, local subnet, private/domain profiles,
@@ -90,8 +92,8 @@ repository's `LICENSE` and `NOTICE.md` are added by the script.
    running, the command exits with 3010 and setup asks for a restart (`NeedRestart`; `/NORESTART` suppresses it).
    Until that restart desks go to Faulted with "RDP host not prepared: reboot required". A failure shows a message
    and setup continues; `splitplay host prepare` can be run again later, and `splitplay host status` shows each item.
-8. ViGEmBus (interim gamepads until SplitPlay's per-session pad driver in Stage 4; its virtual pads are visible to
-   every session): when no ViGEmBus driver is present (`System32\drivers\ViGEmBus.sys`, or the binary of the
+8. ViGEmBus (gamepads, DualShock 4 by default; SplitPlay has no pad driver of its own, so the virtual pads are
+   visible to every session): when no ViGEmBus driver is present (`System32\drivers\ViGEmBus.sys`, or the binary of the
    `ViGEmBus` service), runs the bundled setup silently with `/exenoui /qn /norestart /exelog
    %ProgramData%\SplitPlay\logs\vigembus-setup.log` (Advanced Installer bootstrapper: no bootstrapper UI, msiexec
    without UI, no restart). If the driver is then present, setup records `ViGEmBusInstalledBySplitPlay=1` and the

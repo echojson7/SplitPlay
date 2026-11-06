@@ -573,13 +573,16 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
         return stopped;
     }
 
-    public void ApplyComposeInterval(int composeIntervalMs)
+    public bool ApplyComposeInterval(int composeIntervalMs)
     {
         var tuner = new HostTuner(new WindowsHostRegistry(), new WindowsHostServices(), HostTuner.StateFileIn(_paths.Root));
-        if (tuner.ApplyComposeInterval(composeIntervalMs))
+        if (!tuner.ApplyComposeInterval(composeIntervalMs))
         {
-            _logger.LogInformation("DWMFRAMEINTERVAL set to {Interval} ms; it applies to desk sessions that log on from now on", composeIntervalMs);
+            return false;
         }
+
+        _logger.LogInformation("DWMFRAMEINTERVAL set to {Interval} ms; it applies to desk sessions that log on from now on", composeIntervalMs);
+        return true;
     }
 
     public int? ConsoleSessionId()

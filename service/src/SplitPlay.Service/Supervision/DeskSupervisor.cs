@@ -230,8 +230,12 @@ public sealed class DeskSupervisor : IHostedService
 
             try
             {
-                _platform.ApplyComposeInterval(ms);
-                _appliedComposeMs = ms;
+                // Remembered only once written: on a host that is not prepared yet (a `host prepare` run by hand while
+                // the service runs) the next desk change, client or host setting writes it.
+                if (_platform.ApplyComposeInterval(ms))
+                {
+                    _appliedComposeMs = ms;
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HostTuningException or System.Security.SecurityException)
             {

@@ -124,7 +124,7 @@ Rules:
   web UI: Дополнительно → Захват кадра.
 - `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz), 1–100. `0`
   (default, «Частота композиции: Авто»): the service composes at least twice per frame of the fastest desk and never
-  slower than 250 Hz: 4 ms up to 125 fps, 3 ms for 144 fps, 2 ms from 165 fps. The fastest desk is the highest
+  slower than 250 Hz: 4 ms up to 125 fps, 3 ms for 126–166 fps (144, 165), 2 ms from 167 fps (240). The fastest desk is the highest
   `profile.fps` or the highest frame rate a Moonlight client asked for since the service started. DWM reads the value
   when a session logs on, so a change applies to desk sessions that log on afterwards. `GET /metrics` reports the
   resolved rate as `host.composeHz`; each desk's measured rate is `captureFps`.

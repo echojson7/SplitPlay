@@ -19,7 +19,7 @@ public static class ComposeInterval
     /// <summary>
     /// The interval to write. A configured value (1–100 ms) is used as is. Auto composes at least twice as often as the
     /// fastest stream (so a game frame waits at most half a stream interval for DWM) and never slower than 250 Hz:
-    /// up to 125 fps 4 ms, 144 fps 3 ms, 165 fps and more 2 ms.
+    /// up to 125 fps 4 ms, 126–166 fps 3 ms, 167 fps and more 2 ms.
     /// </summary>
     /// <param name="configured"><c>host.composeIntervalMs</c>.</param>
     /// <param name="fastestFps">Highest frame rate a desk streams or is set to; 0 or less when none is known.</param>

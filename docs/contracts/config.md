@@ -15,7 +15,8 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
     "composeIntervalMs": 4,
     "logLevel": "info",
     "keepAwake": true,
-    "nvidiaProfiles": true
+    "nvidiaProfiles": true,
+    "deskCores": "off"
   },
   "desks": [
     {
@@ -106,7 +107,9 @@ Rules:
   executable, private and domain profiles) and creates them again when the desk starts, or a worker restarts, and they
   are missing, disabled or different. Before a worker starts the ports must be free (see `lastError` in web-api.md).
 - `gpu`: `"auto"` or an adapter LUID string `"0x…"`.
-- `profile` may also carry `gpuLuid` and `cpuSet` (array of logical CPU indices), passed to the worker as in ipc.md.
+- `profile` may also carry `gpuLuid` and `cpuSet` (array of logical processor numbers 0–2047, `group * 64 + number`;
+  passed to the worker as in ipc.md). A `cpuSet` keeps the desk's processes on those processors whatever
+  `host.deskCores` says; numbers this PC does not have are dropped, and a set with none left counts as not set.
 - Desk port ranges may not overlap each other or contain `host.webPort`; `basePortStride` must be at least 27.
 - `profile.fps` 10–500, `codec` one of `h264`, `hevc`, `av1`; `gpuPriority` `normal`, `high`, `realtime`.
 - Stream settings the worker applies (ipc.md, *Profile object*); a running desk takes a change at once except
@@ -132,3 +135,14 @@ Rules:
   stops and everything on uninstall, unless the owner changed the value since. `false` gives everything back at once
   and leaves the driver alone. Replaces the per-desk `nvenc_latency_over_power`, which is no longer accepted (one
   shared driver database cannot hold a value per desk).
+- `host.deskCores` (default `"off"`; left out = `"off"`): which processor cores the desk user's processes (Explorer,
+  Steam, games and everything they start) prefer. `"off"`: wherever Windows puts them. `"auto"`: on a CPU with
+  several L3 caches (Ryzen with two or more CCDs) the desks take the caches in turn in config order (stopped desks
+  too, so a desk keeps its CCD), the largest (3D V-Cache) first, round-robin when there are more desks than caches; on
+  an Intel hybrid CPU with one L3 every desk gets the P-cores; on any other CPU nothing changes. The console and
+  SYSTEM processes (DWM, worker, seat) are never restricted. The service gives the desk user's processes in the
+  session default CPU Sets (`SetProcessDefaultCpuSets`): soft, so a game that pins its own threads still can, and
+  nothing is left behind when lifted. CPU Sets are not inherited: the service looks for new processes every 2 s
+  (`Supervisor:CpuSweepMs`). A change applies to running desks within one sweep; back to `"off"` clears the sets.
+  Protected processes cannot be opened and are left alone. `GET /host/cpu` (web-api.md) shows the CPU and each
+  desk's processors. In the web UI: Settings → Processor → Cores for desks.

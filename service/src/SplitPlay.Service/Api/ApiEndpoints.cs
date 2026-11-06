@@ -340,6 +340,18 @@ public static partial class ApiEndpoints
             return Results.Json(new HostNetworkDto(HostNetwork.Addresses(), state.Profile, state.MdnsAllowed), Ctx.HostNetworkDto);
         });
 
+        api.MapGet("/host/cpu", (ICpuControl cpu, ConfigService config) =>
+        {
+            var topology = cpu.Topology();
+            var snapshot = config.Snapshot();
+            IReadOnlyList<DeskCoreRequest> desks = [.. snapshot.Desks.Select(d => new DeskCoreRequest(d.Id, d.Profile.CpuSet))];
+            static List<DeskCpuDto> Dto(IReadOnlyDictionary<string, IReadOnlyList<int>?> plan) => [.. plan.Select(p => new DeskCpuDto(p.Key, p.Value))];
+            return Results.Json(new HostCpuDto(topology.Name, topology.Cores, topology.Cpus.Count, topology.Kind, snapshot.Host.DeskCores,
+                [.. topology.CacheGroups.Select(g => new CpuCacheGroupDto(g.Cpus, Math.Round(g.L3Bytes / 1048576.0, 1)))],
+                Dto(DeskCorePlanner.Plan(topology, snapshot.Host.DeskCores, desks)),
+                Dto(DeskCorePlanner.Plan(topology, DeskCoresMode.Auto, desks))), Ctx.HostCpuDto);
+        });
+
         // ---- Windows services SplitPlay depends on (allow-list in RelatedServices)
         api.MapGet("/host/services", (RelatedServices services) => Results.Json(services.List().ToList(), Ctx.ListHostServiceDto));
         api.MapPost("/host/services/{name}/start", (string name, RelatedServices services) =>

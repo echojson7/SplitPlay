@@ -180,6 +180,23 @@ export interface DeskStream {
   startedAt?: string | null
 }
 
+/** `desk.hdr.state`: whether the desk's display composes in HDR (see DeskHdr). */
+export type HdrState = 'enabled' | 'off' | 'unsupported' | 'unknown'
+
+/**
+ * HDR of the desk session's display, as the worker measures it. `enabled`: a Moonlight client that asks for HDR gets
+ * HDR; `off`: the display supports HDR but it is switched off in Windows; `unsupported`: SDR only.
+ */
+export interface DeskHdr {
+  state: HdrState | string
+  monitor?: string | null
+  /** The GPU that renders the session. */
+  adapter?: string | null
+  bitsPerColor?: number | null
+  maxNits?: number | null
+  updatedAt?: string
+}
+
 /** Desk object as returned by GET /desks and GET /desks/{id}. */
 export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   basePort: number
@@ -194,6 +211,8 @@ export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   metrics: DeskMetrics
   /** The stream being served; null (or absent from older services) when nobody is connected. */
   stream?: DeskStream | null
+  /** The display's HDR state; null (or absent from older services) while no worker has reported it. */
+  hdr?: DeskHdr | null
   lastError: string | null
 }
 
@@ -290,6 +309,31 @@ export interface HostSettings {
   keepAwake?: boolean
   /** The service manages the NVIDIA driver settings (default true; older services leave it out). */
   nvidiaProfiles?: boolean
+  /** Which processor cores desk processes may use (default `off`; older services leave it out). */
+  deskCores?: DeskCoresMode
+}
+
+export const DESK_CORES_MODES = ['off', 'auto'] as const
+export type DeskCoresMode = (typeof DESK_CORES_MODES)[number]
+
+/** How `auto` splits this CPU: `ccd`/`x3d` one L3 cache (CCD) per desk, `hybrid` the P-cores, `uniform` nothing. */
+export type CpuKind = 'uniform' | 'hybrid' | 'ccd' | 'x3d'
+
+/** The processors of one desk; null: every processor (not restricted). */
+export interface DeskCpu {
+  id: string
+  cpus: number[] | null
+}
+
+/** GET /host/cpu: the CPU and the processors each desk gets now (`desks`) and would get with `auto`. */
+export interface HostCpu {
+  name: string | null
+  cores: number
+  threads: number
+  kind: CpuKind
+  mode: DeskCoresMode
+  desks: DeskCpu[]
+  auto: DeskCpu[]
 }
 
 /** Events pushed over GET /ws. */

@@ -85,6 +85,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 | POST | `/auth/login`, `/auth/logout`, `/auth/password` | login, logout, set or change the admin password |
 | GET, PUT | `/host` | read or replace the `host` object of config.md; validated and saved; a `webPort` change applies after a service restart; a `lanAccess` change toggles the firewall rule `SplitPlay Web UI` |
 | GET | `/host/users` | local accounts that can be a desk user: `[{"name","fullName","isAdmin","isConsoleUser","createdBySplitPlay"}]` (built-in accounts left out) |
+| GET | `/host/cpu` | the CPU and how `host.deskCores` splits it: `{"name":"AMD Ryzen 9 7950X3D 16-Core Processor","cores":16,"threads":32,"kind":"x3d","mode":"auto","caches":[{"cpus":[16,…,31],"l3Mb":96},{"cpus":[0,…,15],"l3Mb":32}],"desks":[{"id":"anna","cpus":[16,…,31]},{"id":"guest","cpus":[0,…,15]}],"auto":[…]}`. `kind`: `uniform` (nothing to split), `hybrid` (Intel P- and E-cores), `ccd` (several L3 caches), `x3d` (several, one larger). `caches`: the processors by L3 cache, larger first. `desks`: each desk's processors now (`cpus` null: every processor); `auto`: what `"auto"` would give each desk. Processor numbers as in config.md `profile.cpuSet` |
 | GET | `/host/network` | LAN addresses of the host for Moonlight and what may keep Moonlight from the desks: `{"addresses":["192.168.1.20"],"profile":"Private","mdnsAllowed":true}`. `addresses`: IPv4 addresses of interfaces that are up, without loopback and link-local (169.254/16), those of interfaces with a default gateway first; empty when none. A desk is added in Moonlight as `<address>:<basePort>`. `profile`: the Windows network profile (`Public`, `Private`, `Domain`) of the interfaces with a default gateway (of all interfaces when none has one; virtual switches of Hyper-V or WSL have none), the worst one when they differ; the desks' firewall rules cover private and domain networks only. `mdnsAllowed`: whether inbound mDNS (UDP 5353) reaches Windows' mDNS responder on that profile: the firewall is off for it, or an enabled rule such as the built-in "mDNS (UDP-In)" allows it and none blocks it. `null` when unknown. SplitPlay never changes the profile or the rule; the UI shows "Network · Public" and "mDNS · Off" in Settings only when there is a problem |
 | GET | `/host/services` | the Windows services SplitPlay depends on, see [Host services](#host-services) |
 | POST | `/host/services/{name}/start`, `/host/services/{name}/stop` | start or stop one of those services; 202 with its entry. `{name}` outside the list → 404 `not_found`; a service that cannot be started or stopped now (already running, disabled, not installed, a driver) → 409 `invalid_state`; the SCM refusing → 500 `internal` with its message |
@@ -169,9 +170,18 @@ A streaming desk:
     "client": "Living room PC", "clientId": "…", "address": "192.168.1.37",
     "width": 1920, "height": 1080, "fps": 120, "codec": "hevc", "bitrateKbps": 50000, "hdr": false,
     "startedAt": "2026-10-29T18:00:00+00:00"
-  }
+  },
+  "hdr": { "state": "unsupported", "monitor": null, "adapter": "NVIDIA GeForce RTX 5070", "bitsPerColor": 8, "maxNits": 270,
+           "updatedAt": "2026-11-06T18:00:00+00:00" }
 }
 ```
+
+`hdr` is the HDR state of the desk session's display as the worker measures it (`display_hdr` in ipc.md), `null` (or
+absent) while the desk's worker has not reported it and after it stops. `state`: `enabled` (Windows composes the
+display in HDR10, so a client that asks for HDR gets HDR), `off` (the display supports HDR, but it is switched off in
+Windows), `unsupported` (SDR only: what Microsoft's RDP display gives a seat that connects without RDP GFX) or
+`unknown`. `monitor`, `adapter`, `bitsPerColor` and `maxNits` describe that display, `null` when not reported. With
+`stream.hdr` true and `hdr.state` `off` or `unsupported` the stream is SDR (10-bit), and the UI says "SDR instead of HDR".
 
 `stream` is the Moonlight stream the desk serves, `null` when nobody is connected (with several, the earliest).
 `client` and `clientId` name the paired client (`clientId` as in `GET /desks/{id}/clients`), `null` when the worker does

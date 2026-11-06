@@ -5,6 +5,7 @@ using System.IO.Pipes;
 using Microsoft.Extensions.Options;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Host;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Lifecycle;
 using SplitPlay.Core.Steam;
@@ -55,6 +56,7 @@ public sealed class DeskSupervisor : IHostedService
     private readonly GpuInventory _gpus;
     private readonly GpuUsageMonitor _gpuUsage;
     private readonly IDeskPlatform _platform;
+    private readonly ICpuControl _cpu;
     private readonly DateTimeOffset _startedAt;
     private TimeSpan _lastCpu;
     private DateTimeOffset _lastCpuAt;
@@ -69,10 +71,11 @@ public sealed class DeskSupervisor : IHostedService
 
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
-        PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage, NvidiaDriverSettings nvidia)
+        PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage, ICpuControl cpu, NvidiaDriverSettings nvidia)
     {
         _nvidia = nvidia;
         ArgumentNullException.ThrowIfNull(power);
+        _cpu = cpu;
         power.Changed += OnPowerChange;
         _requiredServices = requiredServices;
         _gpus = gpus;
@@ -1013,6 +1016,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.SessionLost = false;
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
+                rt.Hdr = null;
                 if (rt.Machine.State == DeskState.Stopping)
                 {
                     rt.Machine.Fire(DeskTrigger.Stopped);
@@ -1291,6 +1295,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.ChildPid = null;
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
+                rt.Hdr = null;
             }
         }
     }
@@ -1621,7 +1626,7 @@ public sealed class DeskSupervisor : IHostedService
             }
         }
 
-        StartSessionJanitor(rt, config, session);
+        StartSessionJanitor(rt, config, session, credentials.User);
         return null;
     }
 
@@ -1742,6 +1747,7 @@ public sealed class DeskSupervisor : IHostedService
                     _logger.LogWarning("Desk {Desk}: the RDP session came back as session {Now} (was {Before}); restarting the worker there",
                         rt.Id, now, before);
                     abort?.TrySetResult($"desk session changed from {before} to {now} after a reconnect");
+                    RestartSessionJanitor(rt, now);
                 }
                 else
                 {
@@ -1833,23 +1839,41 @@ public sealed class DeskSupervisor : IHostedService
         }
     }
 
-    // ------------------------------------------------------------------ per-session janitor (Bluetooth)
+    // ------------------------------------------------------------------ per-session janitors (Bluetooth, CPU cores)
 
-    private void StartSessionJanitor(DeskRuntime rt, DeskConfig config, int session)
+    private void StartSessionJanitor(DeskRuntime rt, DeskConfig config, int session, string user)
     {
         CancelSessionJanitor(rt);
-        if (!config.DisableBluetoothUserService)
-        {
-            return;
-        }
-
         var cts = new CancellationTokenSource();
         lock (rt.Gate)
         {
             rt.SeatScope = cts;
+            rt.JanitorUser = user;
         }
 
-        _ = Task.Run(() => BluetoothJanitorAsync(rt.Id, session, cts.Token), CancellationToken.None);
+        if (config.DisableBluetoothUserService)
+        {
+            _ = Task.Run(() => BluetoothJanitorAsync(rt.Id, session, cts.Token), CancellationToken.None);
+        }
+
+        _ = Task.Run(() => CpuJanitorAsync(rt.Id, session, user, cts.Token), CancellationToken.None);
+    }
+
+    /// <summary>The seat's session came back under another id: the janitors follow it.</summary>
+    private void RestartSessionJanitor(DeskRuntime rt, int session)
+    {
+        DeskConfig config;
+        string? user;
+        lock (rt.Gate)
+        {
+            config = rt.Config;
+            user = rt.JanitorUser;
+        }
+
+        if (user is not null)
+        {
+            StartSessionJanitor(rt, config, session, user);
+        }
     }
 
     private void CancelSessionJanitor(DeskRuntime rt)
@@ -1865,6 +1889,64 @@ public sealed class DeskSupervisor : IHostedService
         {
             cts.Cancel();
             cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The processors of each desk (null: not restricted) under the current <c>host.deskCores</c> and desk profiles.
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<int>?> CpuPlan()
+    {
+        var config = _config.Snapshot();
+        return DeskCorePlanner.Plan(_cpu.Topology(), config.Host.DeskCores,
+            [.. config.Desks.Select(d => new DeskCoreRequest(d.Id, d.Profile.CpuSet))]);
+    }
+
+    /// <summary>
+    /// Stage 4 PR 12: keeps the desk user's processes in the session on the processors <see cref="CpuPlan"/> gives the
+    /// desk, re-reading the plan every sweep so that a settings change applies to a running desk within one period.
+    /// </summary>
+    private async Task CpuJanitorAsync(string deskId, int session, string user, CancellationToken ct)
+    {
+        var period = TimeSpan.FromMilliseconds(Math.Max(100, _options.Value.CpuSweepMs));
+        IDeskCpuScope? scope = null;
+        Task sweep = Task.CompletedTask;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    scope ??= _cpu.Open(deskId, session, user);
+                    var cpus = CpuPlan().GetValueOrDefault(deskId);
+                    var current = scope;
+                    // One sweep at a time: the next starts only after this one has ended, even when it is cancelled.
+                    sweep = Task.Run(() => current.Sweep(cpus), CancellationToken.None);
+                    await sweep.WaitAsync(ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug("Desk {Desk}: processor sweep failed: {Message}", deskId, ex.Message);
+                }
+
+                await Task.Delay(period, _time, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            try
+            {
+                await sweep.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug("Desk {Desk}: processor sweep failed: {Message}", deskId, ex.Message);
+            }
+
+            scope?.Dispose();
         }
     }
 
@@ -1967,6 +2049,29 @@ public sealed class DeskSupervisor : IHostedService
                 _logger.LogInformation("Desk {Desk}: {Client} ({Address}) disconnected", rt.Id, stream.Client ?? "unnamed client", stream.Address ?? "?");
                 if (update == WorkerUpdate.Publish)
                 {
+                    Publish(rt);
+                }
+
+                break;
+            }
+
+            case EventMessage { Name: IpcProtocol.Events.DisplayHdr } e:
+            {
+                if (IpcDisplayHdr.FromJson(e.Data, _time.GetUtcNow()) is not { } hdr)
+                {
+                    break;
+                }
+
+                var update = rt.ApplyDisplayHdr(worker.Connection, hdr);
+                if (update == WorkerUpdate.Ignored)
+                {
+                    break;
+                }
+
+                if (update == WorkerUpdate.Publish)
+                {
+                    _logger.LogInformation("Desk {Desk}: display HDR {State} ({Adapter}, {Bits} bits)", rt.Id, hdr.State,
+                        hdr.Adapter ?? "?", hdr.BitsPerColor);
                     Publish(rt);
                 }
 

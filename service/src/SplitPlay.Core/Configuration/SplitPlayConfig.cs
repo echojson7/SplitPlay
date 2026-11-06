@@ -50,6 +50,12 @@ public sealed class HostConfig
     /// gives back what SplitPlay set and leaves the driver alone. See <see cref="Nvidia.NvidiaProfiles"/>.
     /// </summary>
     public bool NvidiaProfiles { get; set; } = true;
+
+    /// <summary>
+    /// Which processor cores desk processes may use: <c>"off"</c> (default) or <c>"auto"</c> (one CCD per desk on a CPU
+    /// with several L3 caches, the P-cores on an Intel hybrid CPU). See <see cref="Host.DeskCorePlanner"/>.
+    /// </summary>
+    public string DeskCores { get; set; } = Host.DeskCoresMode.Off;
 }
 
 /// <summary>One desk (an isolated Windows session streamed to Moonlight).</summary>

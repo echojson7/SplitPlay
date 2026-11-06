@@ -185,9 +185,13 @@ internal sealed class DeskRuntime
                 return WorkerUpdate.Ignored;
             }
 
-            var changed = Hdr is null || Hdr with { UpdatedAt = hdr.UpdatedAt } != hdr;
+            if (Hdr is not null && Hdr with { UpdatedAt = hdr.UpdatedAt } == hdr)
+            {
+                return WorkerUpdate.Applied;  // The same state: keep the time of the last change, as published.
+            }
+
             Hdr = hdr;
-            return changed ? WorkerUpdate.Publish : WorkerUpdate.Applied;
+            return WorkerUpdate.Publish;
         }
     }
 

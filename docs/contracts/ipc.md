@@ -73,9 +73,9 @@ Events by role:
   `data`; the service then drops its only stream, if it has exactly one.
 - worker `mode_requested`: a Moonlight client launched with this mode. The service forwards it to the seat as
   `set_mode`. The worker waits up to 3 s for the desktop size to change and carries on either way.
-- worker `display_hdr`: the HDR state of the session's displays (patch 0019). The worker probes on its first heartbeat
-  and on every fifth one and sends the event whenever the result differs from the last one sent, so once per worker
-  run at least. `state` is `enabled` (a display composes in HDR10, which is what decides whether a stream that asks
+- worker `display_hdr`: the HDR state of the session's displays (patch 0019). The worker probes at start and every 5 s
+  on a thread of its own and sends the event with the next heartbeat whenever the result differs from the last one, so
+  once per worker run at least. `state` is `enabled` (a display composes in HDR10, which is what decides whether a stream that asks
   for HDR is encoded as HDR), `off` (a display supports HDR but it is switched off), `unsupported` (no display
   supports it) or `unknown`. Each display: `name` (GDI device name), `monitor`, `adapter` (the GPU rendering it),
   `hdr_supported`, `hdr_enabled` (Display Configuration API), `limited_by_policy`, `color_mode` (`sdr`, `wcg`, `hdr`),

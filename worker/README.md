@@ -44,7 +44,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0015` NVIDIA profile | the "prefer maximum performance" application profile (`PREFERRED_PSTATE`) is bound to the running executable's file name (`splitplay-worker.exe`) under the profile name "SplitPlay worker" instead of upstream's `sunshine.exe`/"SunshineStream"; `--restore-nvprefs-undo` also deletes that profile. See *NVIDIA driver settings* below |
 | `0016` input thread | input is injected on its own thread (`input_pool`, one thread, MMCSS "Games") instead of Sunshine's shared task-pool thread; key repeat, gamepads, rumble/LED callbacks and touch/pen repeat run there too, so ordering and the input state's synchronisation are upstream's. See *Scheduling* below |
 | `0017` mDNS per desk | the DNS-SD instance is named after `sunshine_name` instead of the host name every desk shares (`net::mdns_desk_instance_name`: ASCII punctuation and spaces become `-`, other UTF-8 is kept, at most 63 bytes on a character boundary; an ASCII fallback ending in the port if Windows refuses a non-ASCII name); `sunshine_name=` is also read from the UTF-8 command line, since the narrow `argv` is in the ANSI code page. See *mDNS* below |
-| `0019` HDR probe | `event display_hdr` with the HDR state of the session's displays (DXGI colour space, Display Configuration API advanced colour / 24H2 HDR info), probed every fifth heartbeat and sent on change; `--self-test` also switches HDR on for each display that is not in HDR and back (`hdr` in `self-test.json`); a stream that asks for HDR on an SDR display logs a warning. Number `0018` is reserved for capture on frame arrival. See *HDR* below |
+| `0019` HDR probe | `event display_hdr` with the HDR state of the session's displays (DXGI colour space, Display Configuration API advanced colour / 24H2 HDR info), probed every 5 s on a thread of its own and sent with the next heartbeat on change; `--self-test` also switches HDR on for each display that is not in HDR and back (`hdr` in `self-test.json`); a stream that asks for HDR on an SDR display logs a warning. Number `0018` is reserved for capture on frame arrival. See *HDR* below |
 
 ### Changing a patch or adding one
 
@@ -339,12 +339,15 @@ in the "Now" group: "On", "Off in Windows" or "Not available". The probe reads, 
 - DXGI (`IDXGIOutput6::GetDesc1`): the colour space. HDR10 (`DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020`) is what
   Sunshine's capture checks before it encodes a stream as HDR, so it alone decides `enabled`;
 - the Display Configuration API: whether the display supports HDR and whether it is on
-  (`DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2` on Windows 11 24H2, the older advanced colour info before).
+  (`DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2` on Windows 11 24H2, the older advanced colour info before). Before 24H2
+  an SDR display that could use auto colour management looks like an HDR display with HDR off, so there support is
+  left unknown (`unknown`) unless HDR is on or the display has no advanced colour at all.
 
 The expected answer on a desk is `unsupported`: the display is Microsoft's RdpIdd, and Windows enables HDR on it only
 for an RDP client that asks for HDR over the GFX pipeline, which the seat does not use. `--self-test` checks it
-actively: it asks Windows to switch HDR on for each display (`DISPLAYCONFIG_SET_HDR_STATE`, then the older
-`SET_ADVANCED_COLOR_STATE`), probes again two seconds later and switches back. In `self-test.json`, `hdr.ok` is true
+actively: it asks Windows to switch HDR on for each display whose HDR is off (`DISPLAYCONFIG_SET_HDR_STATE` where the
+24H2 info answers, the older `SET_ADVANCED_COLOR_STATE` otherwise), probes again two seconds later and switches each
+changed display back with the same call, so an HDR the owner had on is never touched. In `self-test.json`, `hdr.ok` is true
 when a display then composed in HDR10, and `hdr.attempts[].set_result` is the Win32 error Windows returned. The
 desk's picture may flicker during that step. If a desk ever reports `enabled` or `hdr.ok` true, HDR streaming needs no
 patch of its own (upstream Sunshine already encodes HDR10 and sends the metadata); making the seat ask for it is a
@@ -364,7 +367,7 @@ Capture stays DXGI Desktop Duplication and gamepads stay on ViGEmBus with DualSh
 - 500 Hz as a guarantee: the rate is capped by DWM composition in the RDP session (240-250 Hz are realistic, 500 Hz
   only if the lab measures it);
 - HDR: the session's display is Microsoft's RdpIdd, which enables HDR only for an RDP client with HDR over GFX, and the
-  seat runs without GFX. Patch 0019 measures it on every desk (see *HDR* below); a stream that asks for HDR gets SDR;
+  seat runs without GFX. Patch 0019 measures it on every desk (see *HDR* above); a stream that asks for HDR gets SDR;
 - per-session gamepads and DualSense or Xbox Series profiles: ViGEm pads are visible to every session;
 - 5.1/7.1 audio and a microphone: they need an audio driver signed by Microsoft;
 - split-frame encoding for 1440p500: the RTX 5070 has a single NVENC engine.

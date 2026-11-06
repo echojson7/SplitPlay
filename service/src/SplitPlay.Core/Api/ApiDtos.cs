@@ -105,7 +105,8 @@ public sealed record DeskStreamDto
 /// The HDR state of a desk session's display (<c>desk.hdr</c>), from the worker's <c>display_hdr</c> probe.
 /// <see cref="State"/> is <c>enabled</c> (Windows composes the display in HDR10, so a Moonlight client that asks for HDR
 /// gets HDR), <c>off</c> (the display supports HDR but it is switched off), <c>unsupported</c> or <c>unknown</c>; see
-/// <see cref="DeskHdrStates"/>. The other fields describe the desk's first display; null when not reported.
+/// <see cref="DeskHdrStates"/>. The other fields describe the display that decides the state (one in HDR, else one that
+/// supports it, else the first); null when not reported.
 /// </summary>
 public sealed record DeskHdrDto
 {

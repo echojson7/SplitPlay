@@ -37,6 +37,15 @@ enum class RdpState {
 
 std::string_view to_string(RdpState state) noexcept;
 
+// Input-ring events the connector handled since it started (heartbeat metrics).
+struct InputStats {
+  uint64_t sent = 0;           // events turned into RDP input PDUs
+  uint64_t unsupported = 0;    // events this connection cannot carry (e.g. relative motion without server support)
+  uint64_t not_connected = 0;  // events that arrived while no connection was up
+  uint64_t failed = 0;         // events whose PDU could not be sent
+  int32_t keyboard_leds = -1;  // the server's last Set Keyboard Indicators (KBD_SYNC_* bits), -1 = none yet
+};
+
 class IRdpConnector {
  public:
   // Called from the connector's thread. `detail` is a human-readable reason (never secret).
@@ -58,12 +67,15 @@ class IRdpConnector {
   // Resizes the session through the display-control channel. False with `error` set if it is not available.
   virtual bool set_mode(uint32_t width, uint32_t height, std::string* error) = 0;
 
-  // Input forwarded from the worker over the input ring (ARCHITECTURE.md §9 "RDP input sink").
+  // Input forwarded from the worker over the input ring (ARCHITECTURE.md §9 "RDP input sink"). Called from the
+  // seat's input thread. False if the event was not delivered (counted in input_stats()).
   virtual bool inject(const SpInputEvent& event) = 0;
-  // True if the server announced relative mouse support (sets bit0 of SpInputRing::flags).
+  // True if the current connection's server accepts relative mouse PDUs (SP_INPUT_RING_REL_MOUSE). Known once the
+  // connection is up (state logged_on).
   virtual bool supports_relative_mouse() const = 0;
   // Ctrl+Alt+Del into the session. Returns false if the connector cannot do it.
   virtual bool send_sas(std::string* error) = 0;
+  virtual InputStats input_stats() const { return {}; }
 
   virtual void set_state_callback(StateCallback callback) = 0;
   virtual std::string_view name() const = 0;

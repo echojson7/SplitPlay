@@ -73,6 +73,55 @@ public sealed class StreamProfileTests
     }
 
     [Fact]
+    public async Task Rdp_input_is_opt_in_and_reaches_a_running_worker_live()
+    {
+        Assert.Equal("windows", DeskRuntime.ToIpcProfile(new ProfileConfig()).Input); // RDP input waits for lab E
+        Assert.Equal("rdp", DeskRuntime.ToIpcProfile(new ProfileConfig { Input = "rdp" }).Input);
+
+        await using var svc = await TestService.StartAsync();
+        await svc.CreateDeskAsync("desk-1");
+        await svc.PostDeskActionAsync("desk-1", "start");
+        await svc.WaitForStateAsync("desk-1", DeskState.Ready);
+
+        var welcome = svc.Launcher.Received.Select(m => m.Message).OfType<WelcomeMessage>().First(w => w.Rdp is null);
+        Assert.Equal("windows", welcome.Profile!.Input);
+
+        var put = await svc.Client.PutAsync("/api/v1/desks/desk-1", JsonBody("""{"profile":{"input":"rdp"}}"""));
+        Assert.Equal(HttpStatusCode.OK, put.StatusCode);
+        Assert.Equal("rdp", (await NextSetProfileAsync(svc, 0)).Profile!.Input);
+
+        var bad = await svc.Client.PutAsync("/api/v1/desks/desk-1", JsonBody("""{"profile":{"input":"usb"}}"""));
+        Assert.Equal(HttpStatusCode.BadRequest, bad.StatusCode);
+    }
+
+    [Fact]
+    public async Task Ctrl_alt_del_goes_to_the_seat()
+    {
+        await using var svc = await TestService.StartAsync();
+        await svc.CreateDeskAsync("desk-1");
+        var stopped = await svc.Client.PostAsync("/api/v1/desks/desk-1/sas", null);
+        Assert.Equal(HttpStatusCode.Conflict, stopped.StatusCode);
+
+        await svc.PostDeskActionAsync("desk-1", "start");
+        await svc.WaitForStateAsync("desk-1", DeskState.Ready);
+        var sent = await svc.Client.PostAsync("/api/v1/desks/desk-1/sas", null);
+        Assert.Equal(HttpStatusCode.NoContent, sent.StatusCode);
+        Assert.Contains(svc.Launcher.Received, m => m.Message is SendSasMessage);
+        Assert.Equal(HttpStatusCode.NotFound, (await svc.Client.PostAsync("/api/v1/desks/nope/sas", null)).StatusCode);
+    }
+
+    [Fact]
+    public void The_input_path_metric_is_a_desk_metric()
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse("""{"input":"rdp_mixed","input_fallbacks":0}""");
+        var metrics = doc.RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
+        var dto = DeskRuntime.MapMetrics(metrics);
+        Assert.Equal("rdp_mixed", dto.Input);
+        Assert.True(dto.Extra!.ContainsKey("input_fallbacks"));
+        Assert.Null(DeskRuntime.MapMetrics(new Dictionary<string, System.Text.Json.JsonElement>()).Input);
+    }
+
+    [Fact]
     public async Task Auto_composition_follows_the_fastest_desk()
     {
         await using var svc = await TestService.StartAsync();

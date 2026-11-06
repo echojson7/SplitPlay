@@ -135,6 +135,22 @@ describe('DeskSettings', () => {
     expect(cfg.profile.bitrateKbps).toBe(20000)
   })
 
+  it('switches keyboard and mouse to RDP on a running desk and back', async () => {
+    const w = mount(DeskSettings, { props: { desk, running: true } })
+    const select = w.find('select[name="input"]')
+    expect(select.attributes('disabled')).toBeUndefined()
+    expect((select.element as HTMLSelectElement).value).toBe('windows')
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![0]![0] as DeskConfig).profile).not.toHaveProperty('input')
+    await select.setValue('rdp')
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![1]![0] as DeskConfig).profile.input).toBe('rdp')
+    const back = mount(DeskSettings, { props: { desk: { ...desk, profile: { ...desk.profile, input: 'rdp' } } } })
+    await back.find('select[name="input"]').setValue('windows')
+    await back.find('form').trigger('submit')
+    expect((back.emitted('save')![0]![0] as DeskConfig).profile.input).toBe('windows')
+  })
+
   it('sets frame capture on arrival and clears it back to the default', async () => {
     const w = mount(DeskSettings, { props: { desk, running: true } })
     const select = w.find('select[name="captureMode"]')

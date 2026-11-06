@@ -7,6 +7,8 @@
 // - Display control channel for set_mode; legacy graphics (no GFX), client-side decoding switched off.
 // - Session id from WTSEnumerateSessions (user name match, WTSActive, client name match preferred).
 // - Auto-reconnect with backoff; state callbacks drive session_lost/session_restored; gives up after kMaxAttempts.
+// - Input from the input ring as RDP input PDUs (rdp_input.hpp), sent from the seat's input thread while the
+//   connection is up; Ctrl+Alt+Del as its scancode sequence, which the server turns into the SAS.
 #pragma once
 
 #include <atomic>
@@ -17,8 +19,10 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "rdp_connector.hpp"
+#include "rdp_input.hpp"
 #include "splitplay/common/win_util.hpp"
 
 struct rdp_context;
@@ -48,8 +52,9 @@ class FreeRdpConnector final : public IRdpConnector {
 
   bool set_mode(uint32_t width, uint32_t height, std::string* error) override;
   bool inject(const SpInputEvent& event) override;
-  bool supports_relative_mouse() const override { return false; }
+  bool supports_relative_mouse() const override { return relative_mouse_.load(); }
   bool send_sas(std::string* error) override;
+  InputStats input_stats() const override;
 
   void set_state_callback(StateCallback callback) override;
   std::string_view name() const override { return "freerdp"; }
@@ -58,6 +63,7 @@ class FreeRdpConnector final : public IRdpConnector {
   void on_disp_connected(s_disp_client_context* disp);
   void on_disp_disconnected(s_disp_client_context* disp);
   void on_disp_caps(uint32_t max_monitors, uint32_t factor_a, uint32_t factor_b);
+  void on_keyboard_indicators(uint16_t leds) { keyboard_leds_ = leds; }
 
  private:
   void thread_main();
@@ -72,6 +78,11 @@ class FreeRdpConnector final : public IRdpConnector {
   std::string describe_error() const;
   bool credentials_rejected() const;
   bool should_stop() const { return stop_.load() || no_reconnect_.load(); }
+  // Opens (with the server's input capabilities) or closes input for the current context. Takes context_mutex_.
+  void open_input();
+  void close_input();
+  // Sends ops_ over the current context; context_mutex_ must be held and input_open_ set.
+  bool send_ops();
 
   Options options_;
   bool winsock_ = false;
@@ -80,8 +91,17 @@ class FreeRdpConnector final : public IRdpConnector {
   std::string client_name_;
   std::wstring client_name_w_;
 
-  std::mutex context_mutex_;  // guards context_ against disconnect() from other threads
+  std::mutex context_mutex_;  // guards context_ against disconnect() from other threads, and the input state below
   rdp_context* context_ = nullptr;
+  bool input_open_ = false;   // the connection is up: input PDUs can be sent
+  rdp::InputMapper mapper_;
+  std::vector<rdp::Op> ops_;
+  std::atomic<bool> relative_mouse_{false};
+  std::atomic<uint64_t> input_sent_{0};
+  std::atomic<uint64_t> input_unsupported_{0};
+  std::atomic<uint64_t> input_not_connected_{0};
+  std::atomic<uint64_t> input_failed_{0};
+  std::atomic<int32_t> keyboard_leds_{-1};
 
   std::thread thread_;
   std::atomic<bool> stop_{false};

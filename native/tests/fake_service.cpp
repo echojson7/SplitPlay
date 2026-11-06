@@ -346,6 +346,90 @@ bool same_user(const std::wstring& a, const std::string& b) {
              CSTR_EQUAL;
 }
 
+// ---- rdp input: the worker's side of the input ring ------------------------------------------------------------------
+
+// The newest heartbeat's metrics (waits for a fresh one).
+json fresh_metrics(Inbox& inbox) {
+  inbox.drop("heartbeat");
+  auto hb = inbox.next_of("heartbeat", 3s);
+  expect(hb.has_value(), "no heartbeat");
+  const json* metrics = ipc::get_object(hb->body, "metrics");
+  expect(metrics != nullptr, "heartbeat without metrics");
+  return *metrics;
+}
+
+int64_t metric(const json& metrics, const char* key) { return ipc::get_int(metrics, key).value_or(-1); }
+
+// Plays the worker with `input: "rdp"`: writes keyboard and mouse events into the seat's input ring and checks that
+// the seat sends them over its RDP connection and that they reach the session (lock-key LEDs echoed by the server,
+// or the session's last-input time moving).
+void check_rdp_input(Inbox& inbox, const std::string& desk, uint32_t sid) {
+  std::string err;
+  auto ring = shm::InputRingMapping::open(ObjectNamespace::local, desk, &err);
+  expect(ring != nullptr, "cannot open the seat's input ring: " + err);
+  const uint32_t flags = input::get_flags(ring->ring());
+  std::fprintf(stderr, "fake-service: input ring flags 0x%x (ready %d, relative mouse %d)\n", flags,
+               (flags & SP_INPUT_RING_READY) != 0, (flags & SP_INPUT_RING_REL_MOUSE) != 0);
+  expect((flags & SP_INPUT_RING_READY) != 0, "the input ring is not ready after logon");
+
+  const json before = fresh_metrics(inbox);
+  const int64_t leds_before = metric(before, "keyboard_leds");
+  const auto input_before = seat::wts::last_input_time(sid);
+  std::fprintf(stderr, "fake-service: before: %s, last input %lld\n", before.dump().c_str(),
+               static_cast<long long>(input_before.value_or(-1)));
+
+  input::Producer producer(ring->ring());
+  int pushed = 0;
+  auto push = [&](uint32_t type, int32_t a, int32_t b = 0) {
+    SpInputEvent e{};
+    e.qpc = qpc_now();
+    e.type = type;
+    e.a = a;
+    e.b = b;
+    expect(producer.push(e), "the input ring is full");
+    ring->input_ready->set();
+    ++pushed;
+  };
+  // Pointer moves, a wheel notch each way, Shift and Caps Lock (twice, so the session ends as it began).
+  for (int i = 0; i < 20; ++i) push(SP_IN_MOUSE_ABS, 200 + i * 10, 150 + i * 5);
+  push(SP_IN_WHEEL, 120);
+  push(SP_IN_WHEEL, -120);
+  push(SP_IN_KEY, 0x2A);
+  push(SP_IN_KEY, 0x2A, SP_IN_FLAG_UP);
+  push(SP_IN_KEY, 0x3A);  // Caps Lock on
+  push(SP_IN_KEY, 0x3A, SP_IN_FLAG_UP);
+  std::this_thread::sleep_for(1500ms);
+  const json mid = fresh_metrics(inbox);
+  const int64_t leds_mid = metric(mid, "keyboard_leds");
+  push(SP_IN_KEY, 0x3A);  // Caps Lock off
+  push(SP_IN_KEY, 0x3A, SP_IN_FLAG_UP);
+  if (flags & SP_INPUT_RING_REL_MOUSE) {
+    push(SP_IN_MOUSE_REL, 5, -5);
+    push(SP_IN_MOUSE_REL, -5, 5);
+  }
+  push(SP_IN_RELEASE_ALL, 0);
+  std::this_thread::sleep_for(1500ms);
+
+  const json after = fresh_metrics(inbox);
+  const auto input_after = seat::wts::last_input_time(sid);
+  std::fprintf(stderr, "fake-service: after %d events: %s, keyboard LEDs %lld -> %lld -> %lld, last input %lld\n", pushed,
+               after.dump().c_str(), static_cast<long long>(leds_before), static_cast<long long>(leds_mid),
+               static_cast<long long>(metric(after, "keyboard_leds")), static_cast<long long>(input_after.value_or(-1)));
+  expect(metric(after, "input_pending") == 0, "the seat did not drain the input ring");
+  expect(metric(after, "input_sent") - metric(before, "input_sent") == pushed,
+         std::format("the seat sent {} of {} events over RDP", metric(after, "input_sent") - metric(before, "input_sent"),
+                     pushed));
+  expect(metric(after, "input_failed") == 0 && metric(after, "input_not_connected") == 0 &&
+             metric(after, "input_unsupported") == 0,
+         "input events failed: " + after.dump());
+  constexpr int64_t kCapsLock = 0x04;  // KBD_SYNC_CAPS_LOCK
+  const bool leds_toggled = leds_mid >= 0 && ((leds_mid ^ std::max<int64_t>(leds_before, 0)) & kCapsLock) != 0;
+  const bool input_moved = input_before && input_after && *input_after > *input_before;
+  std::fprintf(stderr, "fake-service: Caps Lock LED toggled: %s; session last-input time moved: %s\n",
+               leds_toggled ? "yes" : "no", input_moved ? "yes" : "no");
+  expect(leds_toggled || input_moved, "no sign that the input reached the session (LEDs and last-input time unchanged)");
+}
+
 int run_rdp(const std::string& exe, const RdpScenario& sc) {
   const std::string desk = std::format("rdp-{}", GetCurrentProcessId());
   const std::string pipe_name = control_pipe_name("seat", desk);
@@ -417,8 +501,25 @@ int run_rdp(const std::string& exe, const RdpScenario& sc) {
     expect(r->body.value("ok", false), "set_mode failed: " + r->body.dump());
     send(*transport, ipc::make_request("set_mode", 11, {{"width", 0}}));
     check_error_result(inbox.result(11, 5s), ipc::kErrBadRequest, "set_mode without a size");
+    // Input over RDP, then Ctrl+Alt+Del (the server opens the SAS screen; Escape closes it again).
+    check_rdp_input(inbox, desk, sid);
     send(*transport, ipc::make_request("send_sas", 12));
-    check_error_result(inbox.result(12, 5s), ipc::kErrUnsupported, "send_sas");
+    auto sas = inbox.result(12, 5s);
+    expect(sas && sas->body.value("ok", false), "send_sas failed: " + (sas ? sas->body.dump() : std::string("no answer")));
+    std::this_thread::sleep_for(2s);
+    {
+      auto ring = shm::InputRingMapping::open(ObjectNamespace::local, desk, &err);
+      expect(ring != nullptr, "cannot open the input ring: " + err);
+      input::Producer producer(ring->ring());
+      for (int32_t b : {0, static_cast<int32_t>(SP_IN_FLAG_UP)}) {
+        SpInputEvent e{};
+        e.type = SP_IN_KEY;
+        e.a = 0x01;  // Escape
+        e.b = b;
+        expect(producer.push(e), "the input ring is full");
+        ring->input_ready->set();
+      }
+    }
 
     // Give the session a moment, then make sure no session_lost was reported.
     std::this_thread::sleep_for(3s);
@@ -452,6 +553,11 @@ int run_rdp(const std::string& exe, const RdpScenario& sc) {
     expect(!lost.has_value(), "session_lost after session_restored: " + (lost ? lost->body.dump() : std::string()));
     info = seat::wts::query_session(sid);
     expect(info && info->active(), std::format("session {} is not active after the reconnect", sid));
+    {
+      auto ring = shm::InputRingMapping::open(ObjectNamespace::local, desk, &err);
+      expect(ring != nullptr, "cannot open the input ring: " + err);
+      expect((input::get_flags(ring->ring()) & SP_INPUT_RING_READY) != 0, "the input ring is not ready after the reconnect");
+    }
 
     // shutdown: the seat logs the session off and exits.
     send(*transport, ipc::make_request("shutdown", 100));

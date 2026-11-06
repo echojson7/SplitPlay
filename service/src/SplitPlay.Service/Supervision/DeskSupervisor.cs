@@ -827,6 +827,47 @@ public sealed class DeskSupervisor : IHostedService
         return Start(id);
     }
 
+    /// <summary>
+    /// Ctrl+Alt+Del into the desk session: the seat sends the keys over its RDP connection and the server turns them into
+    /// the secure attention sequence (lock, sign out, change password, Task Manager).
+    /// </summary>
+    public async Task SendSasAsync(string id)
+    {
+        var rt = Find(id);
+        IpcConnection? seat;
+        lock (rt.Gate)
+        {
+            seat = rt.Seat?.Connection;
+        }
+
+        if (seat is null)
+        {
+            throw ApiException.Conflict(ApiErrorCodes.ChildUnavailable, $"desk '{id}' has no RDP connection");
+        }
+
+        ResultMessage result;
+        try
+        {
+            result = await seat.RequestAsync(rid => new SendSasMessage { Id = rid }, TimeSpan.FromMilliseconds(_options.Value.RequestTimeoutMs))
+                .ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            throw new ApiException(StatusCodes.Status504GatewayTimeout, ApiErrorCodes.ChildUnavailable, $"desk '{id}' did not answer in time");
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException or EndOfStreamException or InvalidOperationException)
+        {
+            throw ApiException.Conflict(ApiErrorCodes.ChildUnavailable, $"desk '{id}' connection lost: {ex.Message}");
+        }
+
+        if (!result.Ok)
+        {
+            throw ApiException.Conflict(ApiErrorCodes.ChildError, result.Error?.Message ?? "the seat could not send Ctrl+Alt+Del");
+        }
+
+        _logger.LogInformation("Desk {Desk}: Ctrl+Alt+Del sent", rt.Id);
+    }
+
     /// <summary>Sends a request to the desk's connected child and returns its result.</summary>
     public async Task<ResultMessage> RequestAsync(string id, Func<long, IpcMessage> build)
     {

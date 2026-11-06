@@ -16,6 +16,8 @@ splitplay_add_test(test_capture_ring test_capture_ring.cpp)
 splitplay_add_test(test_ipc_codec test_ipc_codec.cpp)
 splitplay_add_test(test_ipc_client test_ipc_client.cpp)
 splitplay_add_test(test_stub_stages test_stub_stages.cpp)
+splitplay_add_test(test_rdp_input test_rdp_input.cpp "${PROJECT_SOURCE_DIR}/seat/src/rdp_input.cpp")
+target_include_directories(test_rdp_input PRIVATE "${PROJECT_SOURCE_DIR}/seat/src")
 
 # ---- Windows -------------------------------------------------------------------------------------
 if(WIN32)

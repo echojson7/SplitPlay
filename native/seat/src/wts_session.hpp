@@ -32,6 +32,9 @@ std::optional<uint32_t> find_active_session(std::wstring_view user, std::wstring
 // Info for one session id, or std::nullopt if it does not exist.
 std::optional<SessionInfo> query_session(uint32_t id);
 
+// The session's last input (WTSINFO::LastInputTime, FILETIME ticks), or std::nullopt if it cannot be read.
+std::optional<int64_t> last_input_time(uint32_t id);
+
 // WTSLogoffSession without waiting. False with `error` set on failure.
 bool logoff(uint32_t id, std::string* error);
 

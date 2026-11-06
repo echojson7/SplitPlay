@@ -151,10 +151,15 @@ std::unique_ptr<InputRingMapping> InputRingMapping::create(ObjectNamespace ns, c
   const auto security = default_security(ns);
   m->section = SharedSection::create(input_ring_section_name(ns, desk), sizeof(SpInputRing), security, error);
   if (!m->section) return nullptr;
-  if (m->section->existed()) log_warn("input ring {} already existed; reinitialising", m->section->name());
   m->input_ready = NamedEvent::create(input_ready_event_name(ns, desk), /*auto_reset=*/true, security, error);
   if (!m->input_ready) return nullptr;
-  input::init_ring(m->ring(), flags);
+  if (m->section->existed()) {
+    // A worker still maps the ring (the seat restarted): keep its write index valid.
+    const uint64_t dropped = input::reattach_ring(m->ring(), flags);
+    log_warn("input ring {} already existed; reattached ({} queued events dropped)", m->section->name(), dropped);
+  } else {
+    input::init_ring(m->ring(), flags);
+  }
   m->ring()->consumer_pid = GetCurrentProcessId();
   return m;
 }

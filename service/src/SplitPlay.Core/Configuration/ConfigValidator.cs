@@ -375,6 +375,11 @@ public static partial class ConfigValidator
             errors.Add(new($"{path}.captureMode", "must be one of slot, arrival"));
         }
 
+        if (p.Input is not null && !ProfileConfig.Inputs.Contains(p.Input))
+        {
+            errors.Add(new($"{path}.input", "must be one of windows, rdp"));
+        }
+
         if (p.GpuPriority is not null && !GpuPriorities.Contains(p.GpuPriority))
         {
             errors.Add(new($"{path}.gpuPriority", "must be one of normal, high, realtime"));

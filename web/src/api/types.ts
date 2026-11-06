@@ -27,6 +27,9 @@ export type GpuPriority = (typeof GPU_PRIORITIES)[number]
 export const CAPTURE_MODES = ['slot', 'arrival'] as const
 export type CaptureMode = (typeof CAPTURE_MODES)[number]
 
+export const INPUT_SINKS = ['windows', 'rdp'] as const
+export type InputSink = (typeof INPUT_SINKS)[number]
+
 /** Desk streaming profile (config.md `desks[].profile`). */
 export interface DeskProfile {
   fps: number
@@ -40,6 +43,8 @@ export interface DeskProfile {
   pacingMbps?: number
   /** When the worker takes a new frame: at the stream's frame slot (default) or as soon as DWM composes it. */
   captureMode?: CaptureMode
+  /** Keyboard and mouse: SendInput in the session (default) or the seat's RDP connection. */
+  input?: InputSink
   gpuPriority?: GpuPriority
 }
 
@@ -160,6 +165,8 @@ export interface DeskMetrics {
   clients: number
   /** Frames DWM composed per second in the desk session (the real composition rate); null without a stream. */
   captureFps?: number | null
+  /** Where keyboard and mouse go now: windows, rdp, rdp_mixed (game mouse via Windows) or rdp_unavailable. */
+  input?: string | null
   /** The desk session's GPU load (busiest engine, as in Task Manager), percent; from the metrics push, null when not measured. */
   gpuPercent?: number | null
   /** The desk session's video encoder (NVENC) load, percent; null when not measured or the GPU has no encoder. */

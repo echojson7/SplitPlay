@@ -89,6 +89,18 @@ std::vector<SessionInfo> list_sessions(std::string* error) {
   return out;
 }
 
+std::optional<int64_t> last_input_time(uint32_t id) {
+  if (!api().ok) return std::nullopt;
+  LPWSTR buffer = nullptr;
+  DWORD bytes = 0;
+  if (!api().query_information(WTS_CURRENT_SERVER_HANDLE, id, WTSSessionInfo, &buffer, &bytes) || !buffer)
+    return std::nullopt;
+  std::optional<int64_t> value;
+  if (bytes >= sizeof(WTSINFOW)) value = reinterpret_cast<const WTSINFOW*>(buffer)->LastInputTime.QuadPart;
+  api().free_memory(buffer);
+  return value;
+}
+
 std::optional<uint32_t> find_active_session(std::wstring_view user, std::wstring_view client_name) {
   std::optional<uint32_t> by_user;
   for (const SessionInfo& s : list_sessions()) {

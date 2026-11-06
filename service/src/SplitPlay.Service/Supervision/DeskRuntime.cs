@@ -378,6 +378,9 @@ internal sealed class DeskRuntime
                     // null (or anything but a number): no stream, so nothing captures.
                     dto.CaptureFps = number;
                     break;
+                case "input" when value.ValueKind == JsonValueKind.String:
+                    dto.Input = value.GetString();
+                    break;
                 default:
                     dto.Extra ??= [];
                     dto.Extra[key] = value.Clone();
@@ -405,6 +408,7 @@ internal sealed class DeskRuntime
         DpbFrames = p.DpbFrames ?? ProfileConfig.DefaultDpbFrames,
         PacingMbps = p.PacingMbps ?? ProfileConfig.DefaultPacingMbps,
         CaptureMode = p.CaptureMode ?? ProfileConfig.DefaultCaptureMode,
+        Input = p.Input ?? ProfileConfig.DefaultInput,
         GpuPriority = p.GpuPriority,
         GpuLuid = p.GpuLuid,
         CpuSet = p.CpuSet,

@@ -46,6 +46,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0017` mDNS per desk | the DNS-SD instance is named after `sunshine_name` instead of the host name every desk shares (`net::mdns_desk_instance_name`: ASCII punctuation and spaces become `-`, other UTF-8 is kept, at most 63 bytes on a character boundary; an ASCII fallback ending in the port if Windows refuses a non-ASCII name); `sunshine_name=` is also read from the UTF-8 command line, since the narrow `argv` is in the ANSI code page. See *mDNS* below |
 | `0018` capture on arrival | the Profile's `capture_mode` (live): `slot` keeps upstream's DDA loop, `arrival` hands each desktop frame to the encoder as soon as DWM composes it, rate-limited to the stream's fps on average; heartbeats gain `capture_fps`, the session's real composition rate from `AccumulatedFrames`. See *Capture on arrival* below |
 | `0019` HDR probe | `event display_hdr` with the HDR state of the session's displays (DXGI colour space, Display Configuration API advanced colour / 24H2 HDR info), probed every 5 s on a thread of its own and sent with the next heartbeat on change; `--self-test` also switches HDR on for each display that is not in HDR and back (`hdr` in `self-test.json`); a stream that asks for HDR on an SDR display logs a warning. Number `0018` is reserved for capture on frame arrival. See *HDR* below |
+| `0024` RDP input | the Profile's `input` (live): `windows` keeps SendInput, `rdp` writes keyboard and mouse into the seat's input ring (`input_ring.h`), and the seat sends them into the session as RDP input PDUs (no injection flag, UAC and Ctrl+Alt+Del work); relative motion stays on SendInput unless the RDP server takes relative mouse PDUs; any event the ring cannot take goes to SendInput; heartbeats gain `input` and `input_fallbacks`. Numbers `0020`-`0023` are reserved for other Stage 4 patches. See *RDP input* below |
 
 ### Changing a patch or adding one
 
@@ -282,6 +283,28 @@ Heartbeat `metrics.capture_fps` counts the frames DWM composed per second: the s
 skipped). It is the session's real composition rate in both modes, at most 1000 / `DWMFRAMEINTERVAL` and less when the
 desktop changes less often, and `null` while no stream runs.
 
+### RDP input (patch 0024)
+
+The Profile's `input` (string, live, `null` = `windows`) chooses where keyboard and mouse input goes:
+
+- `windows`: upstream's SendInput inside the session (the default until lab E tries `rdp` with games).
+- `rdp`: the input thread writes each event into the desk's input ring (`Global\SplitPlay.InputRing.<desk>`, the MIT
+  contract `input_ring.h`) and signals `Global\SplitPlay.InputReady.<desk>`; the seat sends it into the session over
+  its loopback RDP connection. Keys go as scancodes (upstream's VK to scancode map, `MapVirtualKey` for the rest,
+  Pause as E1 1D 45, Print Screen as E0 37), text as Unicode key events, absolute motion in desktop pixels, buttons and
+  wheels with the cursor position from `GetCursorPos`. Relative motion goes over RDP only when the ring's
+  `SP_INPUT_RING_REL_MOUSE` is set (the server takes relative mouse PDUs); otherwise it stays on SendInput, so games
+  reading raw input keep their deltas.
+
+Every event the ring cannot take goes to SendInput as before: no seat ring yet, the seat's connection is not logged on
+(`SP_INPUT_RING_READY` clear), the seat's process is gone, or the ring is full (`input_fallbacks`). Leaving `rdp`
+queues `SP_IN_RELEASE_ALL`. Touch, pen and gamepads are unchanged.
+
+The input thread is the ring's only producer and makes no system call besides `SetEvent`. The heartbeat thread opens
+the ring (every 2 s until it works; the mapping then stays open, and a restarted seat reattaches to the same section),
+watches the seat's process and reports the metric `input`: `windows`, `rdp`, `rdp_mixed` (relative motion on SendInput)
+or `rdp_unavailable`. A path change is logged.
+
 ### mDNS (patch 0017)
 
 Each desk is its own Moonlight host on the same PC: its own `uniqueid`, certificate and base port. Upstream registered
@@ -401,8 +424,8 @@ Capture stays DXGI Desktop Duplication and gamepads stay on ViGEmBus with DualSh
 
 ## Not done yet
 
-- Frame tracing and the input ring (the contract headers are already on the include path); the profile's
-  `gpu_priority`, `gpu_luid` and `cpu_set`.
+- Frame tracing (the contract header is already on the include path); the profile's `gpu_priority`, `gpu_luid` and
+  `cpu_set`.
 - Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile from each worker (patch 0015);
   with several workers they should move to the service.
 - mDNS with several desks is not yet tested on hardware (lab B): each desk now publishes its own instance (patch

@@ -138,6 +138,8 @@ Worker metric definitions (all over the interval since the previous heartbeat, a
 | `rtt_ms` | ENet round-trip time of the control connection, as ENet measures it from its own pings |
 | `clients` | streams listed in `sessions` |
 | `capture_fps` | frames DWM composed per second in the desk session, as Desktop Duplication reports them (`AccumulatedFrames` of each acquired frame with new content): the real composition rate, whatever `capture_mode` is. `null` while no stream runs |
+| `input` | where keyboard and mouse go now (patch 0024): `windows` (profile `input` is `windows`), `rdp` (all of it over the seat's RDP connection), `rdp_mixed` (relative motion stays on SendInput: the RDP server has no relative mouse PDUs) or `rdp_unavailable` (the ring is not usable now, everything goes to SendInput) |
+| `input_fallbacks` | events that found the input ring full and went to SendInput, since the worker started |
 
 Ordering: the streaming and RTSP threads only queue `client_connected`/`client_disconnected`; the worker's heartbeat
 thread takes the queue and the stream list in one step and writes the queued events, then the heartbeat. So a
@@ -180,6 +182,33 @@ Seat specifics:
 - `set_mode` resizes the session through the RDP display-control channel; `unsupported` when the channel is not
   available (the desk then reports `resolutionPendingRestart`).
 - `shutdown` logs the session off (`WTSLogoffSession`) and disconnects.
+- `send_sas` sends Ctrl+Alt+Del as scancodes over the RDP connection; the server turns the sequence into the secure
+  attention sequence. `unsupported` while no connection is up (and always with the null connector).
+- Seat heartbeat metrics: `session`, `rdp_reconnects`, `input_events` (events read from the ring), `input_seq_gaps`,
+  `input_dropped` and `input_pending` (ring counters), `input_ready` and `input_relative_mouse` (the ring flags below),
+  `input_sent` (events sent as RDP PDUs), `input_unsupported` (events this connection cannot carry, e.g. an X button
+  when the server has no extended mouse PDUs), `input_not_connected`, `input_failed`, and `keyboard_leds` (the
+  server's last Set Keyboard Indicators, `KBD_SYNC_*` bits) once the server sent one.
+
+### RDP input
+
+With the profile's `input: "rdp"` the worker writes keyboard and mouse events into the desk's input ring
+(`Global\SplitPlay.InputRing.<desk>`, [`input_ring.h`](../../native/include/splitplay/input_ring.h)) instead of
+calling SendInput, and the seat sends them into the session as RDP input PDUs over its loopback connection. The
+session sees a real remote keyboard and mouse: no "injected" flag, UAC prompts and Ctrl+Alt+Del work.
+
+- The seat creates the ring at start with no flags. It sets `SP_INPUT_RING_READY` while its connection is logged on,
+  and `SP_INPUT_RING_REL_MOUSE` when the server's input capabilities accept relative mouse PDUs
+  (`INPUT_FLAG_MOUSE_RELATIVE`); both are cleared when the connection drops and when the seat exits.
+- The worker reads the flags before every event. Without `READY` (no seat, connection down), with a seat process
+  that is gone, or with a full ring, the event goes to SendInput as before, so input never stops. Without
+  `REL_MOUSE` relative motion stays on SendInput (raw input keeps its deltas) and clicks and wheel carry the real
+  cursor position (`SP_IN_FLAG_POS`).
+- Keys go as set-1 scancodes (with key repeat), text as Unicode key events, absolute motion in desktop pixels,
+  buttons and wheels as pointer PDUs (relative ones while the pointer moves relatively). Touch, pen and gamepads are
+  unchanged.
+- Leaving `rdp` releases what is held over RDP (`SP_IN_RELEASE_ALL`); the seat also forgets the key state when its
+  connection is rebuilt.
 
 ### Profile object
 
@@ -190,7 +219,7 @@ Tuning parameters applied live (see ARCHITECTURE.md §9). All fields optional; a
   "fps": 120, "width": 1920, "height": 1080,
   "bitrate_kbps": 60000, "codec": "hevc",
   "fec_percent": 20, "min_fps": 15, "dpb_frames": 16,
-  "pacing_mbps": 800, "capture_mode": "slot",
+  "pacing_mbps": 800, "capture_mode": "slot", "input": "windows",
   "gpu_priority": "high",
   "gpu_luid": "0x0000000000012345",
   "cpu_set": [4,5,6,7]
@@ -206,11 +235,12 @@ What the worker applies (worker/README.md, *Stream profile*), from `welcome` and
 | `pacing_mbps` | 1–100000, send pacing of one stream | next frame |
 | `capture_mode` | `"slot"` (take the newest frame at the stream's next frame slot) or `"arrival"` (take each frame as soon as DWM composes it, at most the stream's fps on average) | next frame |
 | `dpb_frames` | 1–16 (AV1 at most 8), 0 = codec default; only for clients that leave the reference count to the host | next stream |
+| `input` | `"windows"` (SendInput in the session) or `"rdp"` (keyboard and mouse into the seat's input ring, sent as RDP input PDUs; see *RDP input* below) | next event |
 
 `null` restores the worker's default (Sunshine's: FEC 20 %, half the stream's fps, 800 Mbit/s, DPB 5 or 8). A value
 of the wrong type or out of range fails `set_profile` with `bad_request` and nothing is applied. The other fields
 are accepted and ignored by the worker (the client picks mode, bitrate and codec). The service always sends these
-five fields, with its defaults where the desk sets none (config.md; `capture_mode` `slot`). The answer lists what happened:
+six fields, with its defaults where the desk sets none (config.md; `capture_mode` `slot`, `input` `windows`). The answer lists what happened:
 
 ```json
 {"type":"result","id":5,"ok":true,"data":{"applied":["fec_percent","min_fps","pacing_mbps"],"next_stream":["dpb_frames"],"not_applied":["fps","width","height","bitrate_kbps","codec","gpu_priority"]}}

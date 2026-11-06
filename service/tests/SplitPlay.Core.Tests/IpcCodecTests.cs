@@ -31,7 +31,7 @@ public sealed class IpcCodecTests
             Id = 5,
             Profile = new IpcProfile
             {
-                FecPercent = 20, MinFps = 15, DpbFrames = 16, PacingMbps = 800, CaptureMode = "arrival", GpuPriority = "high",
+                FecPercent = 20, MinFps = 15, DpbFrames = 16, PacingMbps = 800, CaptureMode = "arrival", Input = "rdp", GpuPriority = "high",
                 GpuLuid = "0x0000000000012345", CpuSet = [4, 5, 6, 7],
             },
         },

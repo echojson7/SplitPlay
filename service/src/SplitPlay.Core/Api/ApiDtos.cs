@@ -70,6 +70,14 @@ public sealed class DeskMetricsDto
     /// </summary>
     public double? CaptureFps { get; set; }
 
+    /// <summary>
+    /// Where the desk's keyboard and mouse go now (worker metric <c>input</c>): <c>windows</c>, <c>rdp</c>,
+    /// <c>rdp_mixed</c> (relative motion stays on SendInput: the RDP server has no relative mouse PDUs) or
+    /// <c>rdp_unavailable</c> (the seat cannot send input now, SendInput is used). Null from an older worker.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Input { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
 }

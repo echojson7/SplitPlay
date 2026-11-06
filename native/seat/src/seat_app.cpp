@@ -19,9 +19,10 @@ SeatApp::SeatApp(SeatOptions options, std::unique_ptr<IRdpConnector> connector)
 }
 
 SeatApp::~SeatApp() {
+  log_set_sink({});
+  publish_input_flags(false);
   SetEvent(stop_event_.get());
   if (input_thread_.joinable()) input_thread_.join();
-  log_set_sink({});
   connector_->disconnect();
   if (client_) client_->stop();
   ipc::secure_wipe(params_.password);
@@ -84,7 +85,16 @@ ipc::HeartbeatInfo SeatApp::heartbeat() {
     SpInputRing* r = input_ring_->ring();
     hb.metrics["input_dropped"] = shm::load_relaxed(r->dropped);
     hb.metrics["input_pending"] = shm::load_acquire(r->write_index) - shm::load_acquire(r->read_index);
+    const uint32_t flags = input::get_flags(r);
+    hb.metrics["input_ready"] = (flags & SP_INPUT_RING_READY) != 0;
+    hb.metrics["input_relative_mouse"] = (flags & SP_INPUT_RING_REL_MOUSE) != 0;
   }
+  const InputStats in = connector_->input_stats();
+  hb.metrics["input_sent"] = in.sent;
+  hb.metrics["input_unsupported"] = in.unsupported;
+  hb.metrics["input_not_connected"] = in.not_connected;
+  hb.metrics["input_failed"] = in.failed;
+  if (in.keyboard_leds >= 0) hb.metrics["keyboard_leds"] = in.keyboard_leds;
   if (auto sid = connector_->session_id()) hb.metrics["session"] = *sid;
   return hb;
 }
@@ -119,8 +129,24 @@ void SeatApp::input_loop() {
   }
 }
 
+void SeatApp::publish_input_flags(bool ready) {
+  if (!input_ring_) return;
+  uint32_t flags = 0;
+  if (ready) {
+    flags = SP_INPUT_RING_READY;
+    if (connector_->supports_relative_mouse()) flags |= SP_INPUT_RING_REL_MOUSE;
+  }
+  const uint32_t old = input::get_flags(input_ring_->ring());
+  if (old == flags) return;
+  input::set_flags(input_ring_->ring(), flags);
+  log_info("input ring: {} (relative mouse {})", ready ? "ready, input goes over RDP" : "not ready",
+           (flags & SP_INPUT_RING_REL_MOUSE) ? "over RDP" : "stays with the worker");
+}
+
 int SeatApp::on_state(const StateEvent& event) {
   log_info("RDP state: {} ({})", to_string(event.state), event.detail);
+  // Only a real RDP connection delivers input; the null connector (tests) never sets the ready flag.
+  publish_input_flags(event.state == RdpState::logged_on);
   switch (event.state) {
     case RdpState::logged_on:
     case RdpState::stub: {
@@ -183,8 +209,8 @@ int SeatApp::run() {
   }
   log_set_sink([this](LogLevel level, std::string_view message) { client_->send_log(to_string(level), message); });
 
-  const uint32_t ring_flags = connector_->supports_relative_mouse() ? 1u : 0u;
-  input_ring_ = shm::InputRingMapping::create(options_.ns, options_.desk, ring_flags, &err);
+  // Not ready until the RDP connection is logged on (publish_input_flags): until then the worker keeps SendInput.
+  input_ring_ = shm::InputRingMapping::create(options_.ns, options_.desk, 0, &err);
   if (!input_ring_) {
     log_error("cannot create the input ring: {}", err);
     log_set_sink({});
@@ -238,6 +264,7 @@ int SeatApp::run() {
   } else if (reason == ipc::ExitReason::disconnected) {
     exit_code = kExitPipeBroken;
   }
+  publish_input_flags(false);  // the worker goes back to SendInput at once
   log_set_sink({});
   SetEvent(stop_event_.get());
   if (input_thread_.joinable()) input_thread_.join();

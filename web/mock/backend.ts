@@ -350,9 +350,17 @@ export class MockBackend {
           gpuPercent: Math.round(34 + 6 * phase),
           encoderPercent: Math.round(11 + 2 * jitter),
           vramMb: 2900 + Math.round(120 * phase),
+          // RDP input: this mock server takes no relative mouse PDUs, like most Windows builds may not.
+          input: p.input === 'rdp' ? 'rdp_mixed' : 'windows',
         }
       } else if (e.desk.state === 'Ready') {
-        e.desk.metrics = { ...IDLE_METRICS, gpuPercent: 2, encoderPercent: 0, vramMb: 640 }
+        e.desk.metrics = {
+          ...IDLE_METRICS,
+          gpuPercent: 2,
+          encoderPercent: 0,
+          vramMb: 640,
+          input: p.input === 'rdp' ? 'rdp_mixed' : 'windows',
+        }
       } else {
         e.desk.metrics = { ...IDLE_METRICS }
       }
@@ -456,7 +464,7 @@ export class MockBackend {
     const pm = /^\/desks\/([^/]+)\/client-pack(?:\/([^/]+))?$/.exec(path)
     if (pm && method === 'GET') return this.clientPack(decodeURIComponent(pm[1]!), pm[2], req.query?.['address'])
 
-    const m = /^\/desks\/([^/]+)(?:\/(start|stop|restart|clients|pair)(?:\/([^/]+))?)?$/.exec(path)
+    const m = /^\/desks\/([^/]+)(?:\/(start|stop|restart|sas|clients|pair)(?:\/([^/]+))?)?$/.exec(path)
     if (m) {
       const id = decodeURIComponent(m[1]!)
       const action = m[2]
@@ -515,6 +523,9 @@ export class MockBackend {
         e.desk.stream = null
         this.schedule(e, ['Stopped'])
         return ok(clone(e.desk), 202)
+      }
+      if (method === 'POST' && action === 'sas') {
+        return running ? { status: 204 } : err(409, 'child_unavailable', 'Desk has no RDP connection')
       }
       if (method === 'POST' && action === 'restart') {
         e.desk.lastError = null

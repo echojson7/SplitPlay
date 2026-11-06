@@ -40,6 +40,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
         "dpbFrames": 16,
         "pacingMbps": 800,
         "captureMode": "arrival",
+        "input": "rdp",
         "gpuPriority": "high"
       }
     }
@@ -125,6 +126,11 @@ Rules:
   half a stream interval later on average) or `arrival` (each frame as soon as DWM composes it, at most `fps` on
   average; worker/README.md, *Capture on arrival*). The default stays `slot` until the lab measures `arrival`. In the
   web UI: Дополнительно → Захват кадра.
+- `profile.input` (live): `windows` (default, SendInput inside the session) or `rdp` (keyboard and mouse go through the
+  seat's RDP connection as a real remote keyboard and mouse: no injection flag, UAC prompts and Ctrl+Alt+Del work;
+  relative mouse motion stays on SendInput when the RDP server has no relative mouse PDUs; ipc.md, *RDP input*). The
+  default stays `windows` until the lab tries `rdp` with games (lab E). In the web UI: Дополнительно → Клавиатура и
+  мышь; the desk page then shows a «Ввод» row with the path in use (`metrics.input`, web-api.md).
 - `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz), 1–100. `0`
   (default, «Частота композиции: Авто»): the service composes at least twice per frame of the fastest desk and never
   slower than 250 Hz: 4 ms up to 125 fps, 3 ms for 126–166 fps (144, 165), 2 ms from 167 fps (240). The fastest desk is the highest

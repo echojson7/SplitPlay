@@ -101,6 +101,9 @@ public sealed class ConfigTests : IDisposable
         Assert.Empty(ConfigValidator.Validate(OneDesk(d => d.Profile.CaptureMode = "arrival")));
         Assert.Empty(ConfigValidator.Validate(OneDesk(d => d.Profile.CaptureMode = "slot")));
         Assert.Contains(ConfigValidator.Validate(OneDesk(d => d.Profile.CaptureMode = "fast")), e => e.Path == "desks[0].profile.captureMode");
+        Assert.Empty(ConfigValidator.Validate(OneDesk(d => d.Profile.Input = "rdp")));
+        Assert.Empty(ConfigValidator.Validate(OneDesk(d => d.Profile.Input = "windows")));
+        Assert.Contains(ConfigValidator.Validate(OneDesk(d => d.Profile.Input = "RDP")), e => e.Path == "desks[0].profile.input");
 
         var config = new SplitPlayConfig();
         config.Host.ComposeIntervalMs = -1;

@@ -5,6 +5,7 @@
 add_executable(splitplay-seat
   src/main.cpp
   src/null_rdp_connector.cpp
+  src/rdp_input.cpp
   src/seat_app.cpp
   src/wts_session.cpp)
 # No wtsapi32 import library: wts_session.cpp resolves it at run time (WinPR defines the same function names).

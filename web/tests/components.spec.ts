@@ -135,6 +135,19 @@ describe('DeskSettings', () => {
     expect(cfg.profile.bitrateKbps).toBe(20000)
   })
 
+  it('sets frame capture on arrival and clears it back to the default', async () => {
+    const w = mount(DeskSettings, { props: { desk, running: true } })
+    const select = w.find('select[name="captureMode"]')
+    expect((select.element as HTMLSelectElement).value).toBe('')
+    expect(select.text()).toContain('Сразу по готовности')
+    await select.setValue('arrival')
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![0]![0] as DeskConfig).profile.captureMode).toBe('arrival')
+    await select.setValue('')
+    await w.find('form').trigger('submit')
+    expect((w.emitted('save')![1]![0] as DeskConfig).profile).not.toHaveProperty('captureMode')
+  })
+
   it('changes the send rate on a running desk and clears it back to the default', async () => {
     const w = mount(DeskSettings, { props: { desk: { ...desk, profile: { ...desk.profile, pacingMbps: 400 } }, running: true } })
     const input = w.find('input[name="pacingMbps"]')

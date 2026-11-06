@@ -374,6 +374,10 @@ internal sealed class DeskRuntime
                 case "clients" when number is not null:
                     dto.Clients = number.Value;
                     break;
+                case "capture_fps":
+                    // null (or anything but a number): no stream, so nothing captures.
+                    dto.CaptureFps = number;
+                    break;
                 default:
                     dto.Extra ??= [];
                     dto.Extra[key] = value.Clone();
@@ -400,6 +404,7 @@ internal sealed class DeskRuntime
         MinFps = p.MinFps ?? Math.Min(ProfileConfig.DefaultMinFps, p.Fps ?? ProfileConfig.DefaultMinFps),
         DpbFrames = p.DpbFrames ?? ProfileConfig.DefaultDpbFrames,
         PacingMbps = p.PacingMbps ?? ProfileConfig.DefaultPacingMbps,
+        CaptureMode = p.CaptureMode ?? ProfileConfig.DefaultCaptureMode,
         GpuPriority = p.GpuPriority,
         GpuLuid = p.GpuLuid,
         CpuSet = p.CpuSet,

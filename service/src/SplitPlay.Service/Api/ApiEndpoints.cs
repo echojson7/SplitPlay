@@ -287,7 +287,7 @@ public static partial class ApiEndpoints
         // ---- host settings (the "host" object of config.json)
         api.MapGet("/host", (ConfigService config) => Results.Json(config.Snapshot().Host, Ctx.HostConfig));
 
-        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, IDeskPlatform platform, SleepGuard sleepGuard,
+        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, DeskSupervisor supervisor, SleepGuard sleepGuard,
             ILoggerFactory loggers) =>
         {
             var host = await ReadBodyAsync(request, Ctx.HostConfig).ConfigureAwait(false);
@@ -305,14 +305,8 @@ public static partial class ApiEndpoints
 
             if (saved.ComposeIntervalMs != before.ComposeIntervalMs)
             {
-                try
-                {
-                    platform.ApplyComposeInterval(saved.ComposeIntervalMs);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HostTuningException or System.Security.SecurityException)
-                {
-                    loggers.CreateLogger("SplitPlay.Api").LogWarning("Could not apply host.composeIntervalMs: {Message}", ex.Message);
-                }
+                // Auto resolves from the desks; the supervisor writes the value only when it changes.
+                supervisor.ApplyComposeInterval();
             }
 
             sleepGuard.Refresh();

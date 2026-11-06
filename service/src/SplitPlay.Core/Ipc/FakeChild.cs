@@ -534,6 +534,16 @@ public static class FakeChild
                 w.WriteStartObject();
                 WriteLive(w, live);
                 w.WriteNumber("clients", clients);
+                if (clients > 0)
+                {
+                    // The composition rate of a busy 240 Hz session.
+                    w.WriteNumber("capture_fps", Math.Round(live.Fps * 2, 1));
+                }
+                else
+                {
+                    w.WriteNull("capture_fps");
+                }
+
                 w.WriteEndObject();
             });
             return element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value, StringComparer.Ordinal);

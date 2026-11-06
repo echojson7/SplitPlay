@@ -14,7 +14,10 @@ public sealed record HostTuningOptions
     /// <summary>Leave <c>ServiceDll</c> alone (CI runners, Windows Server, or when TermWrap is managed by hand).</summary>
     public bool SkipTermWrap { get; init; }
 
-    /// <summary><c>host.composeIntervalMs</c>, written to <c>DWMFRAMEINTERVAL</c>.</summary>
+    /// <summary>
+    /// The interval written to <c>DWMFRAMEINTERVAL</c>, 1–100 ms. <see cref="ComposeInterval.Auto"/> (0) is written as
+    /// <see cref="ComposeInterval.AutoSlowestMs"/>; the service resolves Auto from its desks and updates the value.
+    /// </summary>
     public int ComposeIntervalMs { get; init; } = 4;
 
     /// <summary>
@@ -157,7 +160,7 @@ public sealed class HostTuner
             new("fInheritColorDepth", RdpTcpKey, "fInheritColorDepth", RegValue.DWord(1)),
             new("ColorDepth", RdpTcpKey, "ColorDepth", RegValue.DWord(5)),
             new("bEnumerateHWBeforeSW", PolicyKey, "bEnumerateHWBeforeSW", RegValue.DWord(1)),
-            new("DWMFRAMEINTERVAL", WinStationsKey, "DWMFRAMEINTERVAL", RegValue.DWord((uint)Math.Clamp(options.ComposeIntervalMs, 1, 100))),
+            new("DWMFRAMEINTERVAL", WinStationsKey, "DWMFRAMEINTERVAL", RegValue.DWord((uint)ComposeInterval.Resolve(options.ComposeIntervalMs, 0))),
             new("MaxIdleTime", PolicyKey, "MaxIdleTime", RegValue.DWord(0)),
             new("MaxDisconnectionTime", PolicyKey, "MaxDisconnectionTime", RegValue.DWord(0)),
         };
@@ -430,7 +433,7 @@ public sealed class HostTuner
             return false;
         }
 
-        var desired = RegValue.DWord((uint)Math.Clamp(composeIntervalMs, 1, 100));
+        var desired = RegValue.DWord((uint)ComposeInterval.Resolve(composeIntervalMs, 0));
         _registry.Set(record.Key, record.Name, desired);
         record.Desired = desired;
         SaveState(state);

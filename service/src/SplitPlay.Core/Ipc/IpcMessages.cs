@@ -287,6 +287,9 @@ public sealed record IpcProfile
 
     public int? PacingMbps { get; init; }
 
+    /// <summary><c>capture_mode</c>: <c>slot</c> or <c>arrival</c>.</summary>
+    public string? CaptureMode { get; init; }
+
     public string? GpuPriority { get; init; }
 
     public string? GpuLuid { get; init; }

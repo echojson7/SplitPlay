@@ -76,7 +76,16 @@ function ok(body: unknown, status = 200): MockResponse {
 /** What a worker reports for an RDP desk display: SDR only (Microsoft's RdpIdd without RDP GFX). */
 const DESK_HDR: DeskHdr = { state: 'unsupported', monitor: null, adapter: 'NVIDIA GeForce RTX 5070', bitsPerColor: 8, maxNits: 270 }
 
-const IDLE_METRICS: DeskMetrics = { fps: 0, bitrateKbps: 0, encodeMsP50: 0, encodeMsP99: 0, lossPct: 0, rttMs: null, clients: 0 }
+const IDLE_METRICS: DeskMetrics = {
+  fps: 0,
+  bitrateKbps: 0,
+  encodeMsP50: 0,
+  encodeMsP99: 0,
+  lossPct: 0,
+  rttMs: null,
+  clients: 0,
+  captureFps: null,
+}
 
 function clone<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T
@@ -195,7 +204,7 @@ export class MockBackend {
     lanAccess: false,
     basePortStart: 48089,
     basePortStride: 100,
-    composeIntervalMs: 4,
+    composeIntervalMs: 0,
     logLevel: 'info',
     keepAwake: true,
     deskCores: 'off',
@@ -336,6 +345,7 @@ export class MockBackend {
           encodeMsP99: Math.round((p50 + 1.8 + 1.2 * Math.abs(jitter)) * 10) / 10,
           lossPct: jitter > 0.93 ? Math.round((jitter - 0.9) * 40) / 10 : 0,
           rttMs: Math.round(3 + 1.5 * jitter),
+          captureFps: Math.round(10 * (238 + 3 * jitter)) / 10,
           clients: 1,
           gpuPercent: Math.round(34 + 6 * phase),
           encoderPercent: Math.round(11 + 2 * jitter),
@@ -566,8 +576,8 @@ export class MockBackend {
       const h = req.body as Partial<HostSettings> | undefined
       if (!h || typeof h.webPort !== 'number' || h.webPort < 1 || h.webPort > 65535)
         return err(400, 'invalid_config', 'webPort is invalid')
-      if (typeof h.composeIntervalMs !== 'number' || h.composeIntervalMs < 2 || h.composeIntervalMs > 17)
-        return err(400, 'invalid_config', 'composeIntervalMs must be 2..17')
+      if (typeof h.composeIntervalMs !== 'number' || h.composeIntervalMs < 0 || h.composeIntervalMs > 100)
+        return err(400, 'invalid_config', 'composeIntervalMs must be 0 (auto) or 1..100')
       if (h.deskCores !== undefined && !DESK_CORES_MODES.includes(h.deskCores))
         return err(400, 'invalid_config', 'host.deskCores must be one of off, auto')
       this.host = { ...this.host, ...clone(h) } as HostSettings
@@ -646,7 +656,7 @@ export class MockBackend {
         cpuPercent: Math.round(18 + 9 * streaming + 4 * Math.sin(t / 1300)),
         memoryUsedMb: 14200 + 2100 * streaming,
         memoryTotalMb: 65536,
-        composeHz: Math.round(1000 / this.host.composeIntervalMs),
+        composeHz: Math.round(1000 / (this.host.composeIntervalMs || 4)),
         gpus: [
           {
             luid: '0x0000000000012345',

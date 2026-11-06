@@ -1,0 +1,337 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 21:13:41 +0000
+Subject: [PATCH] splitplay: capture on frame arrival (capture_mode),
+ capture_fps
+
+Upstream's DDA loop sleeps to the stream's next frame slot
+(group start + k/fps) and only then takes the newest desktop frame, so a
+frame DWM composes just after a slot waits up to one stream interval:
+half an interval on average, about 8 ms at 60 fps, unless the game
+happens to be locked to the slots.
+
+New profile field capture_mode (docs/contracts/ipc.md), live:
+
+- slot (default, upstream's loop unchanged);
+- arrival: wait in AcquireNextFrame and hand each frame to the encoder
+  as soon as it comes. Desktop Duplication accumulates what DWM composes
+  while the loop waits, so the frame taken is always the newest. A rate
+  budget keeps the average at the stream's frame rate: frames are at
+  least 3/4 of an interval apart, each spends one interval of budget,
+  and at most one interval can be saved up while frames are sparse.
+  The minimum frame rate is still kept up by the encoder (min_fps).
+
+A change of mode is logged and restarts the pacing state; the profile
+setter is one atomic read per frame.
+
+The heartbeat's metrics gain capture_fps: the frames DWM composed per
+second, summed from DXGI_OUTDUPL_FRAME_INFO::AccumulatedFrames of every
+acquired frame with a present time (pointer-only updates are skipped).
+It is the session's real composition rate whatever the capture mode,
+not the rate the loop samples at, and null while no stream runs.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm4ZuX6wPwWNnDdGg8u
+
+diff --git a/src/platform/windows/display_base.cpp b/src/platform/windows/display_base.cpp
+index b28fbbc5c0f81a8bc70c2ba062747972302619ce..d8a6947826c68e9dbcab146035b8ee9542cddb53 100644
+--- a/src/platform/windows/display_base.cpp
++++ b/src/platform/windows/display_base.cpp
+@@ -3,6 +3,7 @@
+  * @brief Definitions for the Windows display base code.
+  */
+ // standard includes
++#include <algorithm>
+ #include <cmath>
+ #include <thread>
+ 
+@@ -43,6 +44,8 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
+ #include "src/display_device.h"
+ #include "src/logging.h"
+ #include "src/platform/common.h"
++#include "src/splitplay/live_stats.h"
++#include "src/splitplay/profile.h"
+ #include "src/video.h"
+ 
+ namespace platf {
+@@ -160,6 +163,11 @@ namespace platf::dxgi {
+         }
+ 
+         has_frame = true;
++        // SplitPlay: count the frames DWM composed (a pointer-only update has no present time), whatever the
++        // capture mode, so the heartbeat shows the session's real composition rate.
++        if (frame_info.LastPresentTime.QuadPart != 0) {
++          splitplay::live_stats::desktop_frames(frame_info.AccumulatedFrames > 0 ? frame_info.AccumulatedFrames : 1U);
++        }
+         return capture_e::ok;
+       case DXGI_ERROR_WAIT_TIMEOUT:
+         return capture_e::timeout;
+@@ -249,6 +257,16 @@ namespace platf::dxgi {
+ 
+     sleep_overshoot_logger.reset();
+ 
++    // SplitPlay arrival mode (profile `capture_mode`): one stream interval, the shortest gap between two frames
++    // (3/4 of an interval) and the earliest time the rate budget allows the next frame.
++    const auto frame_interval = std::chrono::duration_cast<std::chrono::nanoseconds>(
++      std::chrono::nanoseconds(1s) * client_frame_rate_adjusted.Denominator / client_frame_rate_adjusted.Numerator
++    );
++    const auto min_frame_gap = frame_interval * 3 / 4;
++    std::optional<std::chrono::steady_clock::time_point> last_arrival;
++    std::chrono::steady_clock::time_point arrival_budget {};
++    auto mode = splitplay::profile::capture_mode_e::slot;
++
+     while (true) {
+       // This will return false if the HDR state changes or for any number of other
+       // display or GPU changes. We should reinit to examine the updated state of
+@@ -260,8 +278,41 @@ namespace platf::dxgi {
+       platf::capture_e status = capture_e::ok;
+       std::shared_ptr<img_t> img_out;
+ 
++      if (const auto wanted = splitplay::profile::capture_mode(); wanted != mode) {
++        mode = wanted;
++        frame_pacing_group_start = std::nullopt;
++        frame_pacing_group_frames = 0;
++        last_arrival = std::nullopt;
++        BOOST_LOG(info) << "SplitPlay: capture mode "sv << (mode == splitplay::profile::capture_mode_e::arrival ? "arrival"sv : "slot"sv);
++      }
++
++      if (mode == splitplay::profile::capture_mode_e::arrival) {
++        // Hand each frame to the encoder as soon as DWM composes it instead of at the next frame slot, which costs
++        // half a stream interval on average. Desktop Duplication accumulates what DWM composes while we wait, so the
++        // frame taken after a wait is the newest one. The average stays at the stream's rate: every frame spends one
++        // interval of budget, and at most one interval can be saved up while frames are sparse.
++        if (last_arrival) {
++          const auto earliest = (std::max)(*last_arrival + min_frame_gap, arrival_budget);
++          if (const auto wait = earliest - std::chrono::steady_clock::now(); wait > 0ns) {
++            timer->sleep_for(wait);
++          }
++        }
++
++        status = snapshot(pull_free_image_cb, img_out, 200ms, *cursor);
++        if (status == capture_e::ok && img_out) {
++          const auto now = std::chrono::steady_clock::now();
++          arrival_budget = (std::max)(arrival_budget, now - frame_interval) + frame_interval;
++          last_arrival = now;
++        } else if (status == platf::capture_e::timeout) {
++          // Nothing changes on screen: let the encoding thread at the device lock (see the slot mode below).
++          std::this_thread::sleep_for(10ms);
++        }
++      }
++
+       // Try to continue frame pacing group, snapshot() is called with zero timeout after waiting for client frame interval
+-      if (frame_pacing_group_start) {
++      if (mode == splitplay::profile::capture_mode_e::arrival) {
++        // Frame taken above.
++      } else if (frame_pacing_group_start) {
+         const uint32_t seconds = (uint64_t) frame_pacing_group_frames * client_frame_rate_adjusted.Denominator / client_frame_rate_adjusted.Numerator;
+         const uint32_t remainder = (uint64_t) frame_pacing_group_frames * client_frame_rate_adjusted.Denominator % client_frame_rate_adjusted.Numerator;
+         const auto sleep_target = *frame_pacing_group_start +
+@@ -291,7 +342,8 @@ namespace platf::dxgi {
+       }
+ 
+       // Start new frame pacing group if necessary, snapshot() is called with non-zero timeout
+-      if (status == capture_e::timeout || (status == capture_e::ok && !frame_pacing_group_start)) {
++      if (mode != splitplay::profile::capture_mode_e::arrival &&
++          (status == capture_e::timeout || (status == capture_e::ok && !frame_pacing_group_start))) {
+         status = snapshot(pull_free_image_cb, img_out, 200ms, *cursor);
+ 
+         if (status == capture_e::ok && img_out) {
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index e818d8dad7a0cc703f9d640ca221e932d51ccea5..c9d1a52e39211b41672fa8f8b65da42c2ff20a00 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -97,6 +97,9 @@ namespace splitplay::control {
+       {"dpb_frames", 0, 16, &splitplay::profile::set_dpb_frames, false},
+     };
+ 
++    /// The one string field the worker applies: `slot` (default) or `arrival`, live.
++    constexpr const char *capture_mode_field = "capture_mode";
++
+     /**
+      * @brief Apply the stream settings of a Profile object, all or nothing.
+      *
+@@ -123,6 +126,19 @@ namespace splitplay::control {
+           return std::nullopt;
+         }
+       }
++      std::optional<std::optional<splitplay::profile::capture_mode_e>> capture_mode;  // outer: field present
++      if (const auto it = profile.find(capture_mode_field); it != profile.end()) {
++        if (it->is_null()) {
++          capture_mode.emplace(std::nullopt);
++        } else if (it->is_string() && it->get<std::string>() == "slot") {
++          capture_mode.emplace(splitplay::profile::capture_mode_e::slot);
++        } else if (it->is_string() && it->get<std::string>() == "arrival") {
++          capture_mode.emplace(splitplay::profile::capture_mode_e::arrival);
++        } else {
++          error = std::string {capture_mode_field} + " must be \"slot\" or \"arrival\"";
++          return std::nullopt;
++        }
++      }
+ 
+       json applied = json::array();
+       json next_stream = json::array();
+@@ -144,8 +160,18 @@ namespace splitplay::control {
+           summary += " (next stream)";
+         }
+       }
++      if (capture_mode) {
++        splitplay::profile::set_capture_mode(*capture_mode);
++        applied.push_back(capture_mode_field);
++        summary += ' ';
++        summary += capture_mode_field;
++        summary += '=';
++        summary += !*capture_mode                                                     ? "default" :
++                   **capture_mode == splitplay::profile::capture_mode_e::arrival ? "arrival" :
++                                                                                   "slot";
++      }
+       for (const auto &[key, value] : profile.items()) {
+-        const bool known = std::any_of(std::begin(profile_fields), std::end(profile_fields), [&key](const profile_field_t &field) {
++        const bool known = key == capture_mode_field || std::any_of(std::begin(profile_fields), std::end(profile_fields), [&key](const profile_field_t &field) {
+           return key == field.name;
+         });
+         if (!known) {
+diff --git a/src/splitplay/live_stats.cpp b/src/splitplay/live_stats.cpp
+index 7e1d22163ecab27da08c4392802bc605ae2a04e5..a524e23d9a1ac6e5e34c56f58106f7c0b69e0de4 100644
+--- a/src/splitplay/live_stats.cpp
++++ b/src/splitplay/live_stats.cpp
+@@ -69,6 +69,10 @@ namespace splitplay::live_stats {
+     std::mutex state_mutex;
+     std::vector<std::shared_ptr<session_stats_t>> registry;  ///< Running streams, in start order.
+     std::deque<std::pair<std::string, json>> pending_events;  ///< client_connected/client_disconnected, oldest first.
++    std::atomic<std::uint64_t> composed_frames {0};  ///< Desktop frames DWM composed, as Desktop Duplication reports.
++    // Guarded by report_mutex.
++    std::uint64_t seen_composed = 0;
++    std::chrono::steady_clock::time_point seen_composed_at = std::chrono::steady_clock::now();
+ 
+     double round1(double v) {
+       return std::round(v * 10.0) / 10.0;
+@@ -247,6 +251,10 @@ namespace splitplay::live_stats {
+     }
+   }
+ 
++  void desktop_frames(std::uint32_t composed) noexcept {
++    composed_frames.fetch_add(composed, std::memory_order_relaxed);
++  }
++
+   void report_heartbeat(const event_sink_t &send_event, const heartbeat_sink_t &send_heartbeat) {
+     std::lock_guard order {report_mutex};
+ 
+@@ -312,6 +320,16 @@ namespace splitplay::live_stats {
+     }
+ 
+     const double loss = total_frames > 0 ? std::min(100.0, static_cast<double>(total_lost) * 100.0 / static_cast<double>(total_frames)) : 0;
++
++    // The composition rate is measured over the same interval for the whole desk (one display per worker); without a
++    // stream nothing captures and the rate would read 0, so it is null then.
++    const auto composed_now = composed_frames.load(std::memory_order_relaxed);
++    const auto composed_at = std::chrono::steady_clock::now();
++    const double composed_seconds = std::chrono::duration<double>(composed_at - seen_composed_at).count();
++    const double capture_fps = composed_seconds > 0.05 ? static_cast<double>(composed_now - seen_composed) / composed_seconds : 0;
++    seen_composed = composed_now;
++    seen_composed_at = composed_at;
++
+     json metrics {
+       {"fps", round1(max_fps)},
+       {"bitrate_kbps", total_kbps},
+@@ -320,6 +338,7 @@ namespace splitplay::live_stats {
+       {"loss_pct", round1(loss)},
+       {"rtt_ms", max_rtt >= 0 ? json(max_rtt) : json(nullptr)},
+       {"clients", sessions.size()},
++      {"capture_fps", sessions.empty() ? json(nullptr) : json(round1(capture_fps))},
+     };
+ 
+     // Pipe I/O happens here, on the heartbeat thread, outside state_mutex: events first, then the heartbeat.
+diff --git a/src/splitplay/live_stats.h b/src/splitplay/live_stats.h
+index c781266a12ac384e56b0420f9dc9eae4bd456e48..433ae943bacc0c8bf2064dd0e7fe9ded43341430 100644
+--- a/src/splitplay/live_stats.h
++++ b/src/splitplay/live_stats.h
+@@ -111,6 +111,14 @@ namespace splitplay::live_stats {
+    */
+   void rtt(session_stats_t *stats, std::uint32_t rtt_ms) noexcept;
+ 
++  /**
++   * @brief Desktop Duplication handed over a desktop image with new content (capture thread): `composed` is the
++   *        number of frames DWM composed into it since the previous one (DXGI_OUTDUPL_FRAME_INFO::AccumulatedFrames).
++   *        Their rate is the heartbeat's `capture_fps`, the session's real composition rate, which does not depend
++   *        on how often the capture loop looks. One relaxed atomic add.
++   */
++  void desktop_frames(std::uint32_t composed) noexcept;
++
+   /// Sends one queued event: name and data.
+   using event_sink_t = std::function<void(const std::string &, const nlohmann::json &)>;
+   /// Sends the heartbeat: `metrics` and `sessions`.
+@@ -123,7 +131,8 @@ namespace splitplay::live_stats {
+    *
+    * @param send_event Receives each queued client_connected/client_disconnected event, oldest first.
+    * @param send_heartbeat Receives `metrics` (`fps`, `bitrate_kbps`, `encode_ms_p50`, `encode_ms_p99`, `loss_pct`,
+-   *                       `rtt_ms` (null when no stream has one yet), `clients`) and the `sessions` array.
++   *                       `rtt_ms` (null when no stream has one yet), `clients`, `capture_fps` (null without a
++   *                       stream)) and the `sessions` array.
+    */
+   void report_heartbeat(const event_sink_t &send_event, const heartbeat_sink_t &send_heartbeat);
+ }  // namespace splitplay::live_stats
+diff --git a/src/splitplay/profile.cpp b/src/splitplay/profile.cpp
+index 067a7fda1dc5ef91659a9185dd3c9140a504a8d5..e38b04f2ec299e1a2ee76907760b7e9146724184 100644
+--- a/src/splitplay/profile.cpp
++++ b/src/splitplay/profile.cpp
+@@ -19,6 +19,7 @@ namespace splitplay::profile {
+     std::atomic_int min_fps {unset};
+     std::atomic_int dpb {unset};
+     std::atomic_int pacing_mbps {unset};
++    std::atomic<capture_mode_e> mode {capture_mode_e::slot};
+ 
+     void store(std::atomic_int &target, std::optional<int> value) {
+       target.store(value ? *value : unset, std::memory_order_relaxed);
+@@ -41,6 +42,14 @@ namespace splitplay::profile {
+     store(pacing_mbps, value);
+   }
+ 
++  void set_capture_mode(std::optional<capture_mode_e> value) {
++    mode.store(value.value_or(capture_mode_e::slot), std::memory_order_relaxed);
++  }
++
++  capture_mode_e capture_mode() {
++    return mode.load(std::memory_order_relaxed);
++  }
++
+   int fec_percentage() {
+     const int value = fec_percent.load(std::memory_order_relaxed);
+     return value == unset ? config::stream.fec_percentage : value;
+diff --git a/src/splitplay/profile.h b/src/splitplay/profile.h
+index 7019450522368c9674805789c05fc7137cd4b4ed..eed8fa41f66c0945c1163945d77f18184d1771e0 100644
+--- a/src/splitplay/profile.h
++++ b/src/splitplay/profile.h
+@@ -12,6 +12,7 @@
+  * | `min_fps`     | encode loop, every frame                     | next frame                    |
+  * | `pacing_mbps` | video send, every frame                      | next frame                    |
+  * | `dpb_frames`  | NVENC encoder creation                       | next stream (or encoder reinit) |
++ * | `capture_mode`| DDA capture loop, every frame                | next frame                    |
+  */
+ // SPDX-License-Identifier: GPL-3.0-only
+ #pragma once
+@@ -51,6 +52,25 @@ namespace splitplay::profile {
+    */
+   void set_pacing_mbps(std::optional<int> value);
+ 
++  /**
++   * @brief When the DDA capture loop hands a new desktop frame to the encoder.
++   */
++  enum class capture_mode_e {
++    slot,  ///< Upstream: sleep to the stream's next frame slot, then take the newest frame (default).
++    arrival,  ///< Take each frame as soon as DWM composes it, at most the stream's frame rate on average.
++  };
++
++  /**
++   * @brief Capture mode, std::nullopt: capture_mode_e::slot.
++   * @param value New value or std::nullopt.
++   */
++  void set_capture_mode(std::optional<capture_mode_e> value);
++
++  /**
++   * @return Capture mode for the next frame.
++   */
++  capture_mode_e capture_mode();
++
+   /**
+    * @return FEC percentage for the next frame.
+    */

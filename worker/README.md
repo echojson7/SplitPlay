@@ -44,6 +44,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0015` NVIDIA profile | the "prefer maximum performance" application profile (`PREFERRED_PSTATE`) is bound to the running executable's file name (`splitplay-worker.exe`) under the profile name "SplitPlay worker" instead of upstream's `sunshine.exe`/"SunshineStream"; `--restore-nvprefs-undo` also deletes that profile. See *NVIDIA driver settings* below |
 | `0016` input thread | input is injected on its own thread (`input_pool`, one thread, MMCSS "Games") instead of Sunshine's shared task-pool thread; key repeat, gamepads, rumble/LED callbacks and touch/pen repeat run there too, so ordering and the input state's synchronisation are upstream's. See *Scheduling* below |
 | `0017` mDNS per desk | the DNS-SD instance is named after `sunshine_name` instead of the host name every desk shares (`net::mdns_desk_instance_name`: ASCII punctuation and spaces become `-`, other UTF-8 is kept, at most 63 bytes on a character boundary; an ASCII fallback ending in the port if Windows refuses a non-ASCII name); `sunshine_name=` is also read from the UTF-8 command line, since the narrow `argv` is in the ANSI code page. See *mDNS* below |
+| `0018` capture on arrival | the Profile's `capture_mode` (live): `slot` keeps upstream's DDA loop, `arrival` hands each desktop frame to the encoder as soon as DWM composes it, rate-limited to the stream's fps on average; heartbeats gain `capture_fps`, the session's real composition rate from `AccumulatedFrames`. See *Capture on arrival* below |
 | `0019` HDR probe | `event display_hdr` with the HDR state of the session's displays (DXGI colour space, Display Configuration API advanced colour / 24H2 HDR info), probed every 5 s on a thread of its own and sent with the next heartbeat on change; `--self-test` also switches HDR on for each display that is not in HDR and back (`hdr` in `self-test.json`); a stream that asks for HDR on an SDR display logs a warning. Number `0018` is reserved for capture on frame arrival. See *HDR* below |
 
 ### Changing a patch or adding one
@@ -255,6 +256,32 @@ log); the encoder line in the log shows `dpb=N`. The profile wins over `fec_perc
 `name=value`. `fps`, size, bitrate and codec stay Moonlight's choice; `gpu_priority`, `gpu_luid` and `cpu_set` are
 not applied yet.
 
+### Capture on arrival (patch 0018)
+
+Upstream's DDA loop (`display_base_t::capture`) sleeps to the stream's next frame slot (group start + k/fps) and only
+then takes the newest desktop frame. A frame DWM composes just after a slot waits up to one stream interval: half an
+interval on average, about 8 ms at 60 fps and 4 ms at 120 fps, unless the game happens to be locked to the slots.
+
+The Profile's `capture_mode` (string, live, `null` = default) chooses the loop:
+
+| Value | Loop |
+|---|---|
+| `slot` (default) | upstream's, unchanged |
+| `arrival` | waits in `AcquireNextFrame` and hands each frame to the encoder as soon as it comes |
+
+In `arrival` mode Desktop Duplication accumulates what DWM composes while the loop waits, so the frame taken is always
+the newest. A rate budget keeps the average at the stream's frame rate: two frames are at least 3/4 of an interval
+apart, every frame spends one interval of budget, and at most one interval can be saved up while frames are sparse.
+The encoder still repeats the last frame to keep `min_fps` up. Uneven frame times are possible when the game is not
+locked to the stream rate; a client with V-Sync off or VRR shows them as they are, Moonlight's frame pacing option may
+smooth them at the cost of the latency won. The service sends `slot` until the lab measures `arrival` on real
+hardware (stage 4 plan, lab A). A change is logged (`SplitPlay: capture mode arrival`).
+
+Heartbeat `metrics.capture_fps` counts the frames DWM composed per second: the sum of
+`DXGI_OUTDUPL_FRAME_INFO::AccumulatedFrames` over every acquired frame with a present time (pointer-only updates are
+skipped). It is the session's real composition rate in both modes, at most 1000 / `DWMFRAMEINTERVAL` and less when the
+desktop changes less often, and `null` while no stream runs.
+
 ### mDNS (patch 0017)
 
 Each desk is its own Moonlight host on the same PC: its own `uniqueid`, certificate and base port. Upstream registered
@@ -374,8 +401,8 @@ Capture stays DXGI Desktop Duplication and gamepads stay on ViGEmBus with DualSh
 
 ## Not done yet
 
-- Frame tracing and the input ring (the contract headers are already on the include path); capturing on frame
-  arrival; the profile's `gpu_priority`, `gpu_luid` and `cpu_set`.
+- Frame tracing and the input ring (the contract headers are already on the include path); the profile's
+  `gpu_priority`, `gpu_luid` and `cpu_set`.
 - Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile from each worker (patch 0015);
   with several workers they should move to the service.
 - mDNS with several desks is not yet tested on hardware (lab B): each desk now publishes its own instance (patch

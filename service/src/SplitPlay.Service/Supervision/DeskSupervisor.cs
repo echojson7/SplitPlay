@@ -60,6 +60,7 @@ public sealed class DeskSupervisor : IHostedService
 
     // Power state: _sleep completes when the PC goes to sleep, _wake when it is awake (again).
     private readonly RequiredServicesStarter _requiredServices;
+    private readonly NvidiaDriverSettings _nvidia;
     private Task _startup = Task.CompletedTask;
     private readonly object _powerGate = new();
     private TaskCompletionSource _sleep = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -67,8 +68,9 @@ public sealed class DeskSupervisor : IHostedService
 
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
-        PowerEvents power, RequiredServicesStarter requiredServices)
+        PowerEvents power, RequiredServicesStarter requiredServices, NvidiaDriverSettings nvidia)
     {
+        _nvidia = nvidia;
         ArgumentNullException.ThrowIfNull(power);
         power.Changed += OnPowerChange;
         _requiredServices = requiredServices;
@@ -1148,6 +1150,10 @@ public sealed class DeskSupervisor : IHostedService
             // Went to sleep while the session came up: start the worker after resume.
             return PausedForSleep;
         }
+
+        // The driver settings the worker relies on (patch 0020: workers no longer set them): checked again before every
+        // start, so that a driver update or a reset in NVIDIA Control Panel is repaired. Failures are only logged.
+        await Task.Run(() => _nvidia.EnsureApplied($"desk {rt.Id}"), stop).ConfigureAwait(false);
 
         if (await PrepareNetworkAsync(rt, config, stop).ConfigureAwait(false) is { } busy)
         {

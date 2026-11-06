@@ -288,7 +288,7 @@ public static partial class ApiEndpoints
         api.MapGet("/host", (ConfigService config) => Results.Json(config.Snapshot().Host, Ctx.HostConfig));
 
         api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, IDeskPlatform platform, SleepGuard sleepGuard,
-            ILoggerFactory loggers) =>
+            NvidiaDriverSettings nvidia, ILoggerFactory loggers) =>
         {
             var host = await ReadBodyAsync(request, Ctx.HostConfig).ConfigureAwait(false);
             var before = config.Snapshot().Host;
@@ -316,6 +316,11 @@ public static partial class ApiEndpoints
             }
 
             sleepGuard.Refresh();
+            if (saved.NvidiaProfiles != before.NvidiaProfiles)
+            {
+                await Task.Run(() => nvidia.EnsureApplied("host.nvidiaProfiles changed")).ConfigureAwait(false);
+            }
+
             if (saved.LanAccess != before.LanAccess)
             {
                 await firewall.SetWebUiRuleEnabledAsync(saved.LanAccess).ConfigureAwait(false);

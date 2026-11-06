@@ -905,7 +905,8 @@ begin
     end;
     { With the desks stopped: undo what each desk changed (its Steam values in the desk user's hive, its sign-in screen
       entry and firewall rules) and, when asked, delete the accounts SplitPlay created. Accounts SplitPlay did not
-      create are never deleted. }
+      create are never deleted. It also puts the NVIDIA driver settings back (the "SplitPlay worker" profile, and the
+      global value recorded by the service or left in an older worker's undo file); nothing without an NVIDIA driver. }
     Params := 'cleanup';
     if DeleteDeskAccounts then
       Params := Params + ' --delete-accounts';
@@ -924,9 +925,6 @@ begin
       UninstallRebootRequired := True;
     { After the service is gone, so that no worker holds a ViGEm pad any more. }
     UninstallViGEmBus;
-    { With every worker stopped: put the NVIDIA driver settings back (the global value a killed worker left recorded in
-      its undo file, and the workers' "SplitPlay worker" application profile). Nothing happens without an NVIDIA driver. }
-    RunHidden(ExpandConstant('{app}\worker\splitplay-worker.exe'), '--desk-dir "' + ExpandConstant('{tmp}\worker') + '" --restore-nvprefs-undo');
     RunHidden(SysTool('netsh.exe'), 'advfirewall firewall delete rule name="' + FirewallRuleWeb + '"');
     { netsh cannot delete by wildcard. }
     RunHidden(SysTool('WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' +

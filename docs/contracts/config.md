@@ -14,7 +14,8 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
     "basePortStride": 100,
     "composeIntervalMs": 4,
     "logLevel": "info",
-    "keepAwake": true
+    "keepAwake": true,
+    "nvidiaProfiles": true
   },
   "desks": [
     {
@@ -82,7 +83,7 @@ Rules:
   the commit in `worker/upstream.lock`), because the worker runs as SYSTEM:
   - encoder and codec: `encoder`, `hevc_mode`, `av1_mode`, `qp`, `min_threads`, `sw_preset`, `sw_tune`, `nvenc_preset`,
     `nvenc_vbv_increase`, `nvenc_spatial_aq`, `nvenc_twopass`, `nvenc_h264_cavlc`, `nvenc_split_encode`,
-    `nvenc_realtime_hags`, `nvenc_latency_over_power`, `qsv_preset`, `qsv_coder`, `qsv_slow_hevc`, `amd_quality`,
+    `nvenc_realtime_hags`, `qsv_preset`, `qsv_coder`, `qsv_slow_hevc`, `amd_quality`,
     `amd_rc`, `amd_coder`, `amd_usage`, `amd_preanalysis`, `amd_vbaq`, `amd_enforce_hrd`;
   - rate control and frame rate: `max_bitrate`, `minimum_fps_target`, `fec_percentage`;
   - audio: `stream_audio`;
@@ -123,3 +124,11 @@ Rules:
   hand still works: before sleep every worker is shut down and its desk waits (state `Recovering`, not a failure, the
   seat and session are kept); after resume each paused desk gets a new worker (NVENC and capture are recreated).
   In the web UI: Settings → Power.
+- `host.nvidiaProfiles` (default `true`; left out = `true`): the service manages the NVIDIA driver settings through
+  NvAPI (the workers leave them alone since worker patch 0020): the application profile "SplitPlay worker" with
+  "prefer maximum performance" for `splitplay-worker.exe` (kept while SplitPlay is installed), and, while the service
+  runs, the global "Vulkan/OpenGL present method: prefer layered on DXGI swapchain". Before its first change the
+  service records the previous value in `nvidia-profiles.json` in the data folder; it gives the global value back when it
+  stops and everything on uninstall, unless the owner changed the value since. `false` gives everything back at once
+  and leaves the driver alone. Replaces the per-desk `nvenc_latency_over_power`, which is no longer accepted (one
+  shared driver database cannot hold a value per desk).

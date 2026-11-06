@@ -44,6 +44,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0015` NVIDIA profile | the "prefer maximum performance" application profile (`PREFERRED_PSTATE`) is bound to the running executable's file name (`splitplay-worker.exe`) under the profile name "SplitPlay worker" instead of upstream's `sunshine.exe`/"SunshineStream"; `--restore-nvprefs-undo` also deletes that profile. See *NVIDIA driver settings* below |
 | `0016` input thread | input is injected on its own thread (`input_pool`, one thread, MMCSS "Games") instead of Sunshine's shared task-pool thread; key repeat, gamepads, rumble/LED callbacks and touch/pen repeat run there too, so ordering and the input state's synchronisation are upstream's. See *Scheduling* below |
 | `0017` mDNS per desk | the DNS-SD instance is named after `sunshine_name` instead of the host name every desk shares (`net::mdns_desk_instance_name`: ASCII punctuation and spaces become `-`, other UTF-8 is kept, at most 63 bytes on a character boundary; an ASCII fallback ending in the port if Windows refuses a non-ASCII name); `sunshine_name=` is also read from the UTF-8 command line, since the narrow `argv` is in the ANSI code page. See *mDNS* below |
+| `0020` NVIDIA settings outside | no NvAPI driver settings at start-up, at stream start or at exit: the SplitPlay service owns them (one writer for every desk, with its own record of the previous values); `--restore-nvprefs-undo` stays for what workers before this patch left behind. See *NVIDIA driver settings* below |
 
 ### Changing a patch or adding one
 
@@ -306,29 +307,29 @@ timer resolution), priority class above normal (high while streaming), MMCSS "Ga
   the DualShock 4 report timer, touch and pen repeat. At shutdown the thread runs what is still queued and ends before
   the input backend is released.
 
-### NVIDIA driver settings (patch 0015)
+### NVIDIA driver settings (patches 0015 and 0020)
 
-With an NVIDIA driver, every worker start (and every stream start) checks two driver settings through NvAPI DRS, as
-upstream Sunshine does:
+The worker does not change the NVIDIA driver settings (patch 0020). Upstream Sunshine changes them from every
+process at start-up, again at every stream start, and restores the global one at exit; with one worker per desk that
+raced on the shared driver database, and the first worker to exit restored the global value under desks that were
+still streaming. The SplitPlay service is now the only writer (`SplitPlay.Core.Nvidia.NvidiaProfiles`, NvAPI DRS):
 
-| Setting | Where | Option (default) | Undone |
+| Setting | Where | When | Undone |
 |---|---|---|---|
-| `PREFERRED_PSTATE` = prefer maximum performance | application profile "SplitPlay worker" for `splitplay-worker.exe` | `nvenc_latency_over_power` (on; `disabled` removes it) | the profile is deleted by `--restore-nvprefs-undo` |
-| `OGL_CPL_PREFER_DXPRESENT` = prefer layered on DXGI swapchain (Vulkan/OpenGL present method) | **global** base profile | `nvenc_opengl_vulkan_on_dxgi` (on; `disabled` leaves it alone) | the previous value is written to `%ProgramData%\Sunshine\nvprefs_undo.json` before the change and restored from it |
+| `PREFERRED_PSTATE` = prefer maximum performance | application profile "SplitPlay worker" for `splitplay-worker.exe` | created at service start, checked before every worker start | the profile is deleted on uninstall |
+| `OGL_CPL_PREFER_DXPRESENT` = prefer layered on DXGI swapchain (Vulkan/OpenGL present method) | **global** base profile | set at service start, checked before every worker start | given back when the service stops and on uninstall |
 
-The global value is restored when the worker that changed it exits, at the next worker start when a worker was killed
-before it could restore it, and by `splitplay-worker.exe --restore-nvprefs-undo`, which also deletes the application
-profile. The SplitPlay uninstaller runs that command once the service and every worker have stopped, so uninstalling
-leaves the driver database as it was found (a value someone changed after the worker set it is left alone, as
-upstream does). The undo file is upstream's, so a co-installed Sunshine and the workers keep one record of the original
-value.
+Before its first change the service writes the previous value (or "not set") to `nvidia-profiles.json` in its data
+folder; a value the owner changed after SplitPlay set it is left alone when it is given back, as upstream does. The
+host setting `nvidiaProfiles` (`config.md`) turns all of it off and gives everything back. The per-desk
+`nvenc_latency_over_power` and `nvenc_opengl_vulkan_on_dxgi` do nothing in the worker any more.
 
-All desks share both settings. The first worker to change the global value owns the undo file and restores the value
-when it exits, even if other desks still run; another desk sets it again (with a new undo file) at its next stream
-start. A worker that finds the undo file held by a running worker logs that as info and leaves it alone; when
-two workers create the profile at the same time, the second reloads the driver settings and retries once. A desk
-with `nvenc_latency_over_power=disabled` removes the profile's setting for every desk until another desk
-starts. Both settle once the service owns driver profiles (below).
+Upgrading from workers before patch 0020: the service adopts their "SplitPlay worker" profile (patch 0015 bound it to
+the worker's own file name instead of upstream's `sunshine.exe`, under its own name so that a co-installed Sunshine's
+"SunshineStream" is left alone), and takes over their undo file `%ProgramData%\Sunshine\nvprefs_undo.json` when no
+running process holds it: the original global value moves into the service's record and the file is deleted.
+`splitplay-worker.exe --restore-nvprefs-undo` still restores from that file and deletes the profile by hand; the
+uninstaller no longer needs it (`SplitPlay.Service.exe cleanup` does both).
 
 ## Not possible without drivers of our own
 

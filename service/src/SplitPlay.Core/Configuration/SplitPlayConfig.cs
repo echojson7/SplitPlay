@@ -43,6 +43,13 @@ public sealed class HostConfig
 
     /// <summary>Keep the PC from sleeping on its own while a Moonlight client streams from any desk (default true).</summary>
     public bool KeepAwake { get; set; } = true;
+
+    /// <summary>
+    /// Let the service manage the NVIDIA driver settings (default true): "prefer maximum performance" for the workers
+    /// and, while the service runs, the global Vulkan/OpenGL present method "prefer layered on DXGI swapchain". False
+    /// gives back what SplitPlay set and leaves the driver alone. See <see cref="Nvidia.NvidiaProfiles"/>.
+    /// </summary>
+    public bool NvidiaProfiles { get; set; } = true;
 }
 
 /// <summary>One desk (an isolated Windows session streamed to Moonlight).</summary>

@@ -192,6 +192,7 @@ export class MockBackend {
     composeIntervalMs: 4,
     logLevel: 'info',
     keepAwake: true,
+    nvidiaProfiles: true,
   }
   private clientSeq = 1
   private readonly services = new Map<string, ServiceEntry>()

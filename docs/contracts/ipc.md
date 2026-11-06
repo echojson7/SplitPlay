@@ -52,7 +52,7 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 ```json
 {"type":"hello","protocol":1,"role":"worker","desk":"desk-1","pid":1234,"version":"0.1.0","session":3}
 {"type":"ready","ports":{"base":48089}}
-{"type":"heartbeat","seq":17,"state":"idle","metrics":{"fps":0,"bitrate_kbps":0,"encode_ms_p50":0,"encode_ms_p99":0,"loss_pct":0,"rtt_ms":null,"clients":0},"sessions":[]}
+{"type":"heartbeat","seq":17,"state":"idle","metrics":{"fps":0,"bitrate_kbps":0,"encode_ms_p50":0,"encode_ms_p99":0,"loss_pct":0,"rtt_ms":null,"clients":0},"sessions":[],"pairing":null}
 {"type":"log","level":"info","message":"..."}
 {"type":"event","name":"client_connected","data":{"id":2,"client":"Living room PC","client_uuid":"…","address":"192.168.1.37","width":1920,"height":1080,"fps_requested":120,"codec":"hevc","bitrate_kbps_requested":50000,"hdr":false,"started_at":"2026-10-29T18:00:00Z"}}
 {"type":"event","name":"client_disconnected","data":{ …same fields as client_connected… }}
@@ -87,6 +87,19 @@ Events by role:
 
 `state` is a free-form short string for the UI (`idle`, `streaming`, `connecting`, `logged_on`).
 `metrics` keys are optional; the service passes unknown keys through to the Web API unchanged.
+
+#### Waiting PIN (worker)
+
+```json
+{"type":"heartbeat","seq":18,"state":"idle","metrics":{ … },"sessions":[],"pairing":{"address":"192.168.1.37","since":"2026-11-06T21:00:00Z"}}
+```
+
+`pairing` is `null` while no Moonlight client waits for a PIN. When a client starts pairing (Moonlight shows the PIN
+and waits), it is `{address, since}`: the client's IP address (IPv4-mapped IPv6 as plain IPv4) and when the request
+arrived (UTC, ISO 8601, whole seconds); with several, the newest. It goes back to `null` once `pair` hands a PIN over
+(whether or not it matches: Moonlight reports a wrong PIN itself), when the pairing ends or fails, and after 5 minutes
+without an answer. A worker without the field (before patch 0021) never reports a waiting client. The service shows
+the request as the desk's `pinRequest` (web-api.md) and drops it when the worker stops or a `pair` succeeds.
 
 #### Heartbeat with a stream (worker)
 

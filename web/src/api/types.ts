@@ -174,6 +174,13 @@ export interface DeskStream {
   startedAt?: string | null
 }
 
+/** A Moonlight client that shows a PIN and waits for it (`desk.pinRequest`). */
+export interface DeskPinRequest {
+  /** Client IP address; null when unknown. */
+  address: string | null
+  since: string
+}
+
 /** Desk object as returned by GET /desks and GET /desks/{id}. */
 export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   basePort: number
@@ -188,6 +195,8 @@ export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   metrics: DeskMetrics
   /** The stream being served; null (or absent from older services) when nobody is connected. */
   stream?: DeskStream | null
+  /** A Moonlight client waiting for its PIN; null (or absent from older services) when none is. */
+  pinRequest?: DeskPinRequest | null
   lastError: string | null
 }
 

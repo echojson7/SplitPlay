@@ -155,6 +155,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
   "profile": { "fps": 120, "width": 1920, "height": 1080, "bitrateKbps": 60000, "codec": "hevc" },
   "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": null, "clients": 0 },
   "stream": null,
+  "pinRequest": null,
   "lastError": null
 }
 ```
@@ -179,6 +180,12 @@ not know it; `width`, `height`, `fps`, `codec`, `bitrateKbps` and `hdr` are what
 client has connected the stream's control channel and changes on the worker's `client_connected`/`client_disconnected`
 events and heartbeats (ipc.md), and is cleared when the worker stops or
 restarts. `state` follows it: `Ready` → `Streaming` while a stream runs, back to `Ready` when the last one ends.
+
+`pinRequest` is a Moonlight client waiting for its PIN on this desk, `null` otherwise:
+`{"address":"192.168.1.37","since":"2026-11-06T21:00:00+00:00"}` (the worker's heartbeat `pairing`, ipc.md). The UI
+shows one "Moonlight is waiting for a PIN" row per such desk with the PIN field, and the tray notifies the console
+user. It is cleared at once by a successful `POST /desks/{id}/pair` and when the worker stops or restarts. A worker
+before patch 0021 never reports one; the desk page's PIN row works with every worker.
 
 `metrics` are the worker's live numbers over the last second (definitions in ipc.md): `fps` and `bitrateKbps` actually
 sent, `encodeMsP50`/`encodeMsP99` host processing latency (capture to encoded frame), `lossPct` frames the client

@@ -390,6 +390,7 @@ public static partial class ApiEndpoints
 
             s.Get(id);
             EnsureOk(await s.RequestAsync(id, rid => new PairMessage { Id = rid, Pin = body.Pin, Name = body.Name }).ConfigureAwait(false));
+            s.PinDelivered(id);
             return Results.NoContent();
         });
 

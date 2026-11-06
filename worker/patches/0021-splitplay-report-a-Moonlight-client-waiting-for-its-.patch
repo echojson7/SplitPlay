@@ -1,0 +1,223 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 6 Nov 2026 21:13:29 +0000
+Subject: [PATCH] splitplay: report a Moonlight client waiting for its PIN in
+ heartbeats
+
+Moonlight starts pairing with getservercert and keeps the request open
+until the host user types the PIN the client shows. Upstream only flips
+the tray icon (no tray in a desk). The HTTP thread now marks the waiting
+request (client address, since) and the heartbeat carries it as
+"pairing": null or {"address","since"} (docs/contracts/ipc.md), so
+the service can ask for the PIN in one place and the console tray can
+notify the owner.
+
+The mark goes when nvhttp::pin() hands the PIN over, when the pairing
+session is removed (finished, failed, replaced) and, as a last resort,
+after five minutes: Sunshine never notices a client that gave up.
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index 1ace173bd7e3729a8ee9c7d68beb7a20d3f61e96..cdf846851c3614c6ac71b20e560daafe79234162 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -181,6 +181,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.h"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/pairing.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/pairing.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/profile.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/profile.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/scheduling.cpp"
+diff --git a/src/nvhttp.cpp b/src/nvhttp.cpp
+index 9a8d33cedf351ba2a076dc05876bb63e9be934d4..0bfcf85a9ef4f9e1a2745baaf34d83c7db9ecc25 100644
+--- a/src/nvhttp.cpp
++++ b/src/nvhttp.cpp
+@@ -36,6 +36,9 @@
+ #include "uuid.h"
+ #include "video.h"
+ 
++// SplitPlay includes
++#include "splitplay/pairing.h"
++
+ using namespace std::literals;
+ 
+ namespace nvhttp {
+@@ -428,6 +431,8 @@ namespace nvhttp {
+   }
+ 
+   void remove_session(const pair_session_t &sess) {
++    // SplitPlay: a removed pairing session waits for no PIN (docs/contracts/ipc.md, heartbeat "pairing").
++    splitplay::pairing::answered(sess.client.uniqueID);
+     map_id_sess.erase(sess.client.uniqueID);
+   }
+ 
+@@ -744,6 +749,8 @@ namespace nvhttp {
+ #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
+           system_tray::update_tray_require_pin();
+ #endif
++          // SplitPlay: the service asks for the PIN and the tray says so (docs/contracts/ipc.md, heartbeat "pairing").
++          splitplay::pairing::requested(ptr->first, net::addr_to_normalized_string(request->remote_endpoint().address()));
+           ptr->second.async_insert_pin.response = std::move(response);
+ 
+           fg.disable();
+@@ -823,6 +830,8 @@ namespace nvhttp {
+ 
+     // reset async_response
+     async_response = std::decay_t<decltype(async_response.left())>();
++    // SplitPlay: the PIN is handed over; the client goes on with the challenges (or fails them on a wrong PIN).
++    splitplay::pairing::answered(sess.client.uniqueID);
+     // response to the current request
+     return true;
+   }
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index e818d8dad7a0cc703f9d640ca221e932d51ccea5..ce6c7b0e51d1318c9dd492196c186a50cad23feb 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -31,6 +31,7 @@
+ #include "control_client.h"
+ #include "live_stats.h"
+ #include "options.h"
++#include "pairing.h"
+ #include "profile.h"
+ #include "src/config.h"
+ #include "src/entry_handler.h"
+@@ -396,6 +397,7 @@ namespace splitplay::control {
+                 {"state", !ready ? "starting" : (streaming ? "streaming" : "idle")},
+                 {"metrics", std::move(metrics)},
+                 {"sessions", std::move(sessions)},
++                {"pairing", pairing::report()},
+               });
+             }
+           );
+diff --git a/src/splitplay/pairing.cpp b/src/splitplay/pairing.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..6f8c1706626bb1eb9d19dafadeadd24925095950
+--- /dev/null
++++ b/src/splitplay/pairing.cpp
+@@ -0,0 +1,72 @@
++/**
++ * @file src/splitplay/pairing.cpp
++ * @brief A Moonlight client waiting for its PIN, reported in the SplitPlay heartbeat (docs/contracts/ipc.md).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++// standard includes
++#include <cstdio>
++#include <map>
++#include <mutex>
++
++// local includes
++#include "pairing.h"
++
++using json = nlohmann::json;
++
++namespace splitplay::pairing {
++  namespace {
++    struct request_t {
++      std::string address;
++      std::chrono::system_clock::time_point since;  ///< Reported to the service.
++      std::chrono::steady_clock::time_point started;  ///< Ages the request; immune to clock changes.
++    };
++
++    std::mutex requests_mutex;
++    std::map<std::string, request_t> requests;  ///< Waiting requests by pairing session key.
++
++    std::string iso_time(std::chrono::system_clock::time_point tp) {
++      // Calendar arithmetic only (C++20 <chrono>): no gmtime and no platform API.
++      using namespace std::chrono;
++      const auto secs = floor<seconds>(tp);
++      const auto day = floor<days>(secs);
++      const year_month_day ymd {day};
++      const hh_mm_ss hms {secs - day};
++      char buf[32] {};
++      std::snprintf(buf, sizeof(buf), "%04d-%02u-%02uT%02d:%02d:%02dZ", static_cast<int>(ymd.year()), static_cast<unsigned>(ymd.month()), static_cast<unsigned>(ymd.day()), static_cast<int>(hms.hours().count()), static_cast<int>(hms.minutes().count()), static_cast<int>(hms.seconds().count()));
++      return buf;
++    }
++  }  // namespace
++
++  void requested(const std::string &unique_id, const std::string &address) {
++    std::lock_guard lk {requests_mutex};
++    requests[unique_id] = request_t {address, std::chrono::system_clock::now(), std::chrono::steady_clock::now()};
++  }
++
++  void answered(const std::string &unique_id) {
++    std::lock_guard lk {requests_mutex};
++    requests.erase(unique_id);
++  }
++
++  json report() {
++    std::lock_guard lk {requests_mutex};
++    const auto now = std::chrono::steady_clock::now();
++    const request_t *newest = nullptr;
++    for (auto it = requests.begin(); it != requests.end();) {
++      if (now - it->second.started >= request_lifetime) {
++        it = requests.erase(it);
++        continue;
++      }
++      if (newest == nullptr || it->second.started > newest->started) {
++        newest = &it->second;
++      }
++      ++it;
++    }
++    if (newest == nullptr) {
++      return nullptr;
++    }
++    return {
++      {"address", newest->address},
++      {"since", iso_time(newest->since)},
++    };
++  }
++}  // namespace splitplay::pairing
+diff --git a/src/splitplay/pairing.h b/src/splitplay/pairing.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..52738b46fc88715027def5b28f5a299a2b113323
+--- /dev/null
++++ b/src/splitplay/pairing.h
+@@ -0,0 +1,47 @@
++/**
++ * @file src/splitplay/pairing.h
++ * @brief A Moonlight client waiting for its PIN, reported in the SplitPlay heartbeat (docs/contracts/ipc.md,
++ *        `pairing`).
++ *
++ * Moonlight starts pairing with `getservercert` and keeps that request open until the host user types the PIN the
++ * client shows. Sunshine parks the request and waits for `nvhttp::pin()`. The HTTP thread marks the request here; the
++ * heartbeat thread reports it, so the SplitPlay service can ask for the PIN in one place and the tray can say so.
++ * The mark goes when the PIN is handed over, when the pairing session is removed (finished, failed or replaced) and,
++ * as a last resort, after `request_lifetime`: Sunshine never notices a client that gave up and closed the request.
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++#pragma once
++
++// standard includes
++#include <chrono>
++#include <string>
++
++// lib includes
++#include <nlohmann/json.hpp>
++
++namespace splitplay::pairing {
++  /// A request nobody answered for this long is no longer reported (the client gave up long before).
++  constexpr std::chrono::minutes request_lifetime {5};
++
++  /**
++   * @brief A client asked for the server certificate and waits for the PIN (HTTP thread). A second request with the
++   *        same id replaces the first one and starts its wait again.
++   *
++   * @param unique_id Pairing session key (the client's `uniqueid`).
++   * @param address Client IP address, IPv4-mapped IPv6 addresses as plain IPv4.
++   */
++  void requested(const std::string &unique_id, const std::string &address);
++
++  /**
++   * @brief The pairing session no longer waits for a PIN: the PIN was handed over, or the session was removed.
++   *        Unknown ids are ignored.
++   */
++  void answered(const std::string &unique_id);
++
++  /**
++   * @brief The heartbeat's `pairing` value: null while no client waits, otherwise the newest waiting request as
++   *        `{"address":"192.168.1.37","since":"2026-11-06T21:00:00Z"}`. Drops requests older than
++   *        `request_lifetime`.
++   */
++  nlohmann::json report();
++}  // namespace splitplay::pairing

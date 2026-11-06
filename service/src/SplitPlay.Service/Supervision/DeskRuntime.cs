@@ -49,6 +49,21 @@ internal sealed class DeskRuntime
 
     public DateTimeOffset LastHeartbeat { get; set; }
 
+    /// <summary>
+    /// The Moonlight client waiting for its PIN (heartbeat <c>pairing</c>), null when none is. Cleared by a successful
+    /// <c>pair</c> and whenever the worker stops or restarts.
+    /// </summary>
+    public DeskPinRequestDto? PinRequest { get; set; }
+
+    /// <summary>
+    /// The request a successful <c>pair</c> answered and when: a heartbeat the worker wrote before it took the PIN must
+    /// not bring it back for a second.
+    /// </summary>
+    private (DeskPinRequestDto Request, DateTimeOffset At)? _answeredPin;
+
+    /// <summary>How long a heartbeat may still report the request a <c>pair</c> just answered.</summary>
+    private static readonly TimeSpan AnsweredPinGrace = TimeSpan.FromSeconds(5);
+
     /// <summary>The worker's control connection while it is connected (used for pair, list_clients, …).</summary>
     public IpcConnection? Connection { get; set; }
 
@@ -119,6 +134,7 @@ internal sealed class DeskRuntime
                 WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,
                 Stream = Streams.Count > 0 ? ToStreamDto(Streams[0]) : null,
+                PinRequest = PinRequest,
                 LastError = Machine.LastError ?? Warning,
             };
         }
@@ -142,18 +158,63 @@ internal sealed class DeskRuntime
             LastHeartbeat = now;
             ChildState = heartbeat.State;
             Metrics = MapMetrics(heartbeat.Metrics);
-            var changed = false;
+            var changed = ApplyPinRequest(IpcPinRequest.FromJson(heartbeat.Pairing), now);
             if (heartbeat.Sessions is { } sessions)
             {
-                changed = ReplaceStreams(IpcStreamSession.ListFromJson(sessions));
+                changed |= ReplaceStreams(IpcStreamSession.ListFromJson(sessions));
             }
             else if (heartbeat.Metrics?.ContainsKey("clients") == true && Metrics.Clients == 0)
             {
                 // A worker without "sessions" that reports no clients has no stream either.
-                changed = ClearStreams();
+                changed |= ClearStreams();
             }
 
             return Settle(changed);
+        }
+    }
+
+    /// <summary>
+    /// The heartbeat's waiting PIN request. A request keeps the time it was first seen while the worker reports the same
+    /// one, so that a worker without <c>since</c> does not move it every second. True when <see cref="PinRequest"/>
+    /// changed. Caller holds <see cref="Gate"/>.
+    /// </summary>
+    private bool ApplyPinRequest(IpcPinRequest? request, DateTimeOffset now)
+    {
+        DeskPinRequestDto? next = null;
+        if (request is not null)
+        {
+            var since = request.Since
+                ?? (PinRequest is { } current && string.Equals(current.Address, request.Address, StringComparison.Ordinal) ? current.Since : now);
+            next = new DeskPinRequestDto(request.Address, since);
+        }
+
+        if (next is not null && _answeredPin is { } answered && next == answered.Request && now - answered.At < AnsweredPinGrace)
+        {
+            next = null;
+        }
+
+        if (next == PinRequest)
+        {
+            return false;
+        }
+
+        PinRequest = next;
+        return true;
+    }
+
+    /// <summary>A PIN was handed to the worker: nobody waits for one until the next heartbeat says otherwise. True when it changed.</summary>
+    public bool ClearPinRequest(DateTimeOffset now)
+    {
+        lock (Gate)
+        {
+            if (PinRequest is null)
+            {
+                return false;
+            }
+
+            _answeredPin = (PinRequest, now);
+            PinRequest = null;
+            return true;
         }
     }
 
@@ -384,6 +445,6 @@ internal enum WorkerUpdate
     /// <summary>Applied; nothing to publish (or a state transition already published the desk).</summary>
     Applied,
 
-    /// <summary>Applied and the stream list changed: publish the desk.</summary>
+    /// <summary>Applied and the stream list or the PIN request changed: publish the desk.</summary>
     Publish,
 }

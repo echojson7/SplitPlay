@@ -34,7 +34,7 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01J21Rm4ZuX6wPwWNnDdGg8u
 
 diff --git a/src/platform/windows/display_base.cpp b/src/platform/windows/display_base.cpp
-index b28fbbc5c0f81a8bc70c2ba062747972302619ce..fb0163ab37be8099b83167abd14716c8380d8347 100644
+index b28fbbc5c0f81a8bc70c2ba062747972302619ce..d8a6947826c68e9dbcab146035b8ee9542cddb53 100644
 --- a/src/platform/windows/display_base.cpp
 +++ b/src/platform/windows/display_base.cpp
 @@ -3,6 +3,7 @@
@@ -61,7 +61,7 @@ index b28fbbc5c0f81a8bc70c2ba062747972302619ce..fb0163ab37be8099b83167abd14716c8
 +        // SplitPlay: count the frames DWM composed (a pointer-only update has no present time), whatever the
 +        // capture mode, so the heartbeat shows the session's real composition rate.
 +        if (frame_info.LastPresentTime.QuadPart != 0) {
-+          splitplay::live_stats::desktop_frames((std::max)<UINT>(frame_info.AccumulatedFrames, 1));
++          splitplay::live_stats::desktop_frames(frame_info.AccumulatedFrames > 0 ? frame_info.AccumulatedFrames : 1U);
 +        }
          return capture_e::ok;
        case DXGI_ERROR_WAIT_TIMEOUT:

@@ -4,7 +4,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { api, ApiError } from '../api/client'
-import type { HostNetwork, HostSettings } from '../api/types'
+import type { DeskCoresMode, HostCpu, HostNetwork, HostSettings } from '../api/types'
 import AppIcon from '../components/AppIcon.vue'
 import { errorText } from '../composables'
 import { fmtDuration, locale, setLocale, t, type Locale } from '../i18n'
@@ -15,12 +15,14 @@ import { toast } from '../toast'
 const s = store.state
 const host = ref<HostSettings | null>(null)
 const network = ref<HostNetwork | null>(null)
+const cpu = ref<HostCpu | null>(null)
 const unsupported = ref(false)
 const networkPublic = computed(() => network.value?.profile === 'Public')
 const mdnsOff = computed(() => network.value?.mdnsAllowed === false)
 const busy = ref(false)
 
-const COMPOSE_INTERVALS = [2, 3, 4, 5, 7, 8, 16]
+/** 0 is Auto: the service picks the interval from the fastest desk. */
+const COMPOSE_INTERVALS = [0, 2, 3, 4, 5, 7, 8, 16]
 const LOG_LEVELS = ['trace', 'debug', 'info', 'warn', 'error']
 const LANGUAGES: ReadonlyArray<{ value: Locale; label: string }> = [
   { value: 'ru', label: 'Русский' },
@@ -47,6 +49,9 @@ onMounted(async () => {
     (n) => (network.value = n),
     () => undefined,
   )
+  void loadCpu()
+  // Desk names for the cores line (the store may not have loaded the desks when Settings is opened first).
+  if (!s.desksLoaded) void store.refreshDesks().catch(() => undefined)
   try {
     host.value = await api.getHostSettings()
   } catch (e) {
@@ -91,6 +96,61 @@ function onKeepAwake(e: Event): Promise<void> {
   return run(async () => {
     if (host.value) host.value = await api.updateHostSettings({ ...host.value, keepAwake })
   }, t('common.saved'))
+}
+
+/** "0-7, 16-23": processor numbers as ranges. */
+function fmtCpus(cpus: readonly number[]): string {
+  const sorted = [...new Set(cpus)].sort((a, b) => a - b)
+  const parts: string[] = []
+  for (let i = 0; i < sorted.length; i++) {
+    const start = sorted[i]!
+    while (i + 1 < sorted.length && sorted[i + 1] === sorted[i]! + 1) i++
+    parts.push(start === sorted[i] ? `${start}` : `${start}–${sorted[i]}`)
+  }
+  return parts.join(', ')
+}
+
+/** Informational only: an older service or a failure just shows the row without a hint. */
+async function loadCpu(): Promise<void> {
+  try {
+    cpu.value = await api.hostCpu()
+  } catch {
+    cpu.value = null
+  }
+}
+
+/** The CPU and what Auto does on it. */
+const cpuHint = computed(() => {
+  const c = cpu.value
+  if (!c) return ''
+  const what = t(`settings.cpuKind.${c.kind}`)
+  // "AMD Ryzen 9 7950X3D 16-Core Processor" -> "AMD Ryzen 9 7950X3D", "Intel(R) Core(TM) i9" -> "Intel Core i9".
+  const name = c.name
+    ?.replace(/\((R|TM)\)/gi, '')
+    .replace(/\s+\d+-Core Processor$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return name ? `${name} · ${what}` : what
+})
+
+/** With Auto on: which processors each desk got ("Desk 1: 16–31 · Desk 2: 0–15"). */
+const cpuPlan = computed(() =>
+  (cpu.value?.desks ?? [])
+    .filter((d) => d.cpus && d.cpus.length > 0)
+    .map((d) => `${s.desks.find((x) => x.id === d.id)?.name || d.id}: ${fmtCpus(d.cpus!)}`)
+    .join(' · '),
+)
+
+function onDeskCores(e: Event): Promise<void> {
+  const deskCores = (e.target as HTMLSelectElement).value as DeskCoresMode
+  const select = e.target as HTMLSelectElement
+  return run(async () => {
+    if (host.value) host.value = await api.updateHostSettings({ ...host.value, deskCores })
+    await loadCpu()
+  }, t('common.saved')).finally(() => {
+    // A refused change shows the saved value again.
+    select.value = host.value?.deskCores ?? 'off'
+  })
 }
 
 function onTheme(e: Event): void {
@@ -221,6 +281,24 @@ function importConfig(): Promise<void> {
       </div>
     </div>
 
+    <h2 class="group-title">{{ t('settings.cpu') }}</h2>
+    <div class="rows">
+      <div class="srow" data-desk-cores>
+        <AppIcon name="chip" :size="16" />
+        <label class="text" for="desk-cores">
+          <span class="title">{{ t('settings.deskCores') }}</span>
+          <span v-if="cpuHint" class="desc" data-cpu-hint :title="cpuHint">{{ cpuHint }}</span>
+          <span v-if="cpuPlan" class="desc" data-cpu-plan :title="cpuPlan">{{ cpuPlan }}</span>
+        </label>
+        <div class="ctl">
+          <select id="desk-cores" :value="host?.deskCores ?? 'off'" :disabled="!host || busy" @change="onDeskCores">
+            <option value="off">{{ t('settings.deskCoresOff') }}</option>
+            <option value="auto">{{ t('settings.deskCoresAuto') }}</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
     <h2 class="group-title">{{ t('common.more') }}</h2>
     <div class="rows">
       <details class="more">
@@ -247,7 +325,7 @@ function importConfig(): Promise<void> {
               <label for="h-comp">{{ t('settings.composeInterval') }}</label>
               <select id="h-comp" v-model.number="host.composeIntervalMs">
                 <option v-for="ms in COMPOSE_INTERVALS" :key="ms" :value="ms">
-                  {{ t('settings.composeHz', { ms, hz: Math.round(1000 / ms) }) }}
+                  {{ ms === 0 ? t('settings.composeAuto') : t('settings.composeHz', { ms, hz: Math.round(1000 / ms) }) }}
                 </option>
               </select>
             </div>

@@ -66,6 +66,8 @@ public sealed record FakeChildOptions
     /// <summary>With <see cref="SimulateClient"/>: the client disconnects after this long (<c>client_disconnected</c>).</summary>
     public TimeSpan? SimulatedClientDuration { get; init; }
 
+    /// <summary>Worker: send <c>display_hdr</c> with this state (one display on "Fake GPU") right after ready.</summary>
+    public string? DisplayHdr { get; init; }
     /// <summary>
     /// Worker: a Moonlight client waits for its PIN from the start: heartbeats carry <c>pairing</c> until a <c>pair</c>
     /// arrives (patch 0021).
@@ -179,6 +181,15 @@ public static class FakeChild
             {
                 await Task.Delay(options.HeartbeatInterval, cancellationToken).ConfigureAwait(false);
                 await SendEventAsync(connection, IpcProtocol.Events.SessionLost, """{"reason":"simulated hang"}""", cancellationToken).ConfigureAwait(false);
+            }
+
+            if (options.DisplayHdr is { } hdrState)
+            {
+                var enabled = hdrState == "enabled" ? "true" : "false";
+                var supported = hdrState is "enabled" or "off" ? "true" : "false";
+                await SendEventAsync(connection, IpcProtocol.Events.DisplayHdr,
+                    $$"""{"state":"{{hdrState}}","displays":[{"name":"\\\\.\\DISPLAY1","monitor":"","adapter":"Fake GPU","hdr_supported":{{supported}},"hdr_enabled":{{enabled}},"limited_by_policy":false,"color_mode":"sdr","bits_per_color":8,"dxgi_hdr":{{enabled}},"max_nits":270.0}]}""",
+                    cancellationToken).ConfigureAwait(false);
             }
 
             if (options.RequestMode is { } mode)
@@ -563,6 +574,16 @@ public static class FakeChild
                 w.WriteStartObject();
                 WriteLive(w, live);
                 w.WriteNumber("clients", clients);
+                if (clients > 0)
+                {
+                    // The composition rate of a busy 240 Hz session.
+                    w.WriteNumber("capture_fps", Math.Round(live.Fps * 2, 1));
+                }
+                else
+                {
+                    w.WriteNull("capture_fps");
+                }
+
                 w.WriteEndObject();
             });
             return element.EnumerateObject().ToDictionary(p => p.Name, p => p.Value, StringComparer.Ordinal);

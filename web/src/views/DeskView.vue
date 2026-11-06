@@ -19,12 +19,14 @@ import {
   deviceName,
   fmtMs,
   FPS_PRESETS,
+  gpuLine,
   isPresetResolution,
   liveStream,
   moonlightAddress,
   RESOLUTION_PRESETS,
   resolutionKey,
   streamSummary,
+  hdrLabel,
 } from '../desk'
 import { fmtDateTime, fmtNumber, t } from '../i18n'
 import { store } from '../store'
@@ -47,6 +49,7 @@ const error = computed(() => (desk.value ? deskError(desk.value) : null))
 
 // ---- now: the connected device and live numbers (desk events and the 2 s metrics push)
 const stream = computed(() => (desk.value ? liveStream(desk.value) : null))
+const hdr = computed(() => (running.value ? hdrLabel(desk.value?.hdr) : null))
 const live = computed(() => {
   const m = desk.value?.metrics
   if (!m) return null
@@ -58,8 +61,11 @@ const live = computed(() => {
         ? t('live.encodeValue', { p50: fmtNumber(m.encodeMsP50, 1, 1), p99: fmtNumber(m.encodeMsP99 ?? 0, 1, 1) })
         : fmtMs(m.encodeMsP99 ?? 0),
     loss: m.lossPct !== undefined ? t('unit.percent', { value: fmtNumber(m.lossPct, 1) }) : t('common.none'),
+    compose: m.captureFps != null ? t('unit.hz', { value: fmtNumber(m.captureFps) }) : t('common.none'),
   }
 })
+
+const gpu = computed(() => gpuLine(desk.value?.metrics))
 
 async function load(): Promise<void> {
   try {
@@ -307,7 +313,7 @@ async function remove(): Promise<void> {
           <div class="srow compact">
             <AppIcon name="monitor" :size="16" />
             <div class="text"><span class="title">{{ t('live.stream') }}</span></div>
-            <div class="ctl val" data-live-stream>{{ streamSummary(stream) }}</div>
+            <div class="ctl val" data-live-stream>{{ streamSummary(stream, desk.hdr) }}</div>
           </div>
           <div class="srow compact">
             <AppIcon name="activity" :size="16" />
@@ -329,7 +335,22 @@ async function remove(): Promise<void> {
             <div class="text"><span class="title">{{ t('live.loss') }}</span></div>
             <div class="ctl val" data-live-loss>{{ live?.loss }}</div>
           </div>
+          <div class="srow compact">
+            <span class="row-pad" />
+            <div class="text"><span class="title">{{ t('live.compose') }}</span></div>
+            <div class="ctl val" data-live-compose>{{ live?.compose }}</div>
+          </div>
         </template>
+        <div v-if="gpu" class="srow compact">
+          <AppIcon name="chip" :size="16" />
+          <div class="text"><span class="title">{{ t('live.gpu') }}</span></div>
+          <div class="ctl val" data-live-gpu>{{ gpu }}</div>
+        </div>
+        <div v-if="hdr" class="srow compact" data-live-hdr-row>
+          <AppIcon name="monitor" :size="16" />
+          <div class="text"><span class="title">{{ t('live.hdr') }}</span></div>
+          <div class="ctl val" data-live-hdr :title="desk.hdr?.adapter ?? undefined">{{ hdr }}</div>
+        </div>
       </div>
 
       <h2 class="group-title">{{ t('desk.connection') }}</h2>

@@ -24,6 +24,9 @@ export type Codec = (typeof CODECS)[number]
 export const GPU_PRIORITIES = ['normal', 'high', 'realtime'] as const
 export type GpuPriority = (typeof GPU_PRIORITIES)[number]
 
+export const CAPTURE_MODES = ['slot', 'arrival'] as const
+export type CaptureMode = (typeof CAPTURE_MODES)[number]
+
 /** Desk streaming profile (config.md `desks[].profile`). */
 export interface DeskProfile {
   fps: number
@@ -35,6 +38,8 @@ export interface DeskProfile {
   minFps?: number
   dpbFrames?: number
   pacingMbps?: number
+  /** When the worker takes a new frame: at the stream's frame slot (default) or as soon as DWM composes it. */
+  captureMode?: CaptureMode
   gpuPriority?: GpuPriority
 }
 
@@ -153,6 +158,14 @@ export interface DeskMetrics {
   /** Round-trip time to the Moonlight client, ms; null until one is measured (older services: absent). */
   rttMs?: number | null
   clients: number
+  /** Frames DWM composed per second in the desk session (the real composition rate); null without a stream. */
+  captureFps?: number | null
+  /** The desk session's GPU load (busiest engine, as in Task Manager), percent; from the metrics push, null when not measured. */
+  gpuPercent?: number | null
+  /** The desk session's video encoder (NVENC) load, percent; null when not measured or the GPU has no encoder. */
+  encoderPercent?: number | null
+  /** Dedicated video memory used by the desk session, MB. */
+  vramMb?: number | null
 }
 
 /** The Moonlight stream a desk is serving (`desk.stream`): who is connected and what it asked for. */
@@ -172,6 +185,23 @@ export interface DeskStream {
   bitrateKbps: number
   hdr: boolean
   startedAt?: string | null
+}
+
+/** `desk.hdr.state`: whether the desk's display composes in HDR (see DeskHdr). */
+export type HdrState = 'enabled' | 'off' | 'unsupported' | 'unknown'
+
+/**
+ * HDR of the desk session's display, as the worker measures it. `enabled`: a Moonlight client that asks for HDR gets
+ * HDR; `off`: the display supports HDR but it is switched off in Windows; `unsupported`: SDR only.
+ */
+export interface DeskHdr {
+  state: HdrState | string
+  monitor?: string | null
+  /** The GPU that renders the session. */
+  adapter?: string | null
+  bitsPerColor?: number | null
+  maxNits?: number | null
+  updatedAt?: string
 }
 
 /** A Moonlight client that shows a PIN and waits for it (`desk.pinRequest`). */
@@ -195,6 +225,8 @@ export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   metrics: DeskMetrics
   /** The stream being served; null (or absent from older services) when nobody is connected. */
   stream?: DeskStream | null
+  /** The display's HDR state; null (or absent from older services) while no worker has reported it. */
+  hdr?: DeskHdr | null
   /** A Moonlight client waiting for its PIN; null (or absent from older services) when none is. */
   pinRequest?: DeskPinRequest | null
   lastError: string | null
@@ -233,14 +265,16 @@ export interface PairRequest {
   name: string
 }
 
-/** GPU adapter entry inside host metrics (assumed shape). */
+/** GPU adapter entry inside host metrics. Live values are null while not measured. */
 export interface GpuInfo {
   luid: string
   name: string
-  utilizationPercent?: number
-  encoderPercent?: number
-  vramUsedMb?: number
-  vramTotalMb?: number
+  /** Busiest engine, as Task Manager's "GPU" column. */
+  utilizationPercent?: number | null
+  /** Busiest video encoder (NVENC); null when the adapter has none. */
+  encoderPercent?: number | null
+  vramUsedMb?: number | null
+  vramTotalMb?: number | null
 }
 
 /** Host part of GET /metrics (assumed shape). */
@@ -289,6 +323,31 @@ export interface HostSettings {
   logLevel: string
   /** Keep the PC from sleeping while a client streams (default true; older services leave it out). */
   keepAwake?: boolean
+  /** Which processor cores desk processes may use (default `off`; older services leave it out). */
+  deskCores?: DeskCoresMode
+}
+
+export const DESK_CORES_MODES = ['off', 'auto'] as const
+export type DeskCoresMode = (typeof DESK_CORES_MODES)[number]
+
+/** How `auto` splits this CPU: `ccd`/`x3d` one L3 cache (CCD) per desk, `hybrid` the P-cores, `uniform` nothing. */
+export type CpuKind = 'uniform' | 'hybrid' | 'ccd' | 'x3d'
+
+/** The processors of one desk; null: every processor (not restricted). */
+export interface DeskCpu {
+  id: string
+  cpus: number[] | null
+}
+
+/** GET /host/cpu: the CPU and the processors each desk gets now (`desks`) and would get with `auto`. */
+export interface HostCpu {
+  name: string | null
+  cores: number
+  threads: number
+  kind: CpuKind
+  mode: DeskCoresMode
+  desks: DeskCpu[]
+  auto: DeskCpu[]
 }
 
 /** Events pushed over GET /ws. */

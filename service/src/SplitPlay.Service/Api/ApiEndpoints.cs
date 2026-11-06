@@ -287,7 +287,7 @@ public static partial class ApiEndpoints
         // ---- host settings (the "host" object of config.json)
         api.MapGet("/host", (ConfigService config) => Results.Json(config.Snapshot().Host, Ctx.HostConfig));
 
-        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, IDeskPlatform platform, SleepGuard sleepGuard,
+        api.MapPut("/host", async (HttpRequest request, ConfigService config, IFirewallRule firewall, DeskSupervisor supervisor, SleepGuard sleepGuard,
             ILoggerFactory loggers) =>
         {
             var host = await ReadBodyAsync(request, Ctx.HostConfig).ConfigureAwait(false);
@@ -305,14 +305,8 @@ public static partial class ApiEndpoints
 
             if (saved.ComposeIntervalMs != before.ComposeIntervalMs)
             {
-                try
-                {
-                    platform.ApplyComposeInterval(saved.ComposeIntervalMs);
-                }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HostTuningException or System.Security.SecurityException)
-                {
-                    loggers.CreateLogger("SplitPlay.Api").LogWarning("Could not apply host.composeIntervalMs: {Message}", ex.Message);
-                }
+                // Auto resolves from the desks; the supervisor writes the value only when it changes.
+                supervisor.ApplyComposeInterval();
             }
 
             sleepGuard.Refresh();
@@ -333,6 +327,18 @@ public static partial class ApiEndpoints
         {
             var state = status.Current();
             return Results.Json(new HostNetworkDto(HostNetwork.Addresses(), state.Profile, state.MdnsAllowed), Ctx.HostNetworkDto);
+        });
+
+        api.MapGet("/host/cpu", (ICpuControl cpu, ConfigService config) =>
+        {
+            var topology = cpu.Topology();
+            var snapshot = config.Snapshot();
+            IReadOnlyList<DeskCoreRequest> desks = [.. snapshot.Desks.Select(d => new DeskCoreRequest(d.Id, d.Profile.CpuSet))];
+            static List<DeskCpuDto> Dto(IReadOnlyDictionary<string, IReadOnlyList<int>?> plan) => [.. plan.Select(p => new DeskCpuDto(p.Key, p.Value))];
+            return Results.Json(new HostCpuDto(topology.Name, topology.Cores, topology.Cpus.Count, topology.Kind, snapshot.Host.DeskCores,
+                [.. topology.CacheGroups.Select(g => new CpuCacheGroupDto(g.Cpus, Math.Round(g.L3Bytes / 1048576.0, 1)))],
+                Dto(DeskCorePlanner.Plan(topology, snapshot.Host.DeskCores, desks)),
+                Dto(DeskCorePlanner.Plan(topology, DeskCoresMode.Auto, desks))), Ctx.HostCpuDto);
         });
 
         // ---- Windows services SplitPlay depends on (allow-list in RelatedServices)

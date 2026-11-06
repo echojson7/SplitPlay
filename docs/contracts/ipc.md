@@ -32,7 +32,7 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 - The worker runs as SYSTEM with `TokenSessionId` = the desk session, `lpDesktop` `winsta0\default`,
   `CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT`, in the desk's job object. Diagnostics only:
   `splitplay-worker.exe --desk-dir <dir> --self-test <seconds>` (not with `--pipe`) checks capture, input and audio in
-  the session and writes `<desk-dir>\self-test.json`. The full settings list is in worker/README.md. The seat runs as SYSTEM in session 0.
+  the session, then tries to switch HDR on and back off (`hdr` in the result), and writes `<desk-dir>\self-test.json`. The full settings list is in worker/README.md. The seat runs as SYSTEM in session 0.
 - Exit codes: 0 after `shutdown`, 2 invalid command line, 3 handshake failed or pipe lost, 4 (seat) gave up reconnecting
   the RDP session; anything else is a crash.
 
@@ -52,11 +52,12 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 ```json
 {"type":"hello","protocol":1,"role":"worker","desk":"desk-1","pid":1234,"version":"0.1.0","session":3}
 {"type":"ready","ports":{"base":48089}}
-{"type":"heartbeat","seq":17,"state":"idle","metrics":{"fps":0,"bitrate_kbps":0,"encode_ms_p50":0,"encode_ms_p99":0,"loss_pct":0,"rtt_ms":null,"clients":0},"sessions":[],"pairing":null}
+{"type":"heartbeat","seq":17,"state":"idle","metrics":{"fps":0,"bitrate_kbps":0,"encode_ms_p50":0,"encode_ms_p99":0,"loss_pct":0,"rtt_ms":null,"clients":0,"capture_fps":null},"sessions":[],"pairing":null}
 {"type":"log","level":"info","message":"..."}
 {"type":"event","name":"client_connected","data":{"id":2,"client":"Living room PC","client_uuid":"…","address":"192.168.1.37","width":1920,"height":1080,"fps_requested":120,"codec":"hevc","bitrate_kbps_requested":50000,"hdr":false,"started_at":"2026-10-29T18:00:00Z"}}
 {"type":"event","name":"client_disconnected","data":{ …same fields as client_connected… }}
 {"type":"event","name":"mode_requested","data":{"width":2560,"height":1440,"fps":120}}
+{"type":"event","name":"display_hdr","data":{"state":"unsupported","displays":[{"name":"\\\\.\\DISPLAY1","monitor":"","adapter":"NVIDIA GeForce RTX 5070","hdr_supported":false,"hdr_enabled":false,"limited_by_policy":false,"color_mode":"sdr","bits_per_color":8,"dxgi_hdr":false,"max_nits":270.0}]}}
 {"type":"event","name":"session_lost","data":{"reason":"..."}}
 {"type":"event","name":"session_restored","data":{"session":3}}
 ```
@@ -72,6 +73,16 @@ Events by role:
   `data`; the service then drops its only stream, if it has exactly one.
 - worker `mode_requested`: a Moonlight client launched with this mode. The service forwards it to the seat as
   `set_mode`. The worker waits up to 3 s for the desktop size to change and carries on either way.
+- worker `display_hdr`: the HDR state of the session's displays (patch 0019). The worker probes at start and every 5 s
+  on a thread of its own and sends the event with the next heartbeat whenever the result differs from the last one, so
+  once per worker run at least. `state` is `enabled` (a display composes in HDR10, which is what decides whether a stream that asks
+  for HDR is encoded as HDR), `off` (a display supports HDR but it is switched off), `unsupported` (no display
+  supports it) or `unknown`. Each display: `name` (GDI device name), `monitor`, `adapter` (the GPU rendering it),
+  `hdr_supported`, `hdr_enabled` (Display Configuration API), `limited_by_policy`, `color_mode` (`sdr`, `wcg`, `hdr`),
+  `bits_per_color`, `dxgi_hdr` (DXGI colour space is HDR10), `max_nits`; a value the worker could not read is `null`,
+  and `query_error` carries the Win32 error of a failed display query. The service shows it as `desk.hdr` (web-api.md)
+  and forgets it when the worker stops. A client that asks for HDR on a display that is not in HDR gets SDR in 10 bits
+  (upstream behaviour; the worker logs a warning).
 - seat `session_lost`: the RDP connection dropped; the seat is reconnecting. The service keeps the worker running.
 - seat `session_restored`: reconnected. If the session id changed, the service restarts the worker in the new session.
 
@@ -105,7 +116,7 @@ the request as the desk's `pinRequest` (web-api.md) and drops it when the worker
 
 ```json
 {"type":"heartbeat","seq":42,"state":"streaming",
- "metrics":{"fps":119.8,"bitrate_kbps":38450,"encode_ms_p50":3.1,"encode_ms_p99":5.4,"loss_pct":0,"rtt_ms":4,"clients":1},
+ "metrics":{"fps":119.8,"bitrate_kbps":38450,"encode_ms_p50":3.1,"encode_ms_p99":5.4,"loss_pct":0,"rtt_ms":4,"clients":1,"capture_fps":238.4},
  "sessions":[{"id":2,"client":"Living room PC","client_uuid":"…","address":"192.168.1.37","width":1920,"height":1080,
               "fps_requested":120,"codec":"hevc","bitrate_kbps_requested":50000,"hdr":false,"started_at":"2026-10-29T18:00:00Z",
               "fps":119.8,"bitrate_kbps":38450,"loss_pct":0,"rtt_ms":4,"encode_ms_p50":3.1,"encode_ms_p99":5.4}]}
@@ -139,6 +150,7 @@ Worker metric definitions (all over the interval since the previous heartbeat, a
 | `loss_pct` | frames the client reported lost (reference-frame invalidation ranges, and the legacy loss-stats count when a client sends it) per frame sent. Losses FEC recovered are not counted |
 | `rtt_ms` | ENet round-trip time of the control connection, as ENet measures it from its own pings |
 | `clients` | streams listed in `sessions` |
+| `capture_fps` | frames DWM composed per second in the desk session, as Desktop Duplication reports them (`AccumulatedFrames` of each acquired frame with new content): the real composition rate, whatever `capture_mode` is. `null` while no stream runs |
 
 Ordering: the streaming and RTSP threads only queue `client_connected`/`client_disconnected`; the worker's heartbeat
 thread takes the queue and the stream list in one step and writes the queued events, then the heartbeat. So a
@@ -191,7 +203,7 @@ Tuning parameters applied live (see ARCHITECTURE.md §9). All fields optional; a
   "fps": 120, "width": 1920, "height": 1080,
   "bitrate_kbps": 60000, "codec": "hevc",
   "fec_percent": 20, "min_fps": 15, "dpb_frames": 16,
-  "pacing_mbps": 800,
+  "pacing_mbps": 800, "capture_mode": "slot",
   "gpu_priority": "high",
   "gpu_luid": "0x0000000000012345",
   "cpu_set": [4,5,6,7]
@@ -205,12 +217,13 @@ What the worker applies (worker/README.md, *Stream profile*), from `welcome` and
 | `fec_percent` | 0–255 | next frame (the encoder's bitrate allowance for FEC: next stream) |
 | `min_fps` | 1–1000, capped at the stream's fps | next frame |
 | `pacing_mbps` | 1–100000, send pacing of one stream | next frame |
+| `capture_mode` | `"slot"` (take the newest frame at the stream's next frame slot) or `"arrival"` (take each frame as soon as DWM composes it, at most the stream's fps on average) | next frame |
 | `dpb_frames` | 1–16 (AV1 at most 8), 0 = codec default; only for clients that leave the reference count to the host | next stream |
 
 `null` restores the worker's default (Sunshine's: FEC 20 %, half the stream's fps, 800 Mbit/s, DPB 5 or 8). A value
 of the wrong type or out of range fails `set_profile` with `bad_request` and nothing is applied. The other fields
-are accepted and ignored by the worker (the client picks mode, bitrate and codec). The service always sends the four
-fields, with its defaults where the desk sets none (config.md). The answer lists what happened:
+are accepted and ignored by the worker (the client picks mode, bitrate and codec). The service always sends these
+five fields, with its defaults where the desk sets none (config.md; `capture_mode` `slot`). The answer lists what happened:
 
 ```json
 {"type":"result","id":5,"ok":true,"data":{"applied":["fec_percent","min_fps","pacing_mbps"],"next_stream":["dpb_frames"],"not_applied":["fps","width","height","bitrate_kbps","codec","gpu_priority"]}}

@@ -1,0 +1,695 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 21:14:48 +0000
+Subject: [PATCH] splitplay: probe HDR on the desk session's displays
+
+A desk's display is Microsoft's RdpIdd. Windows turns HDR on for it only
+when the RDP client asks for HDR over the GFX pipeline, and the seat
+connects without GFX, so a desk is expected to be SDR only. This patch
+measures that instead of assuming it.
+
+splitplay::hdr::probe() reads every display the session sees: DXGI gives
+the output's colour space (HDR10 is what display_base_t::is_hdr() checks
+before a stream is encoded as HDR), its bits per colour and peak
+luminance; the Display Configuration API gives whether the display
+supports HDR and whether it is on (DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2
+on Windows 11 24H2, the older advanced colour info otherwise; both
+structures are declared locally since older MinGW headers lack the 24H2
+one). The state is "enabled", "off" (supported, switched off),
+"unsupported" or "unknown". Before 24H2 an SDR display that could use
+auto colour management looks like an HDR display with HDR off, so there
+"supported" is left unknown unless HDR is on or there is no advanced
+colour at all.
+
+- A thread of its own probes at start and every 5 s (DXGI and the
+  Display Configuration API can stall during a mode change, and a stalled
+  heartbeat thread gets the worker killed); the heartbeat thread sends
+  `event display_hdr` with the probe whenever it differs from the last
+  one, so the service always knows the desk's HDR state.
+- --self-test ends with hdr::try_enable(): it switches HDR on for every
+  display whose HDR is off by both accounts (DISPLAYCONFIG_SET_HDR_STATE
+  where the 24H2 info answered, the older SET_ADVANCED_COLOR_STATE
+  otherwise), probes again two seconds later and switches each changed
+  display back with the same call. self-test.json gets "hdr" with before, after,
+  each attempt's Win32 result and "ok" (a display composed in HDR10 once
+  asked). It does not change the self-test's own result.
+- A stream whose client asked for HDR on a display that is not in HDR
+  logs a warning with the probe's state: Sunshine then encodes SDR in 10
+  bits, as upstream does.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm4pMAeMSSjKMzDrmx5
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index 1ace173bd7e3729a8ee9c7d68beb7a20d3f61e96..f810622e6744db791281cbfbb767211559d201c0 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -177,6 +177,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/splitplay/control_client.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/doorbell.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/doorbell.h"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/hdr_probe.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/hdr_probe.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index c9d1a52e39211b41672fa8f8b65da42c2ff20a00..aaa6c3a215c9fec03f6b9b7c01b1a14070858827 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -29,6 +29,7 @@
+ 
+ // local includes
+ #include "control_client.h"
++#include "hdr_probe.h"
+ #include "live_stats.h"
+ #include "options.h"
+ #include "profile.h"
+@@ -58,6 +59,7 @@ namespace splitplay::control {
+     constexpr auto welcome_timeout = 10s;
+     constexpr auto connect_timeout = 5s;
+     constexpr auto ready_port_timeout = 10s;
++    constexpr auto hdr_probe_interval = 5s;  ///< Time between two HDR probes of the session's displays.
+     constexpr DWORD write_timeout_ms = 5000;
+     constexpr int exit_code_pipe_lost = 3;  ///< Process exit code when the service goes away.
+ 
+@@ -282,6 +284,9 @@ namespace splitplay::control {
+         heartbeat = std::jthread {[this](std::stop_token st) {
+           heartbeat_loop(st);
+         }};
++        hdr_prober = std::jthread {[this](std::stop_token st) {
++          hdr_probe_loop(st);
++        }};
+         return true;
+       }
+ 
+@@ -313,6 +318,10 @@ namespace splitplay::control {
+         if (stop_event) {
+           SetEvent(stop_event);
+         }
++        if (hdr_prober.joinable()) {
++          hdr_prober.request_stop();
++          hdr_prober.join();
++        }
+         if (heartbeat.joinable()) {
+           heartbeat.request_stop();
+           heartbeat.join();
+@@ -407,6 +416,10 @@ namespace splitplay::control {
+         std::condition_variable_any cv;
+         std::uint64_t seq = 0;
+         while (!st.stop_requested() && !stopping) {
++          // A changed HDR state from the prober thread goes out with the next heartbeat (this thread writes the events).
++          if (auto hdr_state = take_hdr_change()) {
++            send_event("display_hdr", std::move(*hdr_state));
++          }
+           // Stopped streams are reaped (and their client_disconnected queued) by the RTSP thread within 500 ms; this
+           // thread never joins stream threads. Queued client events go first, then the heartbeat: this thread is the
+           // only one writing either to the pipe.
+@@ -432,6 +445,37 @@ namespace splitplay::control {
+         }
+       }
+ 
++      /**
++       * @brief Probe the HDR state of the session's displays every few seconds; queue it for the heartbeat thread
++       * when it differs from the last probe (the first probe always does).
++       *
++       * Its own thread, because DXGI and the Display Configuration API can stall while the display configuration
++       * changes (a seat resize, a reconnect), and a heartbeat thread that stalls for 3 s gets the worker killed.
++       */
++      void hdr_probe_loop(std::stop_token st) {
++        std::mutex m;
++        std::condition_variable_any cv;
++        std::string last;
++        while (!st.stop_requested() && !stopping) {
++          auto state = hdr::probe();
++          if (auto text = state.dump(); text != last) {
++            BOOST_LOG(info) << "SplitPlay: display HDR state: "sv << text;
++            last = std::move(text);
++            std::lock_guard lg {hdr_mutex};
++            hdr_change = std::move(state);
++          }
++          std::unique_lock lk {m};
++          cv.wait_for(lk, st, hdr_probe_interval, []() {
++            return false;
++          });
++        }
++      }
++
++      std::optional<json> take_hdr_change() {
++        std::lock_guard lg {hdr_mutex};
++        return std::exchange(hdr_change, std::nullopt);
++      }
++
+       void read_loop() {
+         HANDLE read_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+         std::string buffer;
+@@ -574,7 +618,10 @@ namespace splitplay::control {
+       HANDLE write_event = nullptr;
+       std::mutex write_mutex;
+       std::thread reader;
++      std::mutex hdr_mutex;
++      std::optional<json> hdr_change;  ///< The HDR state to send with the next heartbeat (guarded by hdr_mutex).
+       std::jthread heartbeat;
++      std::jthread hdr_prober;  ///< Declared after what it uses, so that it is joined before they go.
+ 
+       std::mutex state_mutex;
+       std::condition_variable state_cv;
+diff --git a/src/splitplay/hdr_probe.cpp b/src/splitplay/hdr_probe.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..a4a5f25870b8914799f000f38521b61b53879fa7
+--- /dev/null
++++ b/src/splitplay/hdr_probe.cpp
+@@ -0,0 +1,404 @@
++/**
++ * @file src/splitplay/hdr_probe.cpp
++ * @brief HDR probe of the desk session's displays.
++ *
++ * A desk's display is Microsoft's RdpIdd, the indirect display of the RDP session. Windows turns HDR on for it only
++ * when the RDP client asks for HDR over the GFX pipeline, and the seat connects without GFX, so the expected answer
++ * is `unsupported`. This file measures it instead of assuming it.
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++// standard includes
++#include <cstdint>
++#include <map>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <utility>
++#include <vector>
++
++// local includes
++#include "hdr_probe.h"
++#include "src/logging.h"
++
++#ifdef _WIN32
++  // platform includes
++  #include <windows.h>
++  #include <dxgi1_6.h>
++#endif
++
++using namespace std::literals;
++using json = nlohmann::json;
++
++namespace splitplay::hdr {
++  namespace {
++    std::mutex last_mutex;
++    std::string last = "unknown";
++
++    void remember(const json &result) {
++      std::lock_guard lg {last_mutex};
++      last = result.value("state", "unknown");
++    }
++  }  // namespace
++
++  std::string last_state() {
++    std::lock_guard lg {last_mutex};
++    return last;
++  }
++
++#ifdef _WIN32
++  namespace {
++    // The Windows 11 24H2 structures, declared here because older MinGW headers lack them (same layout and type ids
++    // as the Windows SDK's DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO_2 and DISPLAYCONFIG_SET_HDR_STATE).
++    constexpr auto get_advanced_color_info_2 = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(15);
++    constexpr auto set_hdr_state = static_cast<DISPLAYCONFIG_DEVICE_INFO_TYPE>(16);
++
++    struct advanced_color_info_2_t {
++      DISPLAYCONFIG_DEVICE_INFO_HEADER header;
++      UINT32 value;  ///< Bit 0 advancedColorSupported, 1 advancedColorActive, 3 advancedColorLimitedByPolicy,
++                     ///< 4 highDynamicRangeSupported, 5 highDynamicRangeUserEnabled, 6 wideColorSupported, 7 wideColorUserEnabled.
++      UINT32 colorEncoding;
++      UINT32 bitsPerColorChannel;
++      UINT32 activeColorMode;  ///< 0 SDR, 1 WCG, 2 HDR.
++    };
++
++    struct set_hdr_state_t {
++      DISPLAYCONFIG_DEVICE_INFO_HEADER header;
++      UINT32 value;  ///< Bit 0 enableHdr.
++    };
++
++    constexpr bool bit(UINT32 value, int n) {
++      return (value >> n) & 1u;
++    }
++
++    std::string to_utf8(const wchar_t *text) {
++      if (!text || !*text) {
++        return {};
++      }
++      const int size = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
++      if (size <= 1) {
++        return {};
++      }
++      std::string out(static_cast<std::size_t>(size - 1), '\0');
++      WideCharToMultiByte(CP_UTF8, 0, text, -1, out.data(), size, nullptr, nullptr);
++      return out;
++    }
++
++    template<class T>
++    struct com_t {
++      T *p = nullptr;
++
++      ~com_t() {
++        if (p) {
++          p->Release();
++        }
++      }
++
++      T **put() {
++        if (p) {
++          p->Release();
++          p = nullptr;
++        }
++        return &p;
++      }
++    };
++
++    /**
++     * @brief One display of the session: what DXGI and the Display Configuration API say about it.
++     */
++    struct display_t {
++      std::string name;  ///< GDI device name, e.g. \\.\DISPLAY1: the key both sources share.
++      json monitor = nullptr;
++      json adapter = nullptr;
++      json hdr_supported = nullptr;
++      json hdr_enabled = nullptr;
++      json limited_by_policy = nullptr;
++      json color_mode = nullptr;
++      json bits_per_color = nullptr;
++      json dxgi_hdr = nullptr;
++      json max_nits = nullptr;
++      bool has_path = false;
++      bool has_info2 = false;  ///< The 24H2 colour info answered, so HDR is switched with the 24H2 call only.
++      DISPLAYCONFIG_PATH_INFO path {};
++
++      json to_json() const {
++        return {
++          {"name", name},
++          {"monitor", monitor},
++          {"adapter", adapter},
++          {"hdr_supported", hdr_supported},
++          {"hdr_enabled", hdr_enabled},
++          {"limited_by_policy", limited_by_policy},
++          {"color_mode", color_mode},
++          {"bits_per_color", bits_per_color},
++          {"dxgi_hdr", dxgi_hdr},
++          {"max_nits", max_nits},
++        };
++      }
++    };
++
++    void read_dxgi(std::map<std::string, display_t> &displays) {
++      com_t<IDXGIFactory1> factory;
++      if (FAILED(CreateDXGIFactory1(IID_IDXGIFactory1, reinterpret_cast<void **>(factory.put())))) {
++        return;
++      }
++      for (UINT a = 0;; ++a) {
++        com_t<IDXGIAdapter1> adapter;
++        if (FAILED(factory.p->EnumAdapters1(a, adapter.put())) || !adapter.p) {
++          break;  // DXGI_ERROR_NOT_FOUND ends the list; any other error ends it too.
++        }
++        DXGI_ADAPTER_DESC1 adapter_desc {};
++        adapter.p->GetDesc1(&adapter_desc);
++        for (UINT o = 0;; ++o) {
++          com_t<IDXGIOutput> output;
++          if (FAILED(adapter.p->EnumOutputs(o, output.put())) || !output.p) {
++            break;
++          }
++          com_t<IDXGIOutput6> output6;
++          if (FAILED(output.p->QueryInterface(IID_IDXGIOutput6, reinterpret_cast<void **>(output6.put())))) {
++            continue;
++          }
++          DXGI_OUTPUT_DESC1 desc {};
++          if (FAILED(output6.p->GetDesc1(&desc)) || !desc.AttachedToDesktop) {
++            continue;
++          }
++          auto &d = displays[to_utf8(desc.DeviceName)];
++          d.name = to_utf8(desc.DeviceName);
++          d.adapter = to_utf8(adapter_desc.Description);
++          // What Sunshine's display_base_t::is_hdr() checks: only then is a stream encoded as HDR10.
++          d.dxgi_hdr = desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020;
++          d.max_nits = desc.MaxLuminance;
++          if (d.bits_per_color.is_null()) {
++            d.bits_per_color = desc.BitsPerColor;
++          }
++        }
++      }
++    }
++
++    /**
++     * @brief Read one path's HDR support, the Windows 11 24H2 way first, then the older advanced colour info.
++     */
++    void read_color(display_t &d) {
++      advanced_color_info_2_t info2 {};
++      info2.header.type = get_advanced_color_info_2;
++      info2.header.size = sizeof(info2);
++      info2.header.adapterId = d.path.targetInfo.adapterId;
++      info2.header.id = d.path.targetInfo.id;
++      if (DisplayConfigGetDeviceInfo(&info2.header) == ERROR_SUCCESS) {
++        d.hdr_supported = bit(info2.value, 4);
++        d.hdr_enabled = bit(info2.value, 5) && info2.activeColorMode == 2;
++        d.limited_by_policy = bit(info2.value, 3);
++        d.color_mode = info2.activeColorMode == 2 ? "hdr" : (info2.activeColorMode == 1 ? "wcg" : "sdr");
++        d.bits_per_color = info2.bitsPerColorChannel;
++        d.has_info2 = true;
++        return;
++      }
++
++      DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO info {};
++      info.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
++      info.header.size = sizeof(info);
++      info.header.adapterId = d.path.targetInfo.adapterId;
++      info.header.id = d.path.targetInfo.id;
++      if (DisplayConfigGetDeviceInfo(&info.header) == ERROR_SUCCESS) {
++        // Before 24H2 "advanced colour" means HDR, or, since 22H2, auto colour management on an SDR display
++        // (wideColorEnforced). An SDR display that could have it but has it off looks like an HDR display with HDR
++        // off, so "supported" is only known when the display has no advanced colour at all, or HDR is on.
++        const UINT32 value = info.value;
++        const bool enabled = bit(value, 1) && !bit(value, 2);
++        d.hdr_supported = !bit(value, 0) ? json(false) : (enabled ? json(true) : json(nullptr));
++        d.hdr_enabled = enabled;
++        d.limited_by_policy = bit(value, 3);  // advancedColorForceDisabled
++        d.color_mode = bit(value, 1) ? (bit(value, 2) ? "wcg" : "hdr") : "sdr";
++        d.bits_per_color = info.bitsPerColorChannel;
++      }
++    }
++
++    /**
++     * @return 0, or the Win32 error of the failed call.
++     */
++    LONG read_display_config(std::map<std::string, display_t> &displays) {
++      UINT32 path_count = 0;
++      UINT32 mode_count = 0;
++      std::vector<DISPLAYCONFIG_PATH_INFO> paths;
++      std::vector<DISPLAYCONFIG_MODE_INFO> modes;
++      LONG status = ERROR_INSUFFICIENT_BUFFER;
++      for (int attempt = 0; attempt < 3 && status == ERROR_INSUFFICIENT_BUFFER; ++attempt) {
++        status = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count);
++        if (status != ERROR_SUCCESS) {
++          return status;
++        }
++        paths.resize(path_count);
++        modes.resize(mode_count);
++        status = QueryDisplayConfig(QDC_ONLY_ACTIVE_PATHS, &path_count, paths.data(), &mode_count, modes.data(), nullptr);
++      }
++      if (status != ERROR_SUCCESS) {
++        return status;
++      }
++      paths.resize(path_count);
++
++      for (const auto &path : paths) {
++        DISPLAYCONFIG_SOURCE_DEVICE_NAME source {};
++        source.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME;
++        source.header.size = sizeof(source);
++        source.header.adapterId = path.sourceInfo.adapterId;
++        source.header.id = path.sourceInfo.id;
++        if (DisplayConfigGetDeviceInfo(&source.header) != ERROR_SUCCESS) {
++          continue;
++        }
++        const auto name = to_utf8(source.viewGdiDeviceName);
++        auto &d = displays[name];
++        if (d.has_path) {
++          continue;  // A cloned source: the first target speaks for it.
++        }
++        d.name = name;
++        d.has_path = true;
++        d.path = path;
++
++        DISPLAYCONFIG_TARGET_DEVICE_NAME target {};
++        target.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME;
++        target.header.size = sizeof(target);
++        target.header.adapterId = path.targetInfo.adapterId;
++        target.header.id = path.targetInfo.id;
++        if (DisplayConfigGetDeviceInfo(&target.header) == ERROR_SUCCESS) {
++          d.monitor = to_utf8(target.monitorFriendlyDeviceName);
++        }
++        read_color(d);
++      }
++      return ERROR_SUCCESS;
++    }
++
++    std::map<std::string, display_t> read_all(LONG &query_error) {
++      std::map<std::string, display_t> displays;
++      read_dxgi(displays);
++      query_error = read_display_config(displays);
++      return displays;
++    }
++
++    json summarize(const std::map<std::string, display_t> &displays, LONG query_error) {
++      json list = json::array();
++      bool any_hdr = false;
++      bool any_supported = false;
++      bool any_known = false;
++      for (const auto &[name, d] : displays) {
++        list.push_back(d.to_json());
++        if (d.dxgi_hdr.is_boolean() && d.dxgi_hdr.get<bool>()) {
++          any_hdr = true;
++        }
++        if (d.hdr_supported.is_boolean()) {
++          any_known = true;
++          any_supported = any_supported || d.hdr_supported.get<bool>();
++        }
++      }
++      std::string state = "unknown";
++      if (any_hdr) {
++        state = "enabled";
++      } else if (any_supported) {
++        state = "off";
++      } else if (any_known) {
++        state = "unsupported";
++      }
++      json result {{"state", state}, {"displays", std::move(list)}};
++      if (query_error != ERROR_SUCCESS) {
++        result["query_error"] = query_error;
++      }
++      return result;
++    }
++
++    enum class method_e {
++      hdr_state,  ///< DISPLAYCONFIG_SET_HDR_STATE (Windows 11 24H2).
++      advanced_color,  ///< DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE (older Windows).
++    };
++
++    LONG set_with(const display_t &d, bool enable, method_e method) {
++      if (method == method_e::advanced_color) {
++        DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE legacy {};
++        legacy.header.type = DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE;
++        legacy.header.size = sizeof(legacy);
++        legacy.header.adapterId = d.path.targetInfo.adapterId;
++        legacy.header.id = d.path.targetInfo.id;
++        legacy.value = enable ? 1u : 0u;
++        return DisplayConfigSetDeviceInfo(&legacy.header);
++      }
++      set_hdr_state_t state {};
++      state.header.type = set_hdr_state;
++      state.header.size = sizeof(state);
++      state.header.adapterId = d.path.targetInfo.adapterId;
++      state.header.id = d.path.targetInfo.id;
++      state.value = enable ? 1u : 0u;
++      return DisplayConfigSetDeviceInfo(&state.header);
++    }
++  }  // namespace
++
++  json probe() {
++    LONG query_error = ERROR_SUCCESS;
++    auto result = summarize(read_all(query_error), query_error);
++    remember(result);
++    return result;
++  }
++
++  json try_enable(std::chrono::milliseconds settle) {
++    LONG query_error = ERROR_SUCCESS;
++    const auto displays = read_all(query_error);
++    json result {{"before", summarize(displays, query_error)}};
++
++    json attempts = json::array();
++    std::vector<std::pair<const display_t *, method_e>> changed;
++    for (const auto &[name, d] : displays) {
++      const auto is_true = [](const json &v) {
++        return v.is_boolean() && v.get<bool>();
++      };
++      // Only a Display Configuration path whose HDR is off by both accounts: switching back must not turn off an
++      // HDR the owner had on.
++      if (!d.has_path || is_true(d.dxgi_hdr) || is_true(d.hdr_enabled)) {
++        continue;
++      }
++      // The 24H2 call where the 24H2 info answered; the older one otherwise (it would switch on auto colour
++      // management on an SDR display of 24H2). The same call switches it back.
++      const auto method = d.has_info2 ? method_e::hdr_state : method_e::advanced_color;
++      const LONG status = set_with(d, true, method);
++      BOOST_LOG(info) << "SplitPlay: HDR probe: switching HDR on for "sv << name << " returned "sv << status;
++      attempts.push_back({{"name", name}, {"method", method == method_e::hdr_state ? "hdr_state" : "advanced_color"}, {"set_result", status}});
++      if (status == ERROR_SUCCESS) {
++        changed.emplace_back(&d, method);
++      }
++    }
++
++    if (!changed.empty()) {
++      std::this_thread::sleep_for(settle);
++    }
++    LONG after_error = ERROR_SUCCESS;
++    const auto after = read_all(after_error);
++    for (auto &attempt : attempts) {
++      const auto it = after.find(attempt["name"].get<std::string>());
++      attempt["enabled_after"] = it != after.end() ? it->second.dxgi_hdr : json(nullptr);
++    }
++    result["after"] = summarize(after, after_error);
++
++    for (const auto &[d, method] : changed) {
++      const LONG status = set_with(*d, false, method);
++      for (auto &attempt : attempts) {
++        if (attempt["name"] == d->name) {
++          attempt["restored"] = status == ERROR_SUCCESS;
++        }
++      }
++    }
++    result["attempts"] = std::move(attempts);
++    // HDR works on this desk if Windows composed a display in HDR10 once it was asked to.
++    result["ok"] = result["after"]["state"] == "enabled";
++    if (!changed.empty()) {
++      std::this_thread::sleep_for(settle);  // Let the display settle back to SDR before the self-test goes on.
++    }
++    probe();
++    return result;
++  }
++#else
++  json probe() {
++    json result {{"state", "unknown"}, {"displays", json::array()}};
++    remember(result);
++    return result;
++  }
++
++  json try_enable(std::chrono::milliseconds) {
++    return {{"before", probe()}, {"after", probe()}, {"attempts", json::array()}, {"ok", false}};
++  }
++#endif
++}  // namespace splitplay::hdr
+diff --git a/src/splitplay/hdr_probe.h b/src/splitplay/hdr_probe.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..6952b867228523fe4ff56bbdc8107d0116a1ca6e
+--- /dev/null
++++ b/src/splitplay/hdr_probe.h
+@@ -0,0 +1,48 @@
++/**
++ * @file src/splitplay/hdr_probe.h
++ * @brief HDR probe of the desk session's displays (state for the service, active check for the self-test).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++#pragma once
++
++// standard includes
++#include <chrono>
++#include <string>
++
++// lib includes
++#include <nlohmann/json.hpp>
++
++namespace splitplay::hdr {
++  /**
++   * @brief Read the HDR state of every display this session sees. Changes nothing.
++   *
++   * DXGI gives each output's colour space (HDR10 when Windows composes it in HDR, which is what Sunshine's capture
++   * checks), the Display Configuration API whether the display supports HDR at all and whether it is switched on.
++   * Takes a few milliseconds. The result:
++   *
++   * ```json
++   * {"state":"unsupported","displays":[{"name":"\\\\.\\DISPLAY1","monitor":"","adapter":"NVIDIA GeForce RTX 5070",
++   *   "hdr_supported":false,"hdr_enabled":false,"limited_by_policy":false,"color_mode":"sdr","bits_per_color":8,
++   *   "dxgi_hdr":false,"max_nits":270.0}]}
++   * ```
++   *
++   * `state` is `enabled` (a display composes in HDR10, a stream can be HDR), `off` (a display supports HDR but it is
++   * off), `unsupported` (no display supports HDR) or `unknown` (nothing could be read). Fields a source could not
++   * provide are `null`; `query_error` names a failed Display Configuration call.
++   */
++  nlohmann::json probe();
++
++  /**
++   * @brief Try to switch HDR on for every display that is not in HDR, then put each one back.
++   *
++   * For the self-test only: the desk's picture flickers while HDR is switched. Each display gets `set_result` (the
++   * Win32 error of DisplayConfigSetDeviceInfo, 0 on success), `enabled_after` (the probe `settle` later) and
++   * `restored`. The result also carries `before` and `after` (both probe()).
++   */
++  nlohmann::json try_enable(std::chrono::milliseconds settle);
++
++  /**
++   * @brief The `state` of the last probe() on this process ("unknown" before the first one).
++   */
++  std::string last_state();
++}  // namespace splitplay::hdr
+diff --git a/src/splitplay/self_test.cpp b/src/splitplay/self_test.cpp
+index 9f18fb5ab7f71ae5d172913e0b6a2d75ca1b37fd..b402a9709c8ab3465b73a5894694b3c377b63b2d 100644
+--- a/src/splitplay/self_test.cpp
++++ b/src/splitplay/self_test.cpp
+@@ -19,6 +19,7 @@
+ #include <nlohmann/json.hpp>
+ 
+ // local includes
++#include "hdr_probe.h"
+ #include "options.h"
+ #include "self_test.h"
+ #include "src/config.h"
+@@ -208,6 +209,8 @@ namespace splitplay::self_test {
+     mouse.join();
+     result["input"] = input_result;
+     result["audio"] = read_audio();
++    // Last, since switching HDR makes the picture flicker. Informational: an SDR-only desk still passes.
++    result["hdr"] = hdr::try_enable(2s);
+ 
+     const bool ok = result["capture"]["frames"].get<int>() > 0;
+     result["ok"] = ok;
+diff --git a/src/splitplay/self_test.h b/src/splitplay/self_test.h
+index 9b69cb9eb3ebe3ef9153814d792be510064376f5..9daf79ce89a143f31ba2d8617db305bbbc101171 100644
+--- a/src/splitplay/self_test.h
++++ b/src/splitplay/self_test.h
+@@ -12,7 +12,8 @@ namespace splitplay::self_test {
+    * Must run after platf::init(), input::init() and video::probe_encoders(). For `seconds` it captures the
+    * session's display with the encoder's capture path (DXGI Desktop Duplication), moves the mouse with
+    * SendInput (so that the cursor, drawn from the DDA pointer shape, changes the picture) and reads the
+-   * session's default render endpoint through WASAPI loopback. The result is logged and written to
++   * session's default render endpoint through WASAPI loopback. Last it tries to switch HDR on for the session's
++   * displays and switches it back (hdr::try_enable()). The result is logged and written to
+    * `<desk-dir>/self-test.json`.
+    *
+    * @param seconds Duration of the capture.
+diff --git a/src/video.cpp b/src/video.cpp
+index ceac8891ef6b5e04545623c1e7d0884a13fb9919..789f9ac974f6dcad1c50aa80479a70c775d002aa 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -33,6 +33,7 @@ extern "C" {
+ #include "nvenc/nvenc_encoder.h"
+ #include "platform/common.h"
+ #include "splitplay/doorbell.h"
++#include "splitplay/hdr_probe.h"
+ #include "splitplay/profile.h"
+ #include "splitplay/scheduling.h"
+ #include "sync.h"
+@@ -2617,6 +2618,13 @@ namespace video {
+       } else {
+         BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
+       }
++    } else if (ctx.config.dynamicRange) {
++      // SplitPlay: Moonlight asked for HDR but gets SDR (in 10 bits): the display composes in SDR, or the encoder lacks HDR.
++      if (const auto state = splitplay::hdr::last_state(); state == "enabled") {
++        BOOST_LOG(warning) << "SplitPlay: the client asked for HDR and the display is in HDR, but this encoder cannot stream it: streaming SDR"sv;
++      } else {
++        BOOST_LOG(warning) << "SplitPlay: the client asked for HDR, but this desk's display is not in HDR (state "sv << state << "): streaming SDR"sv;
++      }
+     }
+     ctx.hdr_events->raise(std::move(hdr_info));
+     splitplay::doorbell::ring();  // SplitPlay: send now, not on the next control loop cycle
+@@ -2905,6 +2913,13 @@ namespace video {
+         } else {
+           BOOST_LOG(error) << "Couldn't get display hdr metadata when colorspace selection indicates it should have one";
+         }
++      } else if (config.dynamicRange) {
++        // SplitPlay: Moonlight asked for HDR but gets SDR (in 10 bits): the display composes in SDR, or the encoder lacks HDR.
++        if (const auto state = splitplay::hdr::last_state(); state == "enabled") {
++          BOOST_LOG(warning) << "SplitPlay: the client asked for HDR and the display is in HDR, but this encoder cannot stream it: streaming SDR"sv;
++        } else {
++          BOOST_LOG(warning) << "SplitPlay: the client asked for HDR, but this desk's display is not in HDR (state "sv << state << "): streaming SDR"sv;
++        }
+       }
+       hdr_event->raise(std::move(hdr_info));
+       splitplay::doorbell::ring();  // SplitPlay: send now, not on the next control loop cycle

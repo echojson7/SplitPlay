@@ -88,6 +88,13 @@ public static class ServiceHost
                 "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsDeskPlatform>(sp),
                 var other => throw new InvalidOperationException($"unsupported Supervisor:Platform '{other}' (expected windows or fake)"),
             });
+        builder.Services.AddSingleton<FakeCpuControl>();
+        builder.Services.AddSingleton<ICpuControl>(sp =>
+            sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch
+            {
+                "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsCpuControl>(sp),
+                _ => sp.GetRequiredService<FakeCpuControl>(),
+            });
         builder.Services.AddSingleton<FakeServiceControl>();
         builder.Services.AddSingleton<IServiceControl>(sp =>
             sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch
@@ -127,6 +134,13 @@ public static class ServiceHost
         builder.Services.AddSingleton<AdminPipeServer>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<AdminPipeServer>());
         builder.Services.AddSingleton<GpuInventory>();
+        builder.Services.AddSingleton<FakeGpuCounterSource>();
+        builder.Services.AddSingleton<IGpuCounterSource>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? ActivatorUtilities.CreateInstance<PdhGpuCounterSource>(sp)
+                : sp.GetRequiredService<FakeGpuCounterSource>());
+        builder.Services.AddSingleton<GpuUsageMonitor>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<GpuUsageMonitor>());
         builder.Services.AddSingleton<FakeHostNetworkStatus>();
         builder.Services.AddSingleton<IHostNetworkStatus>(sp =>
             OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"

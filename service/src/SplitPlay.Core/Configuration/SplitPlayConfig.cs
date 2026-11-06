@@ -36,13 +36,22 @@ public sealed class HostConfig
 
     public int BasePortStride { get; set; } = 100;
 
-    /// <summary>Written to <c>DWMFRAMEINTERVAL</c> by the service (2 = 500 Hz, 4 = 250 Hz).</summary>
-    public int ComposeIntervalMs { get; set; } = 4;
+    /// <summary>
+    /// Written to <c>DWMFRAMEINTERVAL</c> by the service (2 = 500 Hz, 4 = 250 Hz). 0 (default): Auto, from the fastest
+    /// desk (<see cref="Host.ComposeInterval.Resolve"/>).
+    /// </summary>
+    public int ComposeIntervalMs { get; set; } = Host.ComposeInterval.Auto;
 
     public string LogLevel { get; set; } = "info";
 
     /// <summary>Keep the PC from sleeping on its own while a Moonlight client streams from any desk (default true).</summary>
     public bool KeepAwake { get; set; } = true;
+
+    /// <summary>
+    /// Which processor cores desk processes may use: <c>"off"</c> (default) or <c>"auto"</c> (one CCD per desk on a CPU
+    /// with several L3 caches, the P-cores on an Intel hybrid CPU). See <see cref="Host.DeskCorePlanner"/>.
+    /// </summary>
+    public string DeskCores { get; set; } = Host.DeskCoresMode.Off;
 }
 
 /// <summary>One desk (an isolated Windows session streamed to Moonlight).</summary>
@@ -136,6 +145,15 @@ public sealed class ProfileConfig
     /// <summary>Send pacing per stream the service sends when <see cref="PacingMbps"/> is not set (Sunshine's fixed 800).</summary>
     public const int DefaultPacingMbps = 800;
 
+    /// <summary>
+    /// <see cref="CaptureMode"/> the service sends when it is not set: <c>slot</c>, upstream's capture loop, until the
+    /// lab measures <c>arrival</c> on real hardware (stage4-plan, lab A).
+    /// </summary>
+    public const string DefaultCaptureMode = "slot";
+
+    /// <summary>The values of <see cref="CaptureMode"/>.</summary>
+    public static readonly IReadOnlyList<string> CaptureModes = ["slot", "arrival"];
+
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Fps { get; set; }
 
@@ -162,6 +180,14 @@ public sealed class ProfileConfig
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? PacingMbps { get; set; }
+
+    /// <summary>
+    /// When the worker hands a new desktop frame to the encoder: <c>slot</c> at the stream's next frame slot (half a
+    /// stream interval later on average), <c>arrival</c> as soon as DWM composes it, at most the stream's frame rate on
+    /// average. Applied live.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CaptureMode { get; set; }
 
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? GpuPriority { get; set; }

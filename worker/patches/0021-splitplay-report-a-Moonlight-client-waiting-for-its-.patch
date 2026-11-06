@@ -17,10 +17,10 @@ session is removed (finished, failed, replaced) and, as a last resort,
 after five minutes: Sunshine never notices a client that gave up.
 
 diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
-index 1ace173bd7e3729a8ee9c7d68beb7a20d3f61e96..cdf846851c3614c6ac71b20e560daafe79234162 100644
+index f810622e6744db791281cbfbb767211559d201c0..a2f01cd9b200ea4cc0783c974c799891567ffa05 100644
 --- a/cmake/compile_definitions/common.cmake
 +++ b/cmake/compile_definitions/common.cmake
-@@ -181,6 +181,8 @@ set(SUNSHINE_TARGET_FILES
+@@ -183,6 +183,8 @@ set(SUNSHINE_TARGET_FILES
          "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.h"
          "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
          "${CMAKE_SOURCE_DIR}/src/splitplay/options.h"
@@ -84,18 +84,18 @@ index 9a8d33cedf351ba2a076dc05876bb63e9be934d4..b11a174f2a1be5ad7dac10e618c29f6f
      return true;
    }
 diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
-index e818d8dad7a0cc703f9d640ca221e932d51ccea5..ce6c7b0e51d1318c9dd492196c186a50cad23feb 100644
+index aaa6c3a215c9fec03f6b9b7c01b1a14070858827..6b5e359d5e3b69a4e0896661d3378c258d533ba2 100644
 --- a/src/splitplay/control_client.cpp
 +++ b/src/splitplay/control_client.cpp
-@@ -31,6 +31,7 @@
- #include "control_client.h"
+@@ -32,6 +32,7 @@
+ #include "hdr_probe.h"
  #include "live_stats.h"
  #include "options.h"
 +#include "pairing.h"
  #include "profile.h"
  #include "src/config.h"
  #include "src/entry_handler.h"
-@@ -396,6 +397,7 @@ namespace splitplay::control {
+@@ -435,6 +436,7 @@ namespace splitplay::control {
                  {"state", !ready ? "starting" : (streaming ? "streaming" : "idle")},
                  {"metrics", std::move(metrics)},
                  {"sessions", std::move(sessions)},

@@ -5,6 +5,7 @@ using System.IO.Pipes;
 using Microsoft.Extensions.Options;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Host;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Lifecycle;
 using SplitPlay.Core.Steam;
@@ -53,7 +54,9 @@ public sealed class DeskSupervisor : IHostedService
     private readonly ILogger<DeskSupervisor> _logger;
     private readonly ILogger _childLogger;
     private readonly GpuInventory _gpus;
+    private readonly GpuUsageMonitor _gpuUsage;
     private readonly IDeskPlatform _platform;
+    private readonly ICpuControl _cpu;
     private readonly DateTimeOffset _startedAt;
     private TimeSpan _lastCpu;
     private DateTimeOffset _lastCpuAt;
@@ -62,17 +65,22 @@ public sealed class DeskSupervisor : IHostedService
     private readonly RequiredServicesStarter _requiredServices;
     private Task _startup = Task.CompletedTask;
     private readonly object _powerGate = new();
+    private readonly object _composeGate = new();
+    private int _fastestClientFps;
+    private int? _appliedComposeMs;
     private TaskCompletionSource _sleep = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource _wake = Completed();
 
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
-        PowerEvents power, RequiredServicesStarter requiredServices)
+        PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage, ICpuControl cpu)
     {
         ArgumentNullException.ThrowIfNull(power);
+        _cpu = cpu;
         power.Changed += OnPowerChange;
         _requiredServices = requiredServices;
         _gpus = gpus;
+        _gpuUsage = gpuUsage;
         _platform = platform;
         _childLogger = loggerFactory.CreateLogger(Logging.LogStoreLoggerProvider.ChildCategory);
         _config = config;
@@ -191,6 +199,70 @@ public sealed class DeskSupervisor : IHostedService
         {
             _logger.LogWarning("The start-up check of Remote Desktop Services failed: {Message}", ex.Message);
         }
+
+        // host.composeIntervalMs = Auto follows the desks' frame rates; a configured value is written once more.
+        ApplyComposeInterval();
+    }
+
+    // ------------------------------------------------------------------ composition interval
+
+    /// <summary>
+    /// The <c>DWMFRAMEINTERVAL</c> the host should have: <c>host.composeIntervalMs</c>, or for Auto the interval for the
+    /// fastest desk (the highest profile fps, or the highest frame rate a Moonlight client asked for since the service
+    /// started).
+    /// </summary>
+    public int EffectiveComposeIntervalMs()
+    {
+        var cfg = _config.Snapshot();
+        var fastest = Math.Max(Volatile.Read(ref _fastestClientFps), cfg.Desks.Select(d => d.Profile.Fps ?? 0).DefaultIfEmpty(0).Max());
+        return ComposeInterval.Resolve(cfg.Host.ComposeIntervalMs, fastest);
+    }
+
+    /// <summary>
+    /// Writes <see cref="EffectiveComposeIntervalMs"/> when it changed (prepared hosts only). DWM reads it when a session
+    /// logs on, so it applies to desk sessions that log on from then on. Never throws.
+    /// </summary>
+    public void ApplyComposeInterval()
+    {
+        lock (_composeGate)
+        {
+            var ms = EffectiveComposeIntervalMs();
+            if (_appliedComposeMs == ms)
+            {
+                return;
+            }
+
+            try
+            {
+                // Remembered only once written: on a host that is not prepared yet (a `host prepare` run by hand while
+                // the service runs) the next desk change, client or host setting writes it.
+                if (_platform.ApplyComposeInterval(ms))
+                {
+                    _appliedComposeMs = ms;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or HostTuningException or System.Security.SecurityException)
+            {
+                _logger.LogWarning("Could not set the composition interval to {Interval} ms: {Message}", ms, ex.Message);
+            }
+        }
+    }
+
+    /// <summary>A client asked for <paramref name="fps"/>: Auto composes faster when it is the fastest stream so far.</summary>
+    private void NoteClientFps(int fps)
+    {
+        int seen;
+        do
+        {
+            seen = Volatile.Read(ref _fastestClientFps);
+            if (fps <= seen)
+            {
+                return;
+            }
+        }
+        while (Interlocked.CompareExchange(ref _fastestClientFps, fps, seen) != seen);
+
+        ApplyComposeInterval();
     }
 
     /// <summary>
@@ -407,16 +479,50 @@ public sealed class DeskSupervisor : IHostedService
             _lastCpuAt = now;
         }
 
+        var usage = _gpuUsage.Current();
         var (memoryUsedMb, memoryTotalMb) = GpuInventory.PhysicalMemory();
-        var composeMs = _config.Snapshot().Host.ComposeIntervalMs;
+        var composeMs = EffectiveComposeIntervalMs();
         var host = new HostMetricsDto(
             Math.Round(Math.Clamp(cpuPercent, 0, 100), 1),
             memoryUsedMb,
             memoryTotalMb,
             composeMs > 0 ? Math.Round(1000.0 / composeMs, 1) : null,
-            _gpus.Get());
-        var desks = List().Select(d => DeskMetricsEntryDto.From(d.Id, d.Metrics)).ToList();
+            GpusWithUsage(usage));
+        // A desk without its own session (a dev worker on the console) would show the console's games: leave it empty.
+        var console = _platform.ConsoleSessionId();
+        var anyEncoder = usage?.Adapters.Values.Any(a => a.EncoderPercent is not null) == true;
+        var desks = List().Select(d =>
+        {
+            var entry = DeskMetricsEntryDto.From(d.Id, d.Metrics);
+            if (usage is null || d.SessionId is not int session || session == console)
+            {
+                return entry;
+            }
+
+            // A running desk whose processes use no GPU yet shows 0, not "unknown".
+            var mine = usage.Sessions.GetValueOrDefault(session);
+            return entry with
+            {
+                GpuPercent = mine?.GpuPercent ?? 0,
+                EncoderPercent = mine?.EncoderPercent ?? (anyEncoder ? 0 : null),
+                VramMb = mine?.VramMb ?? 0,
+            };
+        }).ToList();
         return new MetricsDto(host, desks);
+    }
+
+    /// <summary>The DXGI adapter list with live load, encoder and VRAM use filled in where the counters have them.</summary>
+    private IReadOnlyList<GpuDto> GpusWithUsage(GpuUsageSnapshot? usage)
+    {
+        var gpus = _gpus.Get();
+        if (usage is null)
+        {
+            return gpus;
+        }
+
+        return gpus.Select(g => usage.Adapters.TryGetValue(g.Luid, out var a)
+            ? g with { UtilizationPercent = a.UtilizationPercent, EncoderPercent = a.EncoderPercent, VramUsedMb = a.VramUsedMb }
+            : g).ToList();
     }
 
     // ------------------------------------------------------------------ CRUD
@@ -461,6 +567,7 @@ public sealed class DeskSupervisor : IHostedService
 
             var rt = AddRuntime(saved);
             _logger.LogInformation("Created desk {Desk} (base port {Port}, user {User})", saved.Id, saved.BasePort, saved.User);
+            ApplyComposeInterval();
             _ = Task.Run(() =>
             {
                 try
@@ -555,6 +662,8 @@ public sealed class DeskSupervisor : IHostedService
                 _platform.UpdateLogonListing(saved);
             }
 
+            ApplyComposeInterval();
+
             IpcConnection? connection;
             lock (rt.Gate)
             {
@@ -625,6 +734,7 @@ public sealed class DeskSupervisor : IHostedService
             _desks.TryRemove(id, out _);
             TryDeleteDirectory(_paths.DeskDirectory(id));
             _logger.LogInformation("Deleted desk {Desk}{User}", id, deleteUser ? $" and Windows account {config.User}" : "");
+            ApplyComposeInterval();
         }
     }
 
@@ -652,6 +762,7 @@ public sealed class DeskSupervisor : IHostedService
             }
 
             _logger.LogInformation("Imported configuration with {Count} desk(s)", config.Desks.Count);
+            ApplyComposeInterval();
         }
 
         return List();
@@ -988,6 +1099,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.SessionLost = false;
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
+                rt.Hdr = null;
                 rt.PinRequest = null;
                 if (rt.Machine.State == DeskState.Stopping)
                 {
@@ -1263,6 +1375,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.ChildPid = null;
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
+                rt.Hdr = null;
                 rt.PinRequest = null;
             }
         }
@@ -1594,7 +1707,7 @@ public sealed class DeskSupervisor : IHostedService
             }
         }
 
-        StartSessionJanitor(rt, config, session);
+        StartSessionJanitor(rt, config, session, credentials.User);
         return null;
     }
 
@@ -1715,6 +1828,7 @@ public sealed class DeskSupervisor : IHostedService
                     _logger.LogWarning("Desk {Desk}: the RDP session came back as session {Now} (was {Before}); restarting the worker there",
                         rt.Id, now, before);
                     abort?.TrySetResult($"desk session changed from {before} to {now} after a reconnect");
+                    RestartSessionJanitor(rt, now);
                 }
                 else
                 {
@@ -1806,23 +1920,41 @@ public sealed class DeskSupervisor : IHostedService
         }
     }
 
-    // ------------------------------------------------------------------ per-session janitor (Bluetooth)
+    // ------------------------------------------------------------------ per-session janitors (Bluetooth, CPU cores)
 
-    private void StartSessionJanitor(DeskRuntime rt, DeskConfig config, int session)
+    private void StartSessionJanitor(DeskRuntime rt, DeskConfig config, int session, string user)
     {
         CancelSessionJanitor(rt);
-        if (!config.DisableBluetoothUserService)
-        {
-            return;
-        }
-
         var cts = new CancellationTokenSource();
         lock (rt.Gate)
         {
             rt.SeatScope = cts;
+            rt.JanitorUser = user;
         }
 
-        _ = Task.Run(() => BluetoothJanitorAsync(rt.Id, session, cts.Token), CancellationToken.None);
+        if (config.DisableBluetoothUserService)
+        {
+            _ = Task.Run(() => BluetoothJanitorAsync(rt.Id, session, cts.Token), CancellationToken.None);
+        }
+
+        _ = Task.Run(() => CpuJanitorAsync(rt.Id, session, user, cts.Token), CancellationToken.None);
+    }
+
+    /// <summary>The seat's session came back under another id: the janitors follow it.</summary>
+    private void RestartSessionJanitor(DeskRuntime rt, int session)
+    {
+        DeskConfig config;
+        string? user;
+        lock (rt.Gate)
+        {
+            config = rt.Config;
+            user = rt.JanitorUser;
+        }
+
+        if (user is not null)
+        {
+            StartSessionJanitor(rt, config, session, user);
+        }
     }
 
     private void CancelSessionJanitor(DeskRuntime rt)
@@ -1838,6 +1970,64 @@ public sealed class DeskSupervisor : IHostedService
         {
             cts.Cancel();
             cts.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// The processors of each desk (null: not restricted) under the current <c>host.deskCores</c> and desk profiles.
+    /// </summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<int>?> CpuPlan()
+    {
+        var config = _config.Snapshot();
+        return DeskCorePlanner.Plan(_cpu.Topology(), config.Host.DeskCores,
+            [.. config.Desks.Select(d => new DeskCoreRequest(d.Id, d.Profile.CpuSet))]);
+    }
+
+    /// <summary>
+    /// Stage 4 PR 12: keeps the desk user's processes in the session on the processors <see cref="CpuPlan"/> gives the
+    /// desk, re-reading the plan every sweep so that a settings change applies to a running desk within one period.
+    /// </summary>
+    private async Task CpuJanitorAsync(string deskId, int session, string user, CancellationToken ct)
+    {
+        var period = TimeSpan.FromMilliseconds(Math.Max(100, _options.Value.CpuSweepMs));
+        IDeskCpuScope? scope = null;
+        Task sweep = Task.CompletedTask;
+        try
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                try
+                {
+                    scope ??= _cpu.Open(deskId, session, user);
+                    var cpus = CpuPlan().GetValueOrDefault(deskId);
+                    var current = scope;
+                    // One sweep at a time: the next starts only after this one has ended, even when it is cancelled.
+                    sweep = Task.Run(() => current.Sweep(cpus), CancellationToken.None);
+                    await sweep.WaitAsync(ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogDebug("Desk {Desk}: processor sweep failed: {Message}", deskId, ex.Message);
+                }
+
+                await Task.Delay(period, _time, ct).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        finally
+        {
+            try
+            {
+                await sweep.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogDebug("Desk {Desk}: processor sweep failed: {Message}", deskId, ex.Message);
+            }
+
+            scope?.Dispose();
         }
     }
 
@@ -1920,6 +2110,7 @@ public sealed class DeskSupervisor : IHostedService
 
                 _logger.LogInformation("Desk {Desk}: {Client} ({Address}) connected, {Width}x{Height}@{Fps} {Codec}", rt.Id,
                     stream.Client ?? "unnamed client", stream.Address ?? "?", stream.Width, stream.Height, stream.FpsRequested, stream.Codec ?? "?");
+                NoteClientFps(stream.FpsRequested);
                 if (update == WorkerUpdate.Publish)
                 {
                     Publish(rt);
@@ -1940,6 +2131,29 @@ public sealed class DeskSupervisor : IHostedService
                 _logger.LogInformation("Desk {Desk}: {Client} ({Address}) disconnected", rt.Id, stream.Client ?? "unnamed client", stream.Address ?? "?");
                 if (update == WorkerUpdate.Publish)
                 {
+                    Publish(rt);
+                }
+
+                break;
+            }
+
+            case EventMessage { Name: IpcProtocol.Events.DisplayHdr } e:
+            {
+                if (IpcDisplayHdr.FromJson(e.Data, _time.GetUtcNow()) is not { } hdr)
+                {
+                    break;
+                }
+
+                var update = rt.ApplyDisplayHdr(worker.Connection, hdr);
+                if (update == WorkerUpdate.Ignored)
+                {
+                    break;
+                }
+
+                if (update == WorkerUpdate.Publish)
+                {
+                    _logger.LogInformation("Desk {Desk}: display HDR {State} ({Adapter}, {Bits} bits)", rt.Id, hdr.State,
+                        hdr.Adapter ?? "?", hdr.BitsPerColor);
                     Publish(rt);
                 }
 

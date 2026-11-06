@@ -85,6 +85,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 | POST | `/auth/login`, `/auth/logout`, `/auth/password` | login, logout, set or change the admin password |
 | GET, PUT | `/host` | read or replace the `host` object of config.md; validated and saved; a `webPort` change applies after a service restart; a `lanAccess` change toggles the firewall rule `SplitPlay Web UI` |
 | GET | `/host/users` | local accounts that can be a desk user: `[{"name","fullName","isAdmin","isConsoleUser","createdBySplitPlay"}]` (built-in accounts left out) |
+| GET | `/host/cpu` | the CPU and how `host.deskCores` splits it: `{"name":"AMD Ryzen 9 7950X3D 16-Core Processor","cores":16,"threads":32,"kind":"x3d","mode":"auto","caches":[{"cpus":[16,…,31],"l3Mb":96},{"cpus":[0,…,15],"l3Mb":32}],"desks":[{"id":"anna","cpus":[16,…,31]},{"id":"guest","cpus":[0,…,15]}],"auto":[…]}`. `kind`: `uniform` (nothing to split), `hybrid` (Intel P- and E-cores), `ccd` (several L3 caches), `x3d` (several, one larger). `caches`: the processors by L3 cache, larger first. `desks`: each desk's processors now (`cpus` null: every processor); `auto`: what `"auto"` would give each desk. Processor numbers as in config.md `profile.cpuSet` |
 | GET | `/host/network` | LAN addresses of the host for Moonlight and what may keep Moonlight from the desks: `{"addresses":["192.168.1.20"],"profile":"Private","mdnsAllowed":true}`. `addresses`: IPv4 addresses of interfaces that are up, without loopback and link-local (169.254/16), those of interfaces with a default gateway first; empty when none. A desk is added in Moonlight as `<address>:<basePort>`. `profile`: the Windows network profile (`Public`, `Private`, `Domain`) of the interfaces with a default gateway (of all interfaces when none has one; virtual switches of Hyper-V or WSL have none), the worst one when they differ; the desks' firewall rules cover private and domain networks only. `mdnsAllowed`: whether inbound mDNS (UDP 5353) reaches Windows' mDNS responder on that profile: the firewall is off for it, or an enabled rule such as the built-in "mDNS (UDP-In)" allows it and none blocks it. `null` when unknown. SplitPlay never changes the profile or the rule; the UI shows "Network · Public" and "mDNS · Off" in Settings only when there is a problem |
 | GET | `/host/services` | the Windows services SplitPlay depends on, see [Host services](#host-services) |
 | POST | `/host/services/{name}/start`, `/host/services/{name}/stop` | start or stop one of those services; 202 with its entry. `{name}` outside the list → 404 `not_found`; a service that cannot be started or stopped now (already running, disabled, not installed, a driver) → 409 `invalid_state`; the SCM refusing → 500 `internal` with its message |
@@ -153,7 +154,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
   "autostart": true,
   "gpu": "auto",
   "profile": { "fps": 120, "width": 1920, "height": 1080, "bitrateKbps": 60000, "codec": "hevc" },
-  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": null, "clients": 0 },
+  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": null, "clients": 0, "captureFps": null },
   "stream": null,
   "pinRequest": null,
   "lastError": null
@@ -165,14 +166,23 @@ A streaming desk:
 ```json
 {
   "state": "Streaming",
-  "metrics": { "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4, "lossPct": 0, "rttMs": 4, "clients": 1 },
+  "metrics": { "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4, "lossPct": 0, "rttMs": 4, "clients": 1, "captureFps": 238.4 },
   "stream": {
     "client": "Living room PC", "clientId": "…", "address": "192.168.1.37",
     "width": 1920, "height": 1080, "fps": 120, "codec": "hevc", "bitrateKbps": 50000, "hdr": false,
     "startedAt": "2026-10-29T18:00:00+00:00"
-  }
+  },
+  "hdr": { "state": "unsupported", "monitor": null, "adapter": "NVIDIA GeForce RTX 5070", "bitsPerColor": 8, "maxNits": 270,
+           "updatedAt": "2026-11-06T18:00:00+00:00" }
 }
 ```
+
+`hdr` is the HDR state of the desk session's display as the worker measures it (`display_hdr` in ipc.md), `null` (or
+absent) while the desk's worker has not reported it and after it stops. `state`: `enabled` (Windows composes the
+display in HDR10, so a client that asks for HDR gets HDR), `off` (the display supports HDR, but it is switched off in
+Windows), `unsupported` (SDR only: what Microsoft's RDP display gives a seat that connects without RDP GFX) or
+`unknown`. `monitor`, `adapter`, `bitsPerColor` and `maxNits` describe that display, `null` when not reported. With
+`stream.hdr` true and `hdr.state` `off` or `unsupported` the stream is SDR (10-bit), and the UI says "SDR instead of HDR".
 
 `stream` is the Moonlight stream the desk serves, `null` when nobody is connected (with several, the earliest).
 `client` and `clientId` name the paired client (`clientId` as in `GET /desks/{id}/clients`), `null` when the worker does
@@ -189,8 +199,9 @@ before patch 0021 never reports one; the desk page's PIN row works with every wo
 
 `metrics` are the worker's live numbers over the last second (definitions in ipc.md): `fps` and `bitrateKbps` actually
 sent, `encodeMsP50`/`encodeMsP99` host processing latency (capture to encoded frame), `lossPct` frames the client
-reported lost, `rttMs` round-trip time to the client (`null` until one is measured). All 0 (`rttMs` `null`) when
-nothing streams.
+reported lost, `rttMs` round-trip time to the client (`null` until one is measured), `captureFps` frames DWM composed
+per second in the desk session (the real composition rate, `null` without a stream). All 0 (`rttMs` and `captureFps`
+`null`) when nothing streams.
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.
@@ -248,15 +259,27 @@ The host cannot take V-Sync latency out of the client, only recommend settings t
 {
   "host": {
     "cpuPercent": 7.5, "memoryUsedMb": 9120, "memoryTotalMb": 32607, "composeHz": 250,
-    "gpus": [{ "luid": "0x0000000000012345", "name": "NVIDIA GeForce RTX 4080", "utilizationPercent": null,
-               "encoderPercent": null, "vramUsedMb": null, "vramTotalMb": 16376 }]
+    "gpus": [{ "luid": "0x0000000000012345", "name": "NVIDIA GeForce RTX 4080", "utilizationPercent": 41,
+               "encoderPercent": 12, "vramUsedMb": 6230, "vramTotalMb": 16376 }]
   },
   "desks": [{ "id": "desk-1", "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4,
-              "lossPct": 0, "rttMs": 4, "clients": 1 }]
+              "lossPct": 0, "rttMs": 4, "clients": 1, "captureFps": 238.4, "gpuPercent": 34, "encoderPercent": 12, "vramMb": 2900 }]
 }
 ```
 
-Values that are not measured yet are `null`. Software adapters (Microsoft Basic Render Driver) are not listed.
+`composeHz` is the composition rate the host is set to (`host.composeIntervalMs`, Auto resolved; config.md), each desk's
+`captureFps` the rate DWM actually composes at. Values that are not measured yet are `null`. Software adapters (Microsoft Basic Render Driver) are not listed.
+
+GPU numbers come from the performance counters Task Manager reads (`GPU Engine`, `GPU Process Memory`,
+`GPU Adapter Memory`), sampled once a second while someone reads metrics and not at all 30 s after the last read.
+The first read after a pause returns `null` for them; they appear about a second later.
+
+- `utilizationPercent`: the busiest engine of the adapter, all processes summed (Task Manager's "GPU").
+  `encoderPercent`: the busiest video encode engine (NVENC; AMD's shared `VideoCodec`), `null` when the adapter has
+  none. `vramUsedMb`: dedicated memory in use.
+- Per desk, the same figures over the processes of the desk's Windows session (its games and its worker, which
+  owns the NVENC session): `gpuPercent`, `encoderPercent`, `vramMb` (dedicated memory). `null` while the desk has no
+  session of its own (stopped, or a worker on the console).
 The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}` with the same fields.
 
 ## Error codes

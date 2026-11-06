@@ -4,7 +4,7 @@
 
 import { reactive } from 'vue'
 import { api, ApiClient, ApiError, parseLiveEvent } from './api/client'
-import type { AuthSession, Desk, Health, MetricsSnapshot } from './api/types'
+import type { AuthSession, Desk, DeskMetricsEntry, Health, MetricsSnapshot } from './api/types'
 
 export interface StoreState {
   desks: Desk[]
@@ -38,10 +38,25 @@ export function createStore(client: ApiClient) {
   let wsRetryTimer: ReturnType<typeof setTimeout> | null = null
   let wanted = false
 
+  /** GPU figures come only with the metrics push: carry them over when a desk object is replaced. */
+  function withGpu(desk: Desk, old: Desk | undefined): Desk {
+    if (!old || desk.metrics?.gpuPercent !== undefined) return desk
+    const { gpuPercent, encoderPercent, vramMb } = old.metrics ?? {}
+    return { ...desk, metrics: { ...desk.metrics, gpuPercent, encoderPercent, vramMb } }
+  }
+
   function upsertDesk(desk: Desk): void {
     const i = state.desks.findIndex((d) => d.id === desk.id)
-    if (i >= 0) state.desks.splice(i, 1, desk)
+    if (i >= 0) state.desks.splice(i, 1, withGpu(desk, state.desks[i]))
     else state.desks.push(desk)
+  }
+
+  /** Copies the per-desk numbers of a metrics snapshot into the desk objects. */
+  function mergeDeskMetrics(entries: readonly DeskMetricsEntry[]): void {
+    for (const m of entries) {
+      const d = state.desks.find((x) => x.id === m.id)
+      if (d) d.metrics = { ...d.metrics, ...m }
+    }
   }
 
   function removeDesk(id: string): void {
@@ -60,12 +75,14 @@ export function createStore(client: ApiClient) {
   }
 
   async function refreshDesks(): Promise<void> {
-    state.desks = await guard(client.listDesks())
+    const old = new Map(state.desks.map((d) => [d.id, d]))
+    state.desks = (await guard(client.listDesks())).map((d) => withGpu(d, old.get(d.id)))
     state.desksLoaded = true
   }
 
   async function refreshMetrics(): Promise<void> {
     state.metrics = await guard(client.metrics())
+    mergeDeskMetrics(state.metrics.desks)
   }
 
   async function refreshHealth(): Promise<void> {
@@ -133,10 +150,7 @@ export function createStore(client: ApiClient) {
       if (evt.type === 'desk') upsertDesk(evt.desk)
       else if (evt.host || evt.desks) {
         state.metrics = { host: evt.host ?? state.metrics?.host ?? { gpus: [] }, desks: evt.desks ?? state.metrics?.desks ?? [] }
-        for (const m of evt.desks ?? []) {
-          const d = state.desks.find((x) => x.id === m.id)
-          if (d) d.metrics = { ...d.metrics, ...m }
-        }
+        mergeDeskMetrics(evt.desks ?? [])
       }
     }
     ws.onclose = () => {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Pure desk helpers shared by the library, the add-desk wizard and the desk page.
 
-import type { Desk, DeskConfig, DeskMetrics, DeskProfile, DeskState, DeskStream } from './api/types'
+import type { Desk, DeskConfig, DeskHdr, DeskMetrics, DeskProfile, DeskState, DeskStream } from './api/types'
 import { DESK_ID_RE } from './api/validate'
 import { fmtBitrate, fmtNumber, t } from './i18n'
 
@@ -159,19 +159,63 @@ export function fmtMs(value: number, decimals = true): string {
   return t('unit.ms', { value: fmtNumber(value, decimals && value < 10 ? 1 : 0) })
 }
 
-/** "1920×1080 · 120 FPS · HEVC · 50 Mbit/s" (+ HDR): what the client asked for. */
-export function streamSummary(stream: DeskStream): string {
+/**
+ * "1920×1080 · 120 FPS · HEVC · 50 Mbit/s" (+ HDR): what the client asked for. A client that asked for HDR on a desk
+ * whose display is known not to be in HDR gets SDR, and the line says so.
+ */
+export function streamSummary(stream: DeskStream, hdr?: DeskHdr | null): string {
   const parts = [`${stream.width}×${stream.height}`, t('unit.fps', { value: stream.fps }), codecLabel(stream.codec)]
   if (stream.bitrateKbps > 0) parts.push(fmtBitrate(stream.bitrateKbps))
-  if (stream.hdr) parts.push('HDR')
+  if (stream.hdr) parts.push(hdr && (hdr.state === 'off' || hdr.state === 'unsupported') ? t('live.sdrNotHdr') : 'HDR')
   return parts.join(' · ')
+}
+
+/** The "HDR" row of a desk: "On", "Off in Windows" or "Not available"; null while the state is unknown. */
+export function hdrLabel(hdr: DeskHdr | null | undefined): string | null {
+  switch (hdr?.state) {
+    case 'enabled':
+      return t('live.hdrOn')
+    case 'off':
+      return t('live.hdrOff')
+    case 'unsupported':
+      return t('live.hdrUnsupported')
+    default:
+      return null
+  }
 }
 
 /** The desk list's second line while streaming: "Laptop · 120 FPS · 8 ms". */
 export function streamLine(stream: DeskStream, metrics: Partial<DeskMetrics>): string {
   const parts = [deviceName(stream), t('unit.fps', { value: fmtNumber(metrics.fps ?? 0) })]
   if (metrics.rttMs != null) parts.push(fmtMs(metrics.rttMs, false))
+  const gpu = gpuShort(metrics)
+  if (gpu) parts.push(gpu)
   return parts.join(' · ')
+}
+
+/** "GPU 34 %" for a desk row; null while the desk's GPU load is not measured. */
+export function gpuShort(metrics: Partial<DeskMetrics> | undefined): string | null {
+  if (metrics?.gpuPercent == null) return null
+  return t('gpu.short', { value: fmtNumber(metrics.gpuPercent) })
+}
+
+/** "34 % · NVENC 12 % · 1,2 GB" for the desk page; null while not measured. */
+export function gpuLine(metrics: Partial<DeskMetrics> | undefined): string | null {
+  if (metrics?.gpuPercent == null) return null
+  const parts = [t('unit.percent', { value: fmtNumber(metrics.gpuPercent) })]
+  if (metrics.encoderPercent != null) parts.push(t('gpu.encoderValue', { value: fmtNumber(metrics.encoderPercent) }))
+  if (metrics.vramMb != null) parts.push(fmtGb(metrics.vramMb))
+  return parts.join(' · ')
+}
+
+/** Megabytes as gigabytes with one decimal ("1,2 GB"); "—" when unknown. */
+export function fmtGb(mb: number | null | undefined): string {
+  return mb == null ? t('common.none') : t('unit.gb', { value: fmtNumber(mb / 1024, 1) })
+}
+
+/** A percentage ("34 %"); "—" when unknown. */
+export function fmtPercent(value: number | null | undefined): string {
+  return value == null ? t('common.none') : t('unit.percent', { value: fmtNumber(value) })
 }
 
 const PORT_BUSY = /^Port (\d+) busy: (.+)$/

@@ -5,14 +5,17 @@
 import type {
   Desk,
   DeskConfig,
+  DeskHdr,
   DeskMetrics,
   DeskState,
+  HostCpu,
   HostService,
   HostSettings,
   LogLine,
   MetricsSnapshot,
   PairedClient,
 } from '../src/api/types.ts'
+import { DESK_CORES_MODES } from '../src/api/types.ts'
 import { isValidPackHost, mockClientPack, mockClientScript } from './client-pack.ts'
 
 export interface MockRequest {
@@ -70,7 +73,19 @@ function ok(body: unknown, status = 200): MockResponse {
   return { status, body }
 }
 
-const IDLE_METRICS: DeskMetrics = { fps: 0, bitrateKbps: 0, encodeMsP50: 0, encodeMsP99: 0, lossPct: 0, rttMs: null, clients: 0 }
+/** What a worker reports for an RDP desk display: SDR only (Microsoft's RdpIdd without RDP GFX). */
+const DESK_HDR: DeskHdr = { state: 'unsupported', monitor: null, adapter: 'NVIDIA GeForce RTX 5070', bitsPerColor: 8, maxNits: 270 }
+
+const IDLE_METRICS: DeskMetrics = {
+  fps: 0,
+  bitrateKbps: 0,
+  encodeMsP50: 0,
+  encodeMsP99: 0,
+  lossPct: 0,
+  rttMs: null,
+  clients: 0,
+  captureFps: null,
+}
 
 function clone<T>(v: T): T {
   return JSON.parse(JSON.stringify(v)) as T
@@ -189,9 +204,10 @@ export class MockBackend {
     lanAccess: false,
     basePortStart: 48089,
     basePortStride: 100,
-    composeIntervalMs: 4,
+    composeIntervalMs: 0,
     logLevel: 'info',
     keepAwake: true,
+    deskCores: 'off',
   }
   private clientSeq = 1
   private readonly services = new Map<string, ServiceEntry>()
@@ -224,6 +240,7 @@ export class MockBackend {
     a.desk.userManaged = false
     a.clients.push({ id: 'c0ffee00-0000-4000-8000-000000000001', name: 'Ноутбук Ани', pairedAt: '2026-10-20T18:00:00Z' })
     a.clientAddress = '192.168.1.37'
+    a.desk.hdr = { ...DESK_HDR }
     this.connectClient(a)
     const b = this.addDesk({
       id: 'guest',
@@ -249,6 +266,7 @@ export class MockBackend {
         sessionId: null,
         metrics: { ...IDLE_METRICS },
         stream: null,
+        hdr: null,
         pinRequest: null,
         lastError: null,
       },
@@ -309,6 +327,9 @@ export class MockBackend {
         e.nextAt += this.stepMs
         if (e.desk.state === 'SessionReady') e.desk.sessionId = 2 + [...this.desks.keys()].indexOf(e.desk.id)
         if (e.desk.state === 'Stopped') e.desk.sessionId = null
+        // The worker reports its display's HDR state once it runs: an RDP desk display is SDR only.
+        if (e.desk.state === 'Ready' && !e.desk.hdr) e.desk.hdr = { ...DESK_HDR, updatedAt: new Date(t).toISOString() }
+        if (e.desk.state === 'Stopped' || e.desk.state === 'Stopping') e.desk.hdr = null
         if (e.desk.state === 'Streaming') this.connectClient(e)
         else e.desk.stream = null
         // A desk without a paired device: Moonlight on the client asks to pair once the desk is up (worker patch 0021).
@@ -328,8 +349,14 @@ export class MockBackend {
           encodeMsP99: Math.round((p50 + 1.8 + 1.2 * Math.abs(jitter)) * 10) / 10,
           lossPct: jitter > 0.93 ? Math.round((jitter - 0.9) * 40) / 10 : 0,
           rttMs: Math.round(3 + 1.5 * jitter),
+          captureFps: Math.round(10 * (238 + 3 * jitter)) / 10,
           clients: 1,
+          gpuPercent: Math.round(34 + 6 * phase),
+          encoderPercent: Math.round(11 + 2 * jitter),
+          vramMb: 2900 + Math.round(120 * phase),
         }
+      } else if (e.desk.state === 'Ready') {
+        e.desk.metrics = { ...IDLE_METRICS, gpuPercent: 2, encoderPercent: 0, vramMb: 640 }
       } else {
         e.desk.metrics = { ...IDLE_METRICS }
       }
@@ -555,12 +582,15 @@ export class MockBackend {
     if (path === '/logs' && method === 'GET') return ok(this.logs(req.query ?? {}))
     if (path === '/host' && method === 'GET') return ok(clone(this.host))
     if (path === '/host/network' && method === 'GET') return ok({ addresses: [...MOCK_ADDRESSES], ...this.network })
+    if (path === '/host/cpu' && method === 'GET') return ok(this.cpu())
     if (path === '/host' && method === 'PUT') {
       const h = req.body as Partial<HostSettings> | undefined
       if (!h || typeof h.webPort !== 'number' || h.webPort < 1 || h.webPort > 65535)
         return err(400, 'invalid_config', 'webPort is invalid')
-      if (typeof h.composeIntervalMs !== 'number' || h.composeIntervalMs < 2 || h.composeIntervalMs > 17)
-        return err(400, 'invalid_config', 'composeIntervalMs must be 2..17')
+      if (typeof h.composeIntervalMs !== 'number' || h.composeIntervalMs < 0 || h.composeIntervalMs > 100)
+        return err(400, 'invalid_config', 'composeIntervalMs must be 0 (auto) or 1..100')
+      if (h.deskCores !== undefined && !DESK_CORES_MODES.includes(h.deskCores))
+        return err(400, 'invalid_config', 'host.deskCores must be one of off, auto')
       this.host = { ...this.host, ...clone(h) } as HostSettings
       return ok(clone(this.host))
     }
@@ -612,6 +642,22 @@ export class MockBackend {
     }
   }
 
+  /** A Ryzen 9 7950X3D (CCD 1 has the 3D V-Cache): with auto, desks take the CCDs in turn, the V-Cache one first. */
+  private cpu(): HostCpu {
+    const ccd = (n: number) => Array.from({ length: 16 }, (_, i) => n * 16 + i)
+    const auto = [...this.desks.values()].map((e, i) => ({ id: e.desk.id, cpus: ccd(i % 2 === 0 ? 1 : 0) }))
+    const mode = this.host.deskCores ?? 'off'
+    return {
+      name: 'AMD Ryzen 9 7950X3D 16-Core Processor',
+      cores: 16,
+      threads: 32,
+      kind: 'x3d',
+      mode,
+      desks: mode === 'auto' ? auto : auto.map((d) => ({ id: d.id, cpus: null })),
+      auto,
+    }
+  }
+
   private metrics(): MetricsSnapshot {
     const t = this.now()
     const desks = [...this.desks.values()].map((e) => ({ id: e.desk.id, ...e.desk.metrics }))
@@ -621,7 +667,7 @@ export class MockBackend {
         cpuPercent: Math.round(18 + 9 * streaming + 4 * Math.sin(t / 1300)),
         memoryUsedMb: 14200 + 2100 * streaming,
         memoryTotalMb: 65536,
-        composeHz: Math.round(1000 / this.host.composeIntervalMs),
+        composeHz: Math.round(1000 / (this.host.composeIntervalMs || 4)),
         gpus: [
           {
             luid: '0x0000000000012345',

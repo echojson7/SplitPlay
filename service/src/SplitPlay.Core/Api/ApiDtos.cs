@@ -142,6 +142,11 @@ public static class DeskHdrStates
     public const string Unknown = "unknown";
 }
 
+/// <summary><c>desk.pinRequest</c>: a Moonlight client that shows a PIN and waits for it to be typed in.</summary>
+/// <param name="Address">Client IP address, null when unknown.</param>
+/// <param name="Since">When the client started pairing.</param>
+public sealed record DeskPinRequestDto(string? Address, DateTimeOffset Since);
+
 /// <summary>Desk object returned by the desk endpoints.</summary>
 public sealed class DeskDto
 {
@@ -194,6 +199,9 @@ public sealed class DeskDto
 
     /// <summary>The HDR state of the desk session's display; null while no worker has reported it.</summary>
     public DeskHdrDto? Hdr { get; set; }
+
+    /// <summary>A Moonlight client waiting for its PIN on this desk, null when none is (docs/contracts/web-api.md).</summary>
+    public DeskPinRequestDto? PinRequest { get; set; }
 
     public string? LastError { get; set; }
 }

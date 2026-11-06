@@ -54,7 +54,7 @@ index 1ace173bd7e3729a8ee9c7d68beb7a20d3f61e96..f810622e6744db791281cbfbb7672115
          "${CMAKE_SOURCE_DIR}/src/splitplay/live_stats.h"
          "${CMAKE_SOURCE_DIR}/src/splitplay/options.cpp"
 diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
-index e818d8dad7a0cc703f9d640ca221e932d51ccea5..341d2f91a5bb364d131e662af4ba7353189f4f2c 100644
+index c9d1a52e39211b41672fa8f8b65da42c2ff20a00..aaa6c3a215c9fec03f6b9b7c01b1a14070858827 100644
 --- a/src/splitplay/control_client.cpp
 +++ b/src/splitplay/control_client.cpp
 @@ -29,6 +29,7 @@
@@ -73,7 +73,7 @@ index e818d8dad7a0cc703f9d640ca221e932d51ccea5..341d2f91a5bb364d131e662af4ba7353
      constexpr DWORD write_timeout_ms = 5000;
      constexpr int exit_code_pipe_lost = 3;  ///< Process exit code when the service goes away.
  
-@@ -256,6 +258,9 @@ namespace splitplay::control {
+@@ -282,6 +284,9 @@ namespace splitplay::control {
          heartbeat = std::jthread {[this](std::stop_token st) {
            heartbeat_loop(st);
          }};
@@ -83,7 +83,7 @@ index e818d8dad7a0cc703f9d640ca221e932d51ccea5..341d2f91a5bb364d131e662af4ba7353
          return true;
        }
  
-@@ -287,6 +292,10 @@ namespace splitplay::control {
+@@ -313,6 +318,10 @@ namespace splitplay::control {
          if (stop_event) {
            SetEvent(stop_event);
          }
@@ -94,7 +94,7 @@ index e818d8dad7a0cc703f9d640ca221e932d51ccea5..341d2f91a5bb364d131e662af4ba7353
          if (heartbeat.joinable()) {
            heartbeat.request_stop();
            heartbeat.join();
-@@ -381,6 +390,10 @@ namespace splitplay::control {
+@@ -407,6 +416,10 @@ namespace splitplay::control {
          std::condition_variable_any cv;
          std::uint64_t seq = 0;
          while (!st.stop_requested() && !stopping) {
@@ -105,7 +105,7 @@ index e818d8dad7a0cc703f9d640ca221e932d51ccea5..341d2f91a5bb364d131e662af4ba7353
            // Stopped streams are reaped (and their client_disconnected queued) by the RTSP thread within 500 ms; this
            // thread never joins stream threads. Queued client events go first, then the heartbeat: this thread is the
            // only one writing either to the pipe.
-@@ -406,6 +419,37 @@ namespace splitplay::control {
+@@ -432,6 +445,37 @@ namespace splitplay::control {
          }
        }
  
@@ -143,7 +143,7 @@ index e818d8dad7a0cc703f9d640ca221e932d51ccea5..341d2f91a5bb364d131e662af4ba7353
        void read_loop() {
          HANDLE read_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
          std::string buffer;
-@@ -548,7 +592,10 @@ namespace splitplay::control {
+@@ -574,7 +618,10 @@ namespace splitplay::control {
        HANDLE write_event = nullptr;
        std::mutex write_mutex;
        std::thread reader;

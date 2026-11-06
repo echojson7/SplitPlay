@@ -204,6 +204,13 @@ export interface DeskHdr {
   updatedAt?: string
 }
 
+/** A Moonlight client that shows a PIN and waits for it (`desk.pinRequest`). */
+export interface DeskPinRequest {
+  /** Client IP address; null when unknown. */
+  address: string | null
+  since: string
+}
+
 /** Desk object as returned by GET /desks and GET /desks/{id}. */
 export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   basePort: number
@@ -220,6 +227,8 @@ export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   stream?: DeskStream | null
   /** The display's HDR state; null (or absent from older services) while no worker has reported it. */
   hdr?: DeskHdr | null
+  /** A Moonlight client waiting for its PIN; null (or absent from older services) when none is. */
+  pinRequest?: DeskPinRequest | null
   lastError: string | null
 }
 

@@ -268,6 +268,7 @@ export class MockBackend {
         metrics: { ...IDLE_METRICS },
         stream: null,
         hdr: null,
+        pinRequest: null,
         lastError: null,
       },
       clients: [],
@@ -332,6 +333,9 @@ export class MockBackend {
         if (e.desk.state === 'Stopped' || e.desk.state === 'Stopping') e.desk.hdr = null
         if (e.desk.state === 'Streaming') this.connectClient(e)
         else e.desk.stream = null
+        // A desk without a paired device: Moonlight on the client asks to pair once the desk is up (worker patch 0021).
+        if (e.desk.state === 'Ready' && e.pending.length === 0 && e.clients.length === 0) this.requestPin(e.desk.id)
+        else if (e.desk.state !== 'Ready' && e.desk.state !== 'Streaming') e.desk.pinRequest = null
       }
       const p = e.desk.profile
       if (e.desk.state === 'Streaming') {
@@ -358,6 +362,12 @@ export class MockBackend {
         e.desk.metrics = { ...IDLE_METRICS }
       }
     }
+  }
+
+  /** A Moonlight client starts pairing with the desk and shows a PIN. */
+  requestPin(id: string): void {
+    const e = this.desks.get(id)
+    if (e) e.desk.pinRequest = { address: e.clientAddress, since: new Date(this.now()).toISOString() }
   }
 
   private schedule(e: DeskEntry, states: DeskState[]): void {
@@ -542,6 +552,7 @@ export class MockBackend {
           name,
           pairedAt: new Date(this.now()).toISOString(),
         })
+        e.desk.pinRequest = null
         return { status: 204 }
       }
       return err(405, 'method_not_allowed', `${method} ${path}`)

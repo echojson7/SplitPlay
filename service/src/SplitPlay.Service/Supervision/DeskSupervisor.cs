@@ -829,6 +829,19 @@ public sealed class DeskSupervisor : IHostedService
         return Start(id);
     }
 
+    /// <summary>
+    /// The worker took a PIN (<c>pair</c> succeeded): the desk stops asking for one at once instead of on the next
+    /// heartbeat, and the UI and the tray drop the request.
+    /// </summary>
+    public void PinDelivered(string id)
+    {
+        var rt = Find(id);
+        if (rt.ClearPinRequest(_time.GetUtcNow()))
+        {
+            Publish(rt);
+        }
+    }
+
     /// <summary>Sends a request to the desk's connected child and returns its result.</summary>
     public async Task<ResultMessage> RequestAsync(string id, Func<long, IpcMessage> build)
     {
@@ -1089,6 +1102,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
                 rt.Hdr = null;
+                rt.PinRequest = null;
                 if (rt.Machine.State == DeskState.Stopping)
                 {
                     rt.Machine.Fire(DeskTrigger.Stopped);
@@ -1368,6 +1382,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
                 rt.Hdr = null;
+                rt.PinRequest = null;
             }
         }
     }

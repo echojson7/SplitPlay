@@ -45,6 +45,7 @@ const ICONS = {
   archive: { stroke: 'M3.5 4.5h17v4h-17z M5 8.5v11h14v-11 M10 12.5h4' },
   info: { stroke: 'M21 12a9 9 0 1 1-18 0a9 9 0 1 1 18 0z M12 11v5.5 M12 7.5v.5' },
   sliders: { stroke: 'M4 7h10 M18 7h2 M4 17h2 M10 17h10 M16 5v4 M8 15v4' },
+  chip: { stroke: 'M7 7h10v10H7z M10 3.5V7 M14 3.5V7 M10 17v3.5 M14 17v3.5 M3.5 10H7 M3.5 14H7 M17 10h3.5 M17 14h3.5' },
 } as const
 
 export type IconName = keyof typeof ICONS

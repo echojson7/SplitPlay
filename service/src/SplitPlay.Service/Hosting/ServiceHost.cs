@@ -127,6 +127,13 @@ public static class ServiceHost
         builder.Services.AddSingleton<AdminPipeServer>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<AdminPipeServer>());
         builder.Services.AddSingleton<GpuInventory>();
+        builder.Services.AddSingleton<FakeGpuCounterSource>();
+        builder.Services.AddSingleton<IGpuCounterSource>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? ActivatorUtilities.CreateInstance<PdhGpuCounterSource>(sp)
+                : sp.GetRequiredService<FakeGpuCounterSource>());
+        builder.Services.AddSingleton<GpuUsageMonitor>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<GpuUsageMonitor>());
         builder.Services.AddSingleton<FakeHostNetworkStatus>();
         builder.Services.AddSingleton<IHostNetworkStatus>(sp =>
             OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"

@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useLive } from '../composables'
+import { fmtGb, fmtPercent } from '../desk'
 import { fmtBitrate, fmtNumber, t } from '../i18n'
 import { store } from '../store'
 
@@ -14,9 +15,7 @@ function pct(used?: number | null, total?: number | null): number | null {
   return Math.round((used / total) * 100)
 }
 
-function gb(mb?: number | null): string {
-  return mb === undefined || mb === null ? t('common.none') : t('unit.gb', { value: fmtNumber(mb / 1024, 1) })
-}
+const gb = fmtGb
 
 function deskName(id: string): string {
   return s.desks.find((d) => d.id === id)?.name ?? id
@@ -65,8 +64,8 @@ function deskName(id: string): string {
           <tbody>
             <tr v-for="g in host.gpus" :key="g.luid">
               <td>{{ g.name }}</td>
-              <td class="num">{{ g.utilizationPercent ?? t('common.none') }}</td>
-              <td class="num">{{ g.encoderPercent ?? t('common.none') }}</td>
+              <td class="num">{{ fmtPercent(g.utilizationPercent) }}</td>
+              <td class="num">{{ fmtPercent(g.encoderPercent) }}</td>
               <td class="num">{{ gb(g.vramUsedMb) }} / {{ gb(g.vramTotalMb) }}</td>
             </tr>
           </tbody>
@@ -82,6 +81,9 @@ function deskName(id: string): string {
               <th class="num">FPS</th>
               <th class="num">{{ t('metrics.bitrate') }}</th>
               <th class="num">{{ t('metrics.encodeP99') }}</th>
+              <th class="num">GPU</th>
+              <th class="num">{{ t('metrics.encoder') }}</th>
+              <th class="num">{{ t('metrics.vram') }}</th>
               <th class="num">{{ t('desk.devices') }}</th>
             </tr>
           </thead>
@@ -91,6 +93,9 @@ function deskName(id: string): string {
               <td class="num">{{ fmtNumber(d.fps ?? 0) }}</td>
               <td class="num">{{ fmtBitrate(d.bitrateKbps ?? 0) }}</td>
               <td class="num">{{ t('unit.ms', { value: fmtNumber(d.encodeMsP99 ?? 0, 2) }) }}</td>
+              <td class="num" data-gpu>{{ fmtPercent(d.gpuPercent) }}</td>
+              <td class="num">{{ fmtPercent(d.encoderPercent) }}</td>
+              <td class="num">{{ gb(d.vramMb) }}</td>
               <td class="num">{{ d.clients ?? 0 }}</td>
             </tr>
           </tbody>

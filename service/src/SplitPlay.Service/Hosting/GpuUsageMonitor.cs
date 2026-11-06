@@ -21,9 +21,10 @@ public sealed class GpuUsageMonitor : BackgroundService
     private readonly object _gate = new();
     private readonly SemaphoreSlim _wake = new(0, 1);
     private GpuUsageSnapshot? _snapshot;
-    private DateTimeOffset _snapshotAt;
-    private DateTimeOffset _lastRead = DateTimeOffset.MinValue;
+    private long _snapshotAt;
+    private long? _lastRead;
     private bool _disabled;
+    private bool _warned;
 
     public GpuUsageMonitor(IGpuCounterSource source, TimeProvider time, ILogger<GpuUsageMonitor> logger)
     {
@@ -42,10 +43,10 @@ public sealed class GpuUsageMonitor : BackgroundService
         GpuUsageSnapshot? result;
         lock (_gate)
         {
-            var now = _time.GetUtcNow();
-            wake = now - _lastRead >= IdleAfter;
-            _lastRead = now;
-            result = _snapshot is not null && now - _snapshotAt <= Stale ? _snapshot : null;
+            // Monotonic timestamps: a wall-clock step must not stop the sampler from waking.
+            wake = !IsActive();
+            _lastRead = _time.GetTimestamp();
+            result = _snapshot is not null && _time.GetElapsedTime(_snapshotAt) <= Stale ? _snapshot : null;
         }
 
         if (wake && _wake.CurrentCount == 0)
@@ -72,7 +73,7 @@ public sealed class GpuUsageMonitor : BackgroundService
                 bool active;
                 lock (_gate)
                 {
-                    active = _time.GetUtcNow() - _lastRead < IdleAfter;
+                    active = IsActive();
                 }
 
                 if (!active)
@@ -100,6 +101,9 @@ public sealed class GpuUsageMonitor : BackgroundService
         }
     }
 
+    /// <summary>Someone read within <see cref="IdleAfter"/>. Call under <c>_gate</c>.</summary>
+    private bool IsActive() => _lastRead is long at && _time.GetElapsedTime(at) < IdleAfter;
+
     private void Sample()
     {
         try
@@ -115,7 +119,7 @@ public sealed class GpuUsageMonitor : BackgroundService
                 }
 
                 _snapshot = snapshot;
-                _snapshotAt = _time.GetUtcNow();
+                _snapshotAt = _time.GetTimestamp();
             }
         }
         catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException or BadImageFormatException)
@@ -123,11 +127,19 @@ public sealed class GpuUsageMonitor : BackgroundService
             _logger.LogWarning("GPU counters are not available ({Message}); GPU load, encoder and VRAM stay empty", ex.Message);
             _disabled = true;
         }
-    }
+        catch (Exception ex)
+        {
+            if (!_warned)
+            {
+                _warned = true;
+                _logger.LogWarning(ex, "Reading the GPU counters failed; trying again");
+            }
 
-    public override void Dispose()
-    {
-        _wake.Dispose();
-        base.Dispose();
+            _source.Reset();
+            lock (_gate)
+            {
+                _snapshot = null;
+            }
+        }
     }
 }

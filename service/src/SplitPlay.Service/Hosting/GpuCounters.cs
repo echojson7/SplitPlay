@@ -113,9 +113,11 @@ public sealed class PdhGpuCounterSource : IGpuCounterSource
         else if (now - _builtAt >= RebuildEvery)
         {
             _next = Open();
-            if (_next is not null)
+            if (_next is not null && PdhCollectQueryData(_next.Handle) != 0)
             {
-                PdhCollectQueryData(_next.Handle);
+                // No baseline: keep the current query and try again on the next tick.
+                _next.Dispose();
+                _next = null;
             }
         }
 

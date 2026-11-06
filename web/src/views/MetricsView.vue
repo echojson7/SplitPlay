@@ -81,7 +81,7 @@ function deskName(id: string): string {
               <th class="num">FPS</th>
               <th class="num">{{ t('metrics.bitrate') }}</th>
               <th class="num">{{ t('metrics.encodeP99') }}</th>
-              <th class="num">GPU</th>
+              <th class="num">{{ t('live.gpu') }}</th>
               <th class="num">{{ t('metrics.encoder') }}</th>
               <th class="num">{{ t('metrics.vram') }}</th>
               <th class="num">{{ t('desk.devices') }}</th>

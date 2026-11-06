@@ -24,7 +24,9 @@ public sealed class TrayDesksTests
 
         Assert.Equal(["desk-1", "desk-2", "desk-3"], desks.Select(d => d.Id));
         Assert.Equal(["Аня", "desk-2", "desk-3"], desks.Select(d => d.Name));
-        Assert.Equal([DeskState.Ready, DeskState.Stopped, DeskState.Defined], desks.Select(d => d.State));
+        Assert.Equal(new DeskState?[] { DeskState.Ready, DeskState.Stopped, null }, desks.Select(d => d.State));
+        Assert.False(desks[2].CanStart);
+        Assert.False(desks[2].CanStop);
         Assert.Equal(new DateTimeOffset(2026, 11, 6, 21, 0, 0, TimeSpan.Zero), desks[0].PinSince);
         Assert.Null(desks[1].PinSince);
         Assert.Throws<JsonException>(() => TrayDesks.Parse("""{"error":{}}"""));

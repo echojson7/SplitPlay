@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: MIT -->
 <!-- Moonlight waits for a PIN: one row per such desk, on every page, with the PIN field (desk.pinRequest). -->
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, watch } from 'vue'
 import { api as defaultApi, ApiClient } from '../api/client'
 import type { Desk } from '../api/types'
 import { errorText, useLive } from '../composables'
@@ -22,8 +22,7 @@ const pins = reactive<Record<string, string>>({})
 const names = reactive<Record<string, string>>({})
 const tried = reactive<Record<string, boolean>>({})
 const errors = reactive<Record<string, string | null>>({})
-const busy = ref<string | null>(null)
-const fields = ref<InstanceType<typeof PinField>[]>([])
+const busy = reactive<Record<string, boolean>>({})
 
 function valid(id: string): boolean {
   return /^\d{4}$/.test(pins[id] ?? '')
@@ -36,21 +35,19 @@ watch(
     const old = new Set((before ?? '').split(','))
     const fresh = now.split(',').filter((k) => k && !old.has(k))
     if (fresh.length === 0) return
-    for (const key of fresh) {
-      const id = key.slice(0, key.lastIndexOf('@'))
-      errors[id] = null
-    }
+    const ids = fresh.map((key) => key.slice(0, key.lastIndexOf('@')))
+    for (const id of ids) errors[id] = null
     await nextTick()
     const active = document.activeElement
-    if (!active || active === document.body) fields.value[0]?.focus()
+    if (!active || active === document.body) document.getElementById(`pin-${ids[0]}`)?.focus()
   },
   { immediate: true },
 )
 
 async function send(desk: Desk): Promise<void> {
   tried[desk.id] = true
-  if (!valid(desk.id) || busy.value) return
-  busy.value = desk.id
+  if (!valid(desk.id) || busy[desk.id]) return
+  busy[desk.id] = true
   errors[desk.id] = null
   const name = (names[desk.id] ?? '').trim() || t('desk.pairNamePlaceholder')
   try {
@@ -62,13 +59,14 @@ async function send(desk: Desk): Promise<void> {
   } catch (e) {
     errors[desk.id] = errorText(e)
   } finally {
-    busy.value = null
+    busy[desk.id] = false
   }
 }
 </script>
 
 <template>
-  <div v-if="waiting.length" class="rows pin-requests" aria-live="polite">
+  <!-- Always rendered: a live region must exist before its content appears to be announced. -->
+  <div :class="['rows', { 'pin-requests': waiting.length }]" aria-live="polite">
     <form
       v-for="d in waiting"
       :key="d.id"
@@ -87,7 +85,6 @@ async function send(desk: Desk): Promise<void> {
       <div class="ctl">
         <PinField
           :id="`pin-${d.id}`"
-          ref="fields"
           :model-value="pins[d.id] ?? ''"
           :invalid="tried[d.id] && !valid(d.id)"
           :label="t('desk.pairPin')"
@@ -101,7 +98,7 @@ async function send(desk: Desk): Promise<void> {
           :aria-label="t('desk.pairName')"
           :placeholder="t('desk.pairNamePlaceholder')"
         />
-        <button type="submit" class="btn-accent" :disabled="busy === d.id">{{ t('desk.pairSubmit') }}</button>
+        <button type="submit" class="btn-accent" :disabled="busy[d.id]">{{ t('desk.pairSubmit') }}</button>
       </div>
     </form>
   </div>

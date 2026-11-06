@@ -188,7 +188,9 @@ internal sealed class DeskRuntime
             next = new DeskPinRequestDto(request.Address, since);
         }
 
-        if (next is not null && _answeredPin is { } answered && next == answered.Request && now - answered.At < AnsweredPinGrace)
+        // A worker without "since" gets a fresh time on every new request: then the address alone matches.
+        if (next is not null && _answeredPin is { } answered && now - answered.At < AnsweredPinGrace
+            && (request!.Since is null ? string.Equals(next.Address, answered.Request.Address, StringComparison.Ordinal) : next == answered.Request))
         {
             next = null;
         }

@@ -10,9 +10,10 @@ namespace SplitPlay.Tray;
 
 /// <summary>
 /// Follows the desks for the tray: polls <c>GET /api/v1/desks</c> every 2 s with a bearer token from the admin pipe, and
-/// starts or stops a desk. <see cref="Changed"/> and <see cref="PinRequested"/> are raised through the <c>post</c>
-/// callback (the tray hands in its UI thread). A user the service refuses a token (not the host's administrator) is asked again only
-/// every 5 minutes, so that the refusals do not fill the service log; the tray then has no desk items and no
+/// starts or stops a desk. Only the poll loop reads the list, so answers never arrive out of order; a start or stop
+/// wakes it at once. <see cref="Changed"/> and <see cref="PinRequested"/> are raised through the <c>post</c> callback
+/// (the tray hands in its UI thread). A user the service refuses a token (not the host's administrator) is asked again
+/// only every 5 minutes, so that the refusals do not fill the service log; the tray then has no desk items and no
 /// notifications, as before.
 /// </summary>
 internal sealed class DeskWatcher : IDisposable
@@ -21,6 +22,9 @@ internal sealed class DeskWatcher : IDisposable
     private static readonly TimeSpan ServiceDownInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan RefusedInterval = TimeSpan.FromMinutes(5);
 
+    /// <summary>Failed polls in a row before the list is dropped: one timeout or a 503 at start-up keeps the menu.</summary>
+    private const int FailuresBeforeEmpty = 3;
+
     /// <summary>A token this close to its expiry is replaced before the next request.</summary>
     private static readonly TimeSpan TokenMargin = TimeSpan.FromMinutes(1);
 
@@ -28,9 +32,12 @@ internal sealed class DeskWatcher : IDisposable
     private readonly HttpClient _http = new(new SocketsHttpHandler { UseProxy = false }) { Timeout = TimeSpan.FromSeconds(5) };
     private readonly Action<Action> _post;
     private readonly CancellationTokenSource _stop = new();
+    private readonly SemaphoreSlim _wake = new(0, 1);
+    private readonly SemaphoreSlim _tokenGate = new(1, 1);
     private AdminToken? _token;
     private IReadOnlyList<TrayDesk>? _last;
-    private bool _disposed;
+    private int _failures;
+    private volatile bool _disposed;
 
     /// <param name="baseUrl">The web UI's address (the API is under <c>api/v1/</c>).</param>
     /// <param name="post">Runs an action on the UI thread.</param>
@@ -40,7 +47,7 @@ internal sealed class DeskWatcher : IDisposable
         _post = post;
     }
 
-    /// <summary>The latest desk list; empty until the first answer and while the service is not reachable.</summary>
+    /// <summary>The latest desk list; empty until the first answer and once the service stays unreachable.</summary>
     public IReadOnlyList<TrayDesk> Desks { get; private set; } = [];
 
     /// <summary>The desk list changed (any field).</summary>
@@ -49,9 +56,13 @@ internal sealed class DeskWatcher : IDisposable
     /// <summary>A Moonlight client started waiting for its PIN on these desks.</summary>
     public event Action<IReadOnlyList<TrayDesk>>? PinRequested;
 
-    public void Start() => _ = Task.Run(() => RunAsync(_stop.Token));
+    public void Start()
+    {
+        var ct = _stop.Token;
+        _ = Task.Run(() => RunAsync(ct), CancellationToken.None);
+    }
 
-    /// <summary>Starts or stops a desk; returns the service's error message, or null when it accepted.</summary>
+    /// <summary>Starts or stops a desk; returns the service's error message, or null when it accepted (or the tray quits).</summary>
     public async Task<string?> ActAsync(string deskId, bool start)
     {
         if (_disposed)
@@ -59,20 +70,37 @@ internal sealed class DeskWatcher : IDisposable
             return null;
         }
 
+        var ct = _stop.Token;
         try
         {
-            using var response = await SendAsync(HttpMethod.Post, $"desks/{Uri.EscapeDataString(deskId)}/{(start ? "start" : "stop")}", _stop.Token);
+            using var response = await SendAsync(HttpMethod.Post, $"desks/{Uri.EscapeDataString(deskId)}/{(start ? "start" : "stop")}", ct);
             if (response.IsSuccessStatusCode)
             {
-                _ = Task.Run(() => PollOnceAsync(_stop.Token));
+                WakeUp();
                 return null;
             }
 
             return await ErrorMessageAsync(response);
         }
+        catch (Exception ex) when (_disposed && ex is ObjectDisposedException or OperationCanceledException)
+        {
+            return null;
+        }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or AdminPipeException or IOException)
         {
             return ex.Message;
+        }
+    }
+
+    private void WakeUp()
+    {
+        try
+        {
+            _wake.Release();
+        }
+        catch (Exception ex) when (ex is SemaphoreFullException or ObjectDisposedException)
+        {
+            // Already signalled, or quitting.
         }
     }
 
@@ -85,11 +113,18 @@ internal sealed class DeskWatcher : IDisposable
             {
                 next = await PollOnceAsync(ct) ? Interval : ServiceDownInterval;
             }
-            catch (AdminPipeException ex)
+            catch (AdminPipeException ex) when (ex.Message != AdminPipe.ClosedMessage)
             {
+                // The service answered and refused: this user gets no token.
                 Debug.WriteLine($"SplitPlay tray: no token from the admin pipe: {ex.Message}");
-                Publish([]);
+                Failed(force: true);
                 next = RefusedInterval;
+            }
+            catch (AdminPipeException)
+            {
+                // The pipe closed without an answer (restart, rate limit): like a service that is down.
+                Failed(force: false);
+                next = ServiceDownInterval;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -99,14 +134,15 @@ internal sealed class DeskWatcher : IDisposable
             {
                 // Never let the poller die: a bug or an odd answer only costs one round.
                 Debug.WriteLine($"SplitPlay tray: desk poll failed: {ex}");
+                Failed(force: false);
                 next = ServiceDownInterval;
             }
 
             try
             {
-                await Task.Delay(next, ct);
+                await _wake.WaitAsync(next, ct);
             }
-            catch (OperationCanceledException)
+            catch (Exception ex) when (ex is OperationCanceledException or ObjectDisposedException)
             {
                 return;
             }
@@ -122,7 +158,7 @@ internal sealed class DeskWatcher : IDisposable
             using var response = await SendAsync(HttpMethod.Get, "desks", ct);
             if (!response.IsSuccessStatusCode)
             {
-                Publish([]);
+                Failed(force: false);
                 return false;
             }
 
@@ -131,19 +167,29 @@ internal sealed class DeskWatcher : IDisposable
         catch (Exception ex) when (ex is HttpRequestException or JsonException or IOException
                                        || (ex is TaskCanceledException && !ct.IsCancellationRequested))
         {
-            Publish([]);
+            Failed(force: false);
             return false;
         }
 
+        _failures = 0;
         Publish(desks);
         return true;
+    }
+
+    /// <summary>A poll failed: the list is kept for a few rounds, then dropped (at once when <paramref name="force"/>).</summary>
+    private void Failed(bool force)
+    {
+        if (force || ++_failures >= FailuresBeforeEmpty)
+        {
+            Publish([]);
+        }
     }
 
     private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, CancellationToken ct)
     {
         for (var attempt = 0; ; attempt++)
         {
-            var token = await TokenAsync(ct);
+            var token = await TokenAsync(renew: attempt > 0, ct);
             if (token is null)
             {
                 // The pipe is not there: the service is stopped or still starting.
@@ -157,7 +203,6 @@ internal sealed class DeskWatcher : IDisposable
             {
                 // The service restarted (tokens live in memory): get a new one and try once more.
                 response.Dispose();
-                _token = null;
                 continue;
             }
 
@@ -165,15 +210,24 @@ internal sealed class DeskWatcher : IDisposable
         }
     }
 
-    private async Task<AdminToken?> TokenAsync(CancellationToken ct)
+    /// <summary>The cached token, or a new one; one request at a time (the poll loop and a menu action share it).</summary>
+    private async Task<AdminToken?> TokenAsync(bool renew, CancellationToken ct)
     {
-        if (_token is { } t && t.ExpiresAt - DateTimeOffset.UtcNow > TokenMargin)
+        await _tokenGate.WaitAsync(ct);
+        try
         {
-            return t;
-        }
+            if (!renew && _token is { } t && t.ExpiresAt - DateTimeOffset.UtcNow > TokenMargin)
+            {
+                return t;
+            }
 
-        _token = await AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "tray", TimeSpan.FromSeconds(3), cancellationToken: ct);
-        return _token;
+            _token = await AdminPipe.RequestAsync(AdminPipe.Kinds.Bearer, "tray", TimeSpan.FromSeconds(3), cancellationToken: ct);
+            return _token;
+        }
+        finally
+        {
+            _tokenGate.Release();
+        }
     }
 
     private static async Task<string> ErrorMessageAsync(HttpResponseMessage response)
@@ -199,7 +253,7 @@ internal sealed class DeskWatcher : IDisposable
     {
         _post(() =>
         {
-            if (_stop.IsCancellationRequested)
+            if (_disposed)
             {
                 return;
             }
@@ -236,7 +290,8 @@ internal sealed class DeskWatcher : IDisposable
 
         _disposed = true;
         _stop.Cancel();
+        // The loop and a pending action may still hold the semaphores and the client: they end on the cancelled token,
+        // so only the token source is released here.
         _stop.Dispose();
-        _http.Dispose();
     }
 }

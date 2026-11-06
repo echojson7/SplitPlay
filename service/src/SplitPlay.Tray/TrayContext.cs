@@ -16,6 +16,10 @@ internal sealed class TrayContext : ApplicationContext
     private readonly Control _invoker;
     private readonly DeskWatcher? _desks;
     private Font? _boldFont;
+
+    /// <summary>The desks and PIN requests the menu was built for, and its desk items by id (updated in place while open).</summary>
+    private string _menuKey = "";
+    private readonly Dictionary<string, (ToolStripMenuItem Item, ToolStripMenuItem Start, ToolStripMenuItem Stop)> _deskItems = [];
     private DashboardForm? _dashboard;
 
     public TrayContext(Uri url, bool visible = true)
@@ -104,6 +108,8 @@ internal sealed class TrayContext : ApplicationContext
             _menu.Items.Add(open);
 
             var desks = _desks?.Desks ?? [];
+            _menuKey = MenuKey(desks);
+            _deskItems.Clear();
             foreach (var desk in desks.Where(d => d.PinSince is not null))
             {
                 _menu.Items.Add(new ToolStripMenuItem($"{TrayText.PinWaiting} · {desk.Name}", null, (_, _) => ShowDashboard()));
@@ -127,14 +133,29 @@ internal sealed class TrayContext : ApplicationContext
         }
     }
 
+    private static string MenuKey(IReadOnlyList<TrayDesk> desks) =>
+        string.Join('|', desks.Select(d => $"{d.Id}:{d.PinSince is not null}"));
+
     private ToolStripMenuItem DeskItem(TrayDesk desk)
     {
-        var item = new ToolStripMenuItem($"{desk.Name} · {TrayText.State(desk.State)}");
-        var start = new ToolStripMenuItem(TrayText.Start, null, async (_, _) => await ActAsync(desk, start: true)) { Enabled = desk.CanStart };
-        var stop = new ToolStripMenuItem(TrayText.Stop, null, async (_, _) => await ActAsync(desk, start: false)) { Enabled = desk.CanStop };
+        var item = new ToolStripMenuItem();
+        var start = new ToolStripMenuItem(TrayText.Start, null, async (_, _) => await ActAsync(desk, start: true));
+        var stop = new ToolStripMenuItem(TrayText.Stop, null, async (_, _) => await ActAsync(desk, start: false));
         item.DropDownItems.Add(start);
         item.DropDownItems.Add(stop);
+        _deskItems[desk.Id] = (item, start, stop);
+        UpdateDeskItem(desk);
         return item;
+    }
+
+    private void UpdateDeskItem(TrayDesk desk)
+    {
+        if (_deskItems.TryGetValue(desk.Id, out var items))
+        {
+            items.Item.Text = $"{desk.Name} · {TrayText.State(desk.State)}";
+            items.Start.Enabled = desk.CanStart;
+            items.Stop.Enabled = desk.CanStop;
+        }
     }
 
     private async Task ActAsync(TrayDesk desk, bool start)
@@ -157,9 +178,14 @@ internal sealed class TrayContext : ApplicationContext
         // NotifyIcon.Text is limited to 127 characters.
         var text = waiting.Count > 0 ? $"SplitPlay · {TrayText.PinWaiting}" : "SplitPlay";
         _icon.Text = text.Length > 127 ? text[..127] : text;
-        if (_menu.Visible)
+        if (_menu.Visible && _desks is not null && MenuKey(_desks.Desks) == _menuKey)
         {
-            BuildMenu();
+            // Same desks: update the open menu in place, so that a submenu under the cursor stays open. Another set
+            // of desks or PIN requests shows the next time the menu opens.
+            foreach (var desk in _desks.Desks)
+            {
+                UpdateDeskItem(desk);
+            }
         }
     }
 

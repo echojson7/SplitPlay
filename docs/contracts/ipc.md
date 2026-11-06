@@ -96,7 +96,7 @@ Events by role:
 
 `pairing` is `null` while no Moonlight client waits for a PIN. When a client starts pairing (Moonlight shows the PIN
 and waits), it is `{address, since}`: the client's IP address (IPv4-mapped IPv6 as plain IPv4) and when the request
-arrived (UTC, ISO 8601, whole seconds); with several, the newest. It goes back to `null` once `pair` hands a PIN over
+arrived (UTC, ISO 8601, whole seconds); with several, the newest (Moonlight pairs under one fixed id, so there is at most one). It goes back to `null` once `pair` hands a PIN over
 (whether or not it matches: Moonlight reports a wrong PIN itself), when the pairing ends or fails, and after 5 minutes
 without an answer. A worker without the field (before patch 0021) never reports a waiting client. The service shows
 the request as the desk's `pinRequest` (web-api.md) and drops it when the worker stops or a `pair` succeeds.

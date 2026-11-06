@@ -26,8 +26,9 @@ internal static class TrayText
     public static string ActionFailed => Russian ? "Не получилось" : "Did not work";
 
     /// <summary>The state word shown next to a desk name (the web UI's words).</summary>
-    public static string State(DeskState state) => state switch
+    public static string State(DeskState? state) => state switch
     {
+        null => Russian ? "Нет данных" : "Unknown",
         DeskState.Defined => Russian ? "Не запускался" : "Not started",
         DeskState.Stopped => Russian ? "Остановлен" : "Stopped",
         DeskState.Ready => Russian ? "Готов" : "Ready",

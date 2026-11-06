@@ -8,15 +8,15 @@ namespace SplitPlay.Core.Api;
 /// <summary>What the tray needs to know about one desk: its name, state and a waiting PIN request.</summary>
 /// <param name="Id">Desk id.</param>
 /// <param name="Name">Display name; the id when the desk has none.</param>
-/// <param name="State">Lifecycle state; <see cref="DeskState.Defined"/> when the service sent an unknown one.</param>
+/// <param name="State">Lifecycle state; null when the service sent one this build does not know (nothing is offered).</param>
 /// <param name="PinSince">When a Moonlight client started waiting for its PIN; null when none waits.</param>
-public sealed record TrayDesk(string Id, string Name, DeskState State, DateTimeOffset? PinSince)
+public sealed record TrayDesk(string Id, string Name, DeskState? State, DateTimeOffset? PinSince)
 {
     /// <summary>Start is offered (as the web UI: a stopped or never started desk).</summary>
     public bool CanStart => State is DeskState.Stopped or DeskState.Defined;
 
     /// <summary>Stop is offered: the desk runs or failed.</summary>
-    public bool CanStop => !CanStart && State != DeskState.Stopping;
+    public bool CanStop => State is { } s && !CanStart && s != DeskState.Stopping;
 }
 
 /// <summary>The tray's view of <c>GET /api/v1/desks</c>: lenient parsing and which PIN requests are new.</summary>
@@ -42,9 +42,10 @@ public static class TrayDesks
                 continue;
             }
 
-            var state = String(e, "state") is { } s && Enum.TryParse<DeskState>(s, ignoreCase: false, out var parsed) && Enum.IsDefined(parsed)
+            DeskState? state = String(e, "state") is { } s && !int.TryParse(s, out _)
+                               && Enum.TryParse<DeskState>(s, ignoreCase: false, out var parsed) && Enum.IsDefined(parsed)
                 ? parsed
-                : DeskState.Defined;
+                : null;
             DateTimeOffset? since = e.TryGetProperty("pinRequest", out var pin) && pin.ValueKind == JsonValueKind.Object
                 ? String(pin, "since") is { } t
                   && DateTimeOffset.TryParse(t, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var at)

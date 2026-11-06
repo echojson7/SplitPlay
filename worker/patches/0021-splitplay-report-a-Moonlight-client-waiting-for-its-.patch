@@ -30,7 +30,7 @@ index 1ace173bd7e3729a8ee9c7d68beb7a20d3f61e96..cdf846851c3614c6ac71b20e560daafe
          "${CMAKE_SOURCE_DIR}/src/splitplay/profile.h"
          "${CMAKE_SOURCE_DIR}/src/splitplay/scheduling.cpp"
 diff --git a/src/nvhttp.cpp b/src/nvhttp.cpp
-index 9a8d33cedf351ba2a076dc05876bb63e9be934d4..0bfcf85a9ef4f9e1a2745baaf34d83c7db9ecc25 100644
+index 9a8d33cedf351ba2a076dc05876bb63e9be934d4..b11a174f2a1be5ad7dac10e618c29f6fd1a3937d 100644
 --- a/src/nvhttp.cpp
 +++ b/src/nvhttp.cpp
 @@ -36,6 +36,9 @@
@@ -61,12 +61,25 @@ index 9a8d33cedf351ba2a076dc05876bb63e9be934d4..0bfcf85a9ef4f9e1a2745baaf34d83c7
            ptr->second.async_insert_pin.response = std::move(response);
  
            fg.disable();
-@@ -823,6 +830,8 @@ namespace nvhttp {
+@@ -805,7 +812,12 @@ namespace nvhttp {
+     }
+ 
+     auto &sess = std::begin(map_id_sess)->second;
++    // SplitPlay: getservercert() may fail the pairing and erase the session; never touch it afterwards.
++    const auto unique_id = sess.client.uniqueID;
+     getservercert(sess, tree, pin);
++    if (map_id_sess.find(unique_id) == std::end(map_id_sess)) {
++      return false;
++    }
+     sess.client.name = name;
+ 
+     // response to the request for pin
+@@ -823,6 +835,8 @@ namespace nvhttp {
  
      // reset async_response
      async_response = std::decay_t<decltype(async_response.left())>();
 +    // SplitPlay: the PIN is handed over; the client goes on with the challenges (or fails them on a wrong PIN).
-+    splitplay::pairing::answered(sess.client.uniqueID);
++    splitplay::pairing::answered(unique_id);
      // response to the current request
      return true;
    }

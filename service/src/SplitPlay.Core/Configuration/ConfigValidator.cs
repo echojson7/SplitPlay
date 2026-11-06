@@ -26,7 +26,7 @@ public static partial class ConfigValidator
     /// <summary>Maximum length of a local Windows account name (SAM limit).</summary>
     public const int MaxUserNameLength = 20;
 
-    [GeneratedRegex("^[a-z0-9-]{1,32}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^[a-z0-9-]{1,32}\\z", RegexOptions.CultureInvariant)]
     private static partial Regex DeskIdRegex();
 
     [GeneratedRegex("^0x[0-9a-fA-F]{1,16}$", RegexOptions.CultureInvariant)]

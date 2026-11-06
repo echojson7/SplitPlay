@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Pure desk helpers shared by the library, the add-desk wizard and the desk page.
 
-import type { Desk, DeskConfig, DeskMetrics, DeskState, DeskStream } from './api/types'
+import type { Desk, DeskConfig, DeskMetrics, DeskProfile, DeskState, DeskStream } from './api/types'
 import { DESK_ID_RE } from './api/validate'
 import { fmtBitrate, fmtNumber, t } from './i18n'
 
@@ -34,6 +34,17 @@ export function suggestBitrateKbps(width: number, height: number, fps: number): 
   const scale = (width * height * fps) / (1920 * 1080 * 60)
   const kbps = Math.round((30000 * Math.sqrt(scale) * 1.15) / 5000) * 5000
   return Math.min(150000, Math.max(10000, kbps))
+}
+
+/**
+ * The profile after a quick resolution or FPS change: a bitrate that was the suggestion for the old picture follows
+ * the new one (it is what the Moonlight settings and launch scripts recommend); one the owner set stays.
+ */
+export function changeProfile<P extends Pick<DeskProfile, 'width' | 'height' | 'fps' | 'bitrateKbps'>>(profile: P, change: Partial<P>): P {
+  const next = { ...profile, ...change }
+  if (change.bitrateKbps === undefined && profile.bitrateKbps === suggestBitrateKbps(profile.width, profile.height, profile.fps))
+    next.bitrateKbps = suggestBitrateKbps(next.width, next.height, next.fps)
+  return next
 }
 
 const TRANSLIT: Record<string, string> = {

@@ -82,6 +82,39 @@ export interface HostNetwork {
   addresses: string[]
 }
 
+/** Moonlight settings recommended for a desk (GET /desks/{id}/client-pack). */
+export interface ClientPackSettings {
+  width: number
+  height: number
+  fps: number
+  bitrateKbps: number
+  /** The desk's codec; `auto` (Moonlight picks) when the desk sets none. */
+  codec: Codec | 'auto'
+  vsync: boolean
+  /** `fullscreen` (also `windowed`, `borderless` in Moonlight). */
+  displayMode: string
+  /** `hardware` (also `auto`, `software` in Moonlight). */
+  videoDecoder: string
+  framePacing: boolean
+}
+
+export type ClientPlatform = 'windows' | 'linux'
+
+/** GET /desks/{id}/client-pack: how a Moonlight client connects to a desk, and its launch scripts. */
+export interface ClientPack {
+  desk: string
+  host: string
+  port: number
+  /** `host:port`, as Moonlight takes it. */
+  address: string
+  /** The Moonlight app to stream ("Desktop"). */
+  app: string
+  settings: ClientPackSettings
+  /** moonlight-qt's command line after the executable: `stream <address> <app> --resolution …`. */
+  arguments: string[]
+  scripts: { platform: ClientPlatform; fileName: string }[]
+}
+
 export const SERVICE_STATUSES = ['running', 'stopped', 'starting', 'stopping', 'missing'] as const
 export type ServiceStatus = (typeof SERVICE_STATUSES)[number]
 

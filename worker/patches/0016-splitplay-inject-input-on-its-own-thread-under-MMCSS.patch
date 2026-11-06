@@ -1,0 +1,337 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Fri, 30 Oct 2026 12:30:00 +0000
+Subject: [PATCH] splitplay: inject input on its own thread under MMCSS "Games"
+
+Moonlight's input packets were injected on Sunshine's single task_pool
+thread, which also runs unrelated tasks (session timeouts, the force-quit
+timer, deferred work), so patch 0012 left it out of MMCSS: it ran at the
+process priority class, and an input event could wait behind any other
+pool task.
+
+Input now has a pool of its own, input_pool, with exactly one thread
+(input::init() starts it, the input deinit stops it after running what is
+still queued and before the backend is released). The thread registers
+with MMCSS "Games" at normal priority, like the capture, encode, send and
+control threads, and is named input::inject.
+
+Everything that touches the injected input state moves with it, so the
+state keeps upstream's synchronisation (one thread, no new locks) and its
+order: the control thread still appends packets to the session's input
+queue and posts one passthrough_next_message per packet (FIFO, batching
+unchanged), and key repeat, the delayed left button, the Home emulation,
+input::reset(), gamepad removal, the ViGEm rumble and LED callbacks, the
+DualShock 4 report timer and touch and pen repeat are queued on the same
+thread. Relative mouse moves, gamepad state and rumble go through the same
+code as before, only on this thread. task_pool keeps the other tasks.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm42dakZVfEnnyh7aQn
+
+diff --git a/src/globals.cpp b/src/globals.cpp
+index 60daf398aa71b415afae4a6cc0f87cc87cf5b486..19b0a958f002cfe47e70ae29dc3e78871a6dc0a1 100644
+--- a/src/globals.cpp
++++ b/src/globals.cpp
+@@ -7,6 +7,7 @@
+ 
+ safe::mail_t mail::man;
+ thread_pool_util::ThreadPool task_pool;
++thread_pool_util::ThreadPool input_pool;
+ bool display_cursor = true;
+ 
+ #ifdef _WIN32
+diff --git a/src/globals.h b/src/globals.h
+index 2c7ee9b121b733dbfa7e2e31002098cfc5e5c4a6..7d02bcacfbd085b0527caa6ab6cdebe4b9709d3b 100644
+--- a/src/globals.h
++++ b/src/globals.h
+@@ -13,6 +13,15 @@
+  */
+ extern thread_pool_util::ThreadPool task_pool;
+ 
++/**
++ * @brief SplitPlay: the input injection thread, one thread under MMCSS "Games" (started by input::init()).
++ *
++ * Everything that reads or changes the injected input state runs on it, in the order it was queued: Moonlight's
++ * input packets, key repeat, the delayed left button and Home emulation, virtual gamepads and their rumble and LED
++ * callbacks, touch and pen repeat. task_pool keeps every other task.
++ */
++extern thread_pool_util::ThreadPool input_pool;
++
+ /**
+  * @brief A boolean flag to indicate whether the cursor should be displayed.
+  */
+diff --git a/src/input.cpp b/src/input.cpp
+index 270409a3be2ef476e3b3192eb87e0c1eed3bfe0f..ef0b0687f73f6cc599a9823b44eeacf32bb1ce89 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -13,6 +13,7 @@ extern "C" {
+ #include <chrono>
+ #include <cmath>
+ #include <list>
++#include <optional>
+ #include <thread>
+ #include <unordered_map>
+ 
+@@ -25,6 +26,7 @@ extern "C" {
+ #include "input.h"
+ #include "logging.h"
+ #include "platform/common.h"
++#include "splitplay/scheduling.h"
+ #include "thread_pool.h"
+ #include "utility.h"
+ 
+@@ -186,7 +188,7 @@ namespace input {
+ 
+     ~gamepad_t() {
+       if (id >= 0) {
+-        task_pool.push([id = this->id]() {
++        input_pool.push([id = this->id]() {
+           free_gamepad(platf_input, id);
+         });
+       }
+@@ -760,7 +762,7 @@ namespace input {
+         input->mouse_left_button_timeout = nullptr;
+       };
+ 
+-      input->mouse_left_button_timeout = task_pool.pushDelayed(std::move(f), 10ms).task_id;
++      input->mouse_left_button_timeout = input_pool.pushDelayed(std::move(f), 10ms).task_id;
+ 
+       return;
+     }
+@@ -910,7 +912,7 @@ namespace input {
+ 
+     send_key_and_modifiers(key_code, false, flags, synthetic_modifiers);
+ 
+-    key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_period, key_code, flags, synthetic_modifiers).task_id;
++    key_press_repeat_id = input_pool.pushDelayed(repeat_key, config::input.key_repeat_period, key_code, flags, synthetic_modifiers).task_id;
+   }
+ 
+   /**
+@@ -964,11 +966,11 @@ namespace input {
+         }
+ 
+         if (key_press_repeat_id) {
+-          task_pool.cancel(key_press_repeat_id);
++          input_pool.cancel(key_press_repeat_id);
+         }
+ 
+         if (config::input.key_repeat_delay.count() > 0) {
+-          key_press_repeat_id = task_pool.pushDelayed(repeat_key, config::input.key_repeat_delay, keyCode, packet->flags, synthetic_modifiers).task_id;
++          key_press_repeat_id = input_pool.pushDelayed(repeat_key, config::input.key_repeat_delay, keyCode, packet->flags, synthetic_modifiers).task_id;
+         }
+       } else {
+         // Already released
+@@ -1418,10 +1420,10 @@ namespace input {
+             gamepad.back_timeout_id = nullptr;
+           };
+ 
+-          gamepad.back_timeout_id = task_pool.pushDelayed(std::move(f), config::input.back_button_timeout).task_id;
++          gamepad.back_timeout_id = input_pool.pushDelayed(std::move(f), config::input.back_button_timeout).task_id;
+         }
+       } else if (gamepad.back_timeout_id) {
+-        task_pool.cancel(gamepad.back_timeout_id);
++        input_pool.cancel(gamepad.back_timeout_id);
+         gamepad.back_timeout_id = nullptr;
+       }
+     }
+@@ -1818,18 +1820,18 @@ namespace input {
+       std::lock_guard<std::mutex> lg(input->input_queue_lock);
+       input->input_queue.push_back(std::move(input_data));
+     }
+-    task_pool.push(passthrough_next_message, input);
++    input_pool.push(passthrough_next_message, input);
+   }
+ 
+   /**
+    * @brief Reset the object to its initial empty state.
+    */
+   void reset(std::shared_ptr<input_t> &input) {
+-    task_pool.cancel(key_press_repeat_id);
+-    task_pool.cancel(input->mouse_left_button_timeout);
++    input_pool.cancel(key_press_repeat_id);
++    input_pool.cancel(input->mouse_left_button_timeout);
+ 
+-    // Ensure input is synchronous, by using the task_pool
+-    task_pool.push([]() {
++    // Ensure input is synchronous, by using the input thread (SplitPlay: input_pool)
++    input_pool.push([]() {
+       for (int x = 0; x < mouse_press.size(); ++x) {
+         if (mouse_press[x]) {
+           platf::button_mouse(platf_input, x, true);
+@@ -1857,6 +1859,10 @@ namespace input {
+      * @brief Destroy the input subsystem deinitializer.
+      */
+     ~deinit_t() override {
++      // SplitPlay: run what is still queued (releases, gamepad removals), then end the input thread before the
++      // backend it injects into goes away
++      input_pool.stop();
++      input_pool.join();
+       platf_input.reset();
+     }
+   };
+@@ -1867,6 +1873,16 @@ namespace input {
+   [[nodiscard]] std::unique_ptr<platf::deinit_t> init() {
+     platf_input = platf::input();
+ 
++    // SplitPlay: input is injected on its own thread under MMCSS "Games" instead of on task_pool's single thread,
++    // which also runs unrelated tasks. One thread keeps upstream's ordering and its synchronisation of the input state.
++    input_pool.start(1);
++    input_pool.push([]() {
++      platf::set_thread_name("input::inject");
++      // Lives until the thread ends (deinit_t), which reverts the registration on this thread
++      static thread_local std::optional<splitplay::scheduling::mmcss_t> mmcss;
++      mmcss.emplace("input injection");
++    });
++
+     return std::make_unique<deinit_t>();
+   }
+ 
+@@ -1894,7 +1910,7 @@ namespace input {
+     );
+ 
+     // Workaround to ensure new frames will be captured when a client connects
+-    task_pool.pushDelayed([]() {
++    input_pool.pushDelayed([]() {
+       platf::move_mouse(platf_input, 1, 1);
+       platf::move_mouse(platf_input, -1, -1);
+     },
+diff --git a/src/platform/windows/input.cpp b/src/platform/windows/input.cpp
+index 4dbcfa19b8d08b3cefcb55cc060b534af2d0ffd7..0d723985ce846abf8f2f8b1b6dbc2e242da67a99 100644
+--- a/src/platform/windows/input.cpp
++++ b/src/platform/windows/input.cpp
+@@ -359,7 +359,7 @@ namespace platf {
+       auto &gamepad = gamepads[nr];
+ 
+       if (gamepad.repeat_task) {
+-        task_pool.cancel(gamepad.repeat_task);
++        input_pool.cancel(gamepad.repeat_task);
+         gamepad.repeat_task = nullptr;
+       }
+ 
+@@ -479,7 +479,7 @@ namespace platf {
+       << "largeMotor: "sv << (int) largeMotor << std::endl
+       << "smallMotor: "sv << (int) smallMotor;
+ 
+-    task_pool.push(&vigem_t::rumble, (vigem_t *) userdata, target, largeMotor, smallMotor);
++    input_pool.push(&vigem_t::rumble, (vigem_t *) userdata, target, largeMotor, smallMotor);
+   }
+ 
+   void CALLBACK ds4_notify(
+@@ -497,8 +497,8 @@ namespace platf {
+       << util::hex(led_color.Green).to_string_view() << ' '
+       << util::hex(led_color.Blue).to_string_view() << std::endl;
+ 
+-    task_pool.push(&vigem_t::rumble, (vigem_t *) userdata, target, largeMotor, smallMotor);
+-    task_pool.push(&vigem_t::set_rgb_led, (vigem_t *) userdata, target, led_color.Red, led_color.Green, led_color.Blue);
++    input_pool.push(&vigem_t::rumble, (vigem_t *) userdata, target, largeMotor, smallMotor);
++    input_pool.push(&vigem_t::set_rgb_led, (vigem_t *) userdata, target, led_color.Red, led_color.Green, led_color.Blue);
+   }
+ 
+   /**
+@@ -747,10 +747,10 @@ namespace platf {
+ 
+     ~client_input_raw_t() override {
+       if (penRepeatTask) {
+-        task_pool.cancel(penRepeatTask);
++        input_pool.cancel(penRepeatTask);
+       }
+       if (touchRepeatTask) {
+-        task_pool.cancel(touchRepeatTask);
++        input_pool.cancel(touchRepeatTask);
+       }
+ 
+       if (pen) {
+@@ -928,7 +928,7 @@ namespace platf {
+       BOOST_LOG(warning) << "Failed to refresh virtual touch input: "sv << err;
+     }
+ 
+-    raw->touchRepeatTask = task_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw).task_id;
++    raw->touchRepeatTask = input_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw).task_id;
+   }
+ 
+   /**
+@@ -941,7 +941,7 @@ namespace platf {
+       BOOST_LOG(warning) << "Failed to refresh virtual pen input: "sv << err;
+     }
+ 
+-    raw->penRepeatTask = task_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw).task_id;
++    raw->penRepeatTask = input_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw).task_id;
+   }
+ 
+   /**
+@@ -951,7 +951,7 @@ namespace platf {
+   void cancel_all_active_touches(client_input_raw_t *raw) {
+     // Cancel touch repeat callbacks
+     if (raw->touchRepeatTask) {
+-      task_pool.cancel(raw->touchRepeatTask);
++      input_pool.cancel(raw->touchRepeatTask);
+       raw->touchRepeatTask = nullptr;
+     }
+ 
+@@ -1011,7 +1011,7 @@ namespace platf {
+ 
+     // Cancel touch repeat callbacks
+     if (raw->touchRepeatTask) {
+-      task_pool.cancel(raw->touchRepeatTask);
++      input_pool.cancel(raw->touchRepeatTask);
+       raw->touchRepeatTask = nullptr;
+     }
+ 
+@@ -1098,7 +1098,7 @@ namespace platf {
+ 
+     // If we still have an active touch, refresh the touch state periodically
+     if (raw->activeTouchSlots > 1 || touchInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
+-      raw->touchRepeatTask = task_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw).task_id;
++      raw->touchRepeatTask = input_pool.pushDelayed(repeat_touch, ISPI_REPEAT_INTERVAL, raw).task_id;
+     }
+   }
+ 
+@@ -1135,7 +1135,7 @@ namespace platf {
+ 
+     // Cancel pen repeat callbacks
+     if (raw->penRepeatTask) {
+-      task_pool.cancel(raw->penRepeatTask);
++      input_pool.cancel(raw->penRepeatTask);
+       raw->penRepeatTask = nullptr;
+     }
+ 
+@@ -1215,7 +1215,7 @@ namespace platf {
+ 
+     // If we still have an active pen interaction, refresh the pen state periodically
+     if (penInfo.pointerInfo.pointerFlags != POINTER_FLAG_NONE) {
+-      raw->penRepeatTask = task_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw).task_id;
++      raw->penRepeatTask = input_pool.pushDelayed(repeat_pen, ISPI_REPEAT_INTERVAL, raw).task_id;
+     }
+   }
+ 
+@@ -1531,7 +1531,7 @@ namespace platf {
+ 
+     // Cancel any pending updates. We will requeue one here when we're finished.
+     if (gamepad.repeat_task) {
+-      task_pool.cancel(gamepad.repeat_task);
++      input_pool.cancel(gamepad.repeat_task);
+       gamepad.repeat_task = nullptr;
+     }
+ 
+@@ -1551,7 +1551,7 @@ namespace platf {
+ 
+       // Repeat at least every 100ms to keep the 16-bit timestamp field from overflowing
+       gamepad.last_report_ts = now;
+-      gamepad.repeat_task = task_pool.pushDelayed(ds4_update_ts_and_send, 100ms, vigem, nr).task_id;
++      gamepad.repeat_task = input_pool.pushDelayed(ds4_update_ts_and_send, 100ms, vigem, nr).task_id;
+     }
+   }
+ 
+diff --git a/src/splitplay/scheduling.cpp b/src/splitplay/scheduling.cpp
+index 7d00d616d23d385d65977b64e1fb1707dbe597ce..8168ca81fd2f2103f8e2a8cdd0cf3426aeb13abe 100644
+--- a/src/splitplay/scheduling.cpp
++++ b/src/splitplay/scheduling.cpp
+@@ -61,7 +61,7 @@ namespace splitplay::scheduling {
+     }
+ 
+     BOOST_LOG(info) << "SplitPlay: scheduling: power throttling "sv << throttling << ", priority class "sv << priority
+-                    << ", MMCSS \"Games\" for the capture, encode, video send and control threads"sv;
++                    << ", MMCSS \"Games\" for the capture, encode, video send, control and input threads"sv;
+   }
+ 
+   unsigned long idle_priority_class() {

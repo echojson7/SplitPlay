@@ -200,6 +200,15 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 
     public void EnsureFirewallRules(DeskConfig desk) => _actions.Enqueue($"firewall+ {desk.Id} {desk.BasePort}");
 
+    /// <summary>What <see cref="FindPortConflict"/> answers for a desk id (another process on one of its ports).</summary>
+    public ConcurrentDictionary<string, PortConflict> PortConflicts { get; } = new(StringComparer.Ordinal);
+
+    public PortConflict? FindPortConflict(DeskConfig desk)
+    {
+        ArgumentNullException.ThrowIfNull(desk);
+        return PortConflicts.TryGetValue(desk.Id, out var conflict) ? conflict : null;
+    }
+
     public void RemoveFirewallRules(string deskId) => _actions.Enqueue($"firewall- {deskId}");
 
     public void DeleteDesk(DeskConfig desk, bool deleteUser)

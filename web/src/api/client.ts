@@ -286,8 +286,18 @@ export class ApiClient {
 
   /** LAN IPv4 addresses of the host: a desk is added in Moonlight as `<address>:<basePort>`. */
   async hostAddresses(): Promise<string[]> {
+    return (await this.hostNetwork()).addresses
+  }
+
+  /** LAN addresses, network profile and mDNS state of the host; unknown or malformed fields become empty or null. */
+  async hostNetwork(): Promise<HostNetwork> {
     const raw = await this.request<Partial<HostNetwork> | undefined>('GET', '/host/network')
-    return Array.isArray(raw?.addresses) ? raw.addresses.filter((a): a is string => typeof a === 'string') : []
+    const profile = raw?.profile
+    return {
+      addresses: Array.isArray(raw?.addresses) ? raw.addresses.filter((a): a is string => typeof a === 'string') : [],
+      profile: profile === 'Public' || profile === 'Private' || profile === 'Domain' ? profile : null,
+      mdnsAllowed: typeof raw?.mdnsAllowed === 'boolean' ? raw.mdnsAllowed : null,
+    }
   }
 
   /** The Windows services SplitPlay depends on, with their state. */

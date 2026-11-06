@@ -24,7 +24,8 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 - `--desk-dir` holds the worker's per-desk state (`sunshine.conf`, `sunshine_state.json` with pairings and unique id,
   `credentials\`, `apps.json`, `sunshine.log`); trailing `name=value` pairs are Sunshine settings and override `sunshine.conf`.
   The worker resolves `assets\` next to its executable. See `worker/README.md`.
-- The service passes the worker's recommended settings by default (`sunshine_name=<HOST>-<id>`, `min_log_level=info`,
+- The service passes the worker's recommended settings by default (`sunshine_name=<PC name>-<desk name>`, the desk id
+  when the desk has no name, without control characters and `#`; the worker names its mDNS instance after it, patch 0017; `min_log_level=info`,
   `nvenc_preset=1`, `nvenc_twopass=disabled`, `hevc_mode=0`, `av1_mode=0`, `gamepad=ds4`: XInput gives an emulated
   Xbox 360 pad's buttons only to the console's foreground window); a desk's `workerSettings` (config.md)
   override or extend them. `port` is always set by the service.

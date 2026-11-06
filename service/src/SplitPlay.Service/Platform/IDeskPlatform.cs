@@ -46,8 +46,18 @@ public interface IDeskPlatform
     /// <summary>The RDP-Tcp listener port (registry, default 3389).</summary>
     int RdpPort();
 
-    /// <summary>Creates or refreshes the desk's inbound firewall rules for its Moonlight ports.</summary>
+    /// <summary>
+    /// Makes sure the desk's inbound firewall rules for its Moonlight ports exist as SplitPlay creates them: rules that
+    /// are missing (someone deleted them), disabled or different (another base port) are created again; matching rules
+    /// are left alone. Called when the desk starts, before every worker start and when its config changes.
+    /// </summary>
     void EnsureFirewallRules(DeskConfig desk);
+
+    /// <summary>
+    /// The first of the desk's Moonlight ports that another process holds or Windows refuses (an excluded port range),
+    /// or null when all are free or the desk has no base port. Checked before the worker starts.
+    /// </summary>
+    PortConflict? FindPortConflict(DeskConfig desk);
 
     /// <summary>Removes the desk's firewall rules (desk deleted).</summary>
     void RemoveFirewallRules(string deskId);

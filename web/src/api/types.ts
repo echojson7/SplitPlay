@@ -77,9 +77,17 @@ export interface HostUser {
   createdBySplitPlay?: boolean
 }
 
-/** GET /host/network: LAN IPv4 addresses of the host, those with a default gateway first. */
+/** Windows network profile of the host's LAN. */
+export type NetworkProfile = 'Public' | 'Private' | 'Domain'
+
+/**
+ * GET /host/network: LAN IPv4 addresses of the host, those with a default gateway first; the LAN's network profile and
+ * whether inbound mDNS is allowed on it (null: unknown).
+ */
 export interface HostNetwork {
   addresses: string[]
+  profile: NetworkProfile | null
+  mdnsAllowed: boolean | null
 }
 
 /** Moonlight settings recommended for a desk (GET /desks/{id}/client-pack). */

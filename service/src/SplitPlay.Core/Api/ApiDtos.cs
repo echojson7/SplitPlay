@@ -160,8 +160,12 @@ public sealed class DeskDto
 /// </summary>
 public sealed record HostUserDto(string Name, string? FullName, bool IsAdmin, bool IsConsoleUser, bool CreatedBySplitPlay);
 
-/// <summary><c>GET /host/network</c>: LAN IPv4 addresses of the host, those with a default gateway first.</summary>
-public sealed record HostNetworkDto(IReadOnlyList<string> Addresses);
+/// <summary>
+/// <c>GET /host/network</c>: LAN IPv4 addresses of the host, those with a default gateway first; the Windows network
+/// profile of the LAN (<c>Public</c>, <c>Private</c>, <c>Domain</c>) and whether inbound mDNS reaches Windows' mDNS
+/// responder on it (the firewall rule "mDNS (UDP-In)"). Null: unknown.
+/// </summary>
+public sealed record HostNetworkDto(IReadOnlyList<string> Addresses, string? Profile = null, bool? MdnsAllowed = null);
 
 /// <summary>
 /// One entry of <c>GET /host/services</c>: a Windows service SplitPlay depends on. <see cref="Status"/> is one of

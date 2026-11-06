@@ -97,6 +97,12 @@ public sealed class SupervisorOptions
     public int ProvisionRetryDelayMs { get; set; } = 5_000;
 
     /// <summary>
+    /// Before a worker restart, how long a busy desk port may take to come free (the previous worker can still be
+    /// exiting) before the attempt fails with "Port N busy: X". A busy port at desk start faults the desk at once.
+    /// </summary>
+    public int PortBusyGraceMs { get; set; } = 3_000;
+
+    /// <summary>
     /// Time a lost RDP session may take to come back (the seat reconnects on its own) before the seat is replaced.
     /// </summary>
     public int SessionLostTimeoutMs { get; set; } = 180_000;

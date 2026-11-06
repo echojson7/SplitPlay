@@ -85,7 +85,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 | POST | `/auth/login`, `/auth/logout`, `/auth/password` | login, logout, set or change the admin password |
 | GET, PUT | `/host` | read or replace the `host` object of config.md; validated and saved; a `webPort` change applies after a service restart; a `lanAccess` change toggles the firewall rule `SplitPlay Web UI` |
 | GET | `/host/users` | local accounts that can be a desk user: `[{"name","fullName","isAdmin","isConsoleUser","createdBySplitPlay"}]` (built-in accounts left out) |
-| GET | `/host/network` | LAN addresses of the host for Moonlight: `{"addresses":["192.168.1.20"]}`: IPv4 addresses of interfaces that are up, without loopback and link-local (169.254/16), those of interfaces with a default gateway first; empty when none. A desk is added in Moonlight as `<address>:<basePort>` |
+| GET | `/host/network` | LAN addresses of the host for Moonlight and what may keep Moonlight from the desks: `{"addresses":["192.168.1.20"],"profile":"Private","mdnsAllowed":true}`. `addresses`: IPv4 addresses of interfaces that are up, without loopback and link-local (169.254/16), those of interfaces with a default gateway first; empty when none. A desk is added in Moonlight as `<address>:<basePort>`. `profile`: the Windows network profile (`Public`, `Private`, `Domain`) of the interfaces with a default gateway (of all interfaces when none has one; virtual switches of Hyper-V or WSL have none), the worst one when they differ; the desks' firewall rules cover private and domain networks only. `mdnsAllowed`: whether inbound mDNS (UDP 5353) reaches Windows' mDNS responder on that profile: the firewall is off for it, or an enabled rule such as the built-in "mDNS (UDP-In)" allows it and none blocks it. `null` when unknown. SplitPlay never changes the profile or the rule; the UI shows "Network · Public" and "mDNS · Off" in Settings only when there is a problem |
 | GET | `/host/services` | the Windows services SplitPlay depends on, see [Host services](#host-services) |
 | POST | `/host/services/{name}/start`, `/host/services/{name}/stop` | start or stop one of those services; 202 with its entry. `{name}` outside the list → 404 `not_found`; a service that cannot be started or stopped now (already running, disabled, not installed, a driver) → 409 `invalid_state`; the SCM refusing → 500 `internal` with its message |
 | GET | `/desks` | array of desks with live state |
@@ -194,6 +194,12 @@ keeps the current value unless `user` changes, and it may change while the desk 
 
 `state` is one of the lifecycle states in ARCHITECTURE.md §4:
 `Defined, Provisioning, Connecting, SessionReady, DisplayReady, Ready, Streaming, Recovering, Faulted, Stopping, Stopped`.
+
+`lastError` is the reason of the latest failure (English, as logged). Two are fixed so the UI can translate them:
+`Port <n> busy: <program>` (another program holds one of the desk's ports, e.g. `Port 48089 busy: sunshine.exe`; at
+desk start the desk goes straight to `Faulted`, before a worker restart it waits up to `Supervisor:PortBusyGraceMs`,
+3 s, for the port and then counts a failure without starting a worker) and `Port <n> reserved by Windows` (an excluded
+port range, `netsh int ipv4 show excludedportrange protocol=tcp|udp`). The UI shows them while `Recovering` too.
 
 ## Client launch pack
 

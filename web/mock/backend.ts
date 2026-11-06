@@ -44,6 +44,8 @@ export interface MockBackendOptions {
   trusted?: boolean
   /** Delay between lifecycle steps after start/stop, in ms. */
   stepMs?: number
+  /** Network profile and mDNS state GET /host/network reports (default: a private network with mDNS allowed). */
+  network?: { profile: 'Public' | 'Private' | 'Domain' | null; mdnsAllowed: boolean | null }
 }
 
 const SESSION_COOKIE = 'sp_session'
@@ -193,12 +195,14 @@ export class MockBackend {
   }
   private clientSeq = 1
   private readonly services = new Map<string, ServiceEntry>()
+  private readonly network: { profile: 'Public' | 'Private' | 'Domain' | null; mdnsAllowed: boolean | null }
 
   constructor(opts: MockBackendOptions = {}) {
     this.now = opts.now ?? (() => Date.now())
     this.stepMs = opts.stepMs ?? 700
     this.password = opts.password
     this.trusted = opts.trusted ?? opts.password === undefined
+    this.network = opts.network ?? { profile: 'Private', mdnsAllowed: true }
     this.startedAt = this.now()
     for (const s of MOCK_SERVICES) this.services.set(s.name.toLowerCase(), { service: clone(s), doneAt: 0 })
     this.seed()
@@ -539,7 +543,7 @@ export class MockBackend {
     if (path === '/metrics' && method === 'GET') return ok(this.metrics())
     if (path === '/logs' && method === 'GET') return ok(this.logs(req.query ?? {}))
     if (path === '/host' && method === 'GET') return ok(clone(this.host))
-    if (path === '/host/network' && method === 'GET') return ok({ addresses: [...MOCK_ADDRESSES] })
+    if (path === '/host/network' && method === 'GET') return ok({ addresses: [...MOCK_ADDRESSES], ...this.network })
     if (path === '/host' && method === 'PUT') {
       const h = req.body as Partial<HostSettings> | undefined
       if (!h || typeof h.webPort !== 'number' || h.webPort < 1 || h.webPort > 65535)

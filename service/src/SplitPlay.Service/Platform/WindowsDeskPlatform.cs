@@ -255,14 +255,40 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
             return;
         }
 
-        RemoveFirewallRules(desk.Id);
         var program = _supervisor.Value.ResolveWorkerExecutable();
+        var stored = WindowsFirewallStore.LocalRules();
+        if (stored is not null)
+        {
+            var tcpState = FirewallRules.DeskRule(stored, FirewallRuleName(desk.Id, "TCP"), FirewallRules.Tcp, BasePortAllocator.TcpPorts(b), program);
+            var udpState = FirewallRules.DeskRule(stored, FirewallRuleName(desk.Id, "UDP"), FirewallRules.Udp, BasePortAllocator.UdpPorts(b), program);
+            if (tcpState == FirewallRules.DeskRuleState.Match && udpState == FirewallRules.DeskRuleState.Match)
+            {
+                return;
+            }
+
+            if (tcpState == FirewallRules.DeskRuleState.Missing || udpState == FirewallRules.DeskRuleState.Missing)
+            {
+                _logger.LogInformation("Desk {Desk}: firewall rules missing (TCP {Tcp}, UDP {Udp}); creating them", desk.Id, tcpState, udpState);
+            }
+            else
+            {
+                _logger.LogInformation("Desk {Desk}: firewall rules changed or disabled; creating them again", desk.Id);
+            }
+        }
+
+        RemoveFirewallRules(desk.Id);
         var tcp = string.Join(',', BasePortAllocator.TcpPorts(b));
         var udp = string.Join(',', BasePortAllocator.UdpPorts(b));
         Netsh($"advfirewall firewall add rule name=\"{FirewallRuleName(desk.Id, "TCP")}\" dir=in action=allow protocol=TCP localport={tcp} " +
               $"profile=private,domain program=\"{program}\" enable=yes description=\"SplitPlay desk {desk.Id}: Moonlight (HTTPS, HTTP, RTSP)\"");
         Netsh($"advfirewall firewall add rule name=\"{FirewallRuleName(desk.Id, "UDP")}\" dir=in action=allow protocol=UDP localport={udp} " +
               $"profile=private,domain program=\"{program}\" enable=yes description=\"SplitPlay desk {desk.Id}: Moonlight (video, control, audio)\"");
+    }
+
+    public PortConflict? FindPortConflict(DeskConfig desk)
+    {
+        ArgumentNullException.ThrowIfNull(desk);
+        return desk.BasePort is int b ? WindowsPortCheck.Find(b) : null;
     }
 
     public void RemoveFirewallRules(string deskId)

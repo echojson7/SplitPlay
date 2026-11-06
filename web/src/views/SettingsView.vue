@@ -1,9 +1,10 @@
 <!-- SPDX-License-Identifier: MIT -->
 <!-- Settings: admin password and language up front; service options and backup under «Advanced». -->
+<!-- Network rows (public network, mDNS blocked) appear at the top only when there is a problem. -->
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { api, ApiError } from '../api/client'
-import type { HostSettings } from '../api/types'
+import type { HostNetwork, HostSettings } from '../api/types'
 import AppIcon from '../components/AppIcon.vue'
 import { errorText } from '../composables'
 import { fmtDuration, locale, setLocale, t, type Locale } from '../i18n'
@@ -13,7 +14,10 @@ import { toast } from '../toast'
 
 const s = store.state
 const host = ref<HostSettings | null>(null)
+const network = ref<HostNetwork | null>(null)
 const unsupported = ref(false)
+const networkPublic = computed(() => network.value?.profile === 'Public')
+const mdnsOff = computed(() => network.value?.mdnsAllowed === false)
 const busy = ref(false)
 
 const COMPOSE_INTERVALS = [2, 3, 4, 5, 7, 8, 16]
@@ -38,6 +42,11 @@ const importInput = ref<HTMLInputElement | null>(null)
 
 onMounted(async () => {
   void store.refreshHealth()
+  // Informational only: an older service or a failure just shows no network rows.
+  api.hostNetwork().then(
+    (n) => (network.value = n),
+    () => undefined,
+  )
   try {
     host.value = await api.getHostSettings()
   } catch (e) {
@@ -120,6 +129,25 @@ function importConfig(): Promise<void> {
     <header class="page-head">
       <h1>{{ t('settings.title') }}</h1>
     </header>
+
+    <div v-if="networkPublic || mdnsOff" class="rows net" data-network-problems>
+      <div v-if="networkPublic" class="srow" data-network-public>
+        <AppIcon name="globe" :size="16" />
+        <div class="text">
+          <span class="title">{{ t('settings.network') }}</span>
+          <span class="desc" :title="t('settings.networkPublicHint')">{{ t('settings.networkPublicHint') }}</span>
+        </div>
+        <div class="ctl">{{ t('settings.networkPublic') }}</div>
+      </div>
+      <div v-if="mdnsOff" class="srow" data-mdns-off>
+        <AppIcon name="link" :size="16" />
+        <div class="text">
+          <span class="title">{{ t('settings.mdns') }}</span>
+          <span class="desc" :title="t('settings.mdnsOffHint')">{{ t('settings.mdnsOffHint') }}</span>
+        </div>
+        <div class="ctl">{{ t('settings.mdnsOff') }}</div>
+      </div>
+    </div>
 
     <h2 class="group-title">{{ t('settings.appearance') }}</h2>
     <div class="rows">
@@ -293,6 +321,11 @@ function importConfig(): Promise<void> {
 
 label.text {
   cursor: default;
+}
+
+.rows.net .ctl {
+  color: var(--text-2);
+  font-size: 14px;
 }
 
 .desc.err {

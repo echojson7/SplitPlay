@@ -17,6 +17,9 @@ public sealed class FakeDrs : IDrsProvider
     /// <summary>NVIDIA's predefined values: (profile, setting) → value.</summary>
     private readonly Dictionary<(string Profile, uint Id), uint> _predefined = new(new PredefinedKeyComparer());
 
+    /// <summary>Predefined settings somebody set (NvAPI then reports them as not predefined, whatever the value).</summary>
+    private HashSet<(string Profile, uint Id)> _userSet = new(new PredefinedKeyComparer());
+
     public bool Driver { get; set; } = true;
 
     /// <summary>Sessions opened so far.</summary>
@@ -24,6 +27,12 @@ public sealed class FakeDrs : IDrsProvider
 
     /// <summary>Saves so far.</summary>
     public int Saves { get; private set; }
+
+    /// <summary>Every <see cref="IDrsSession.FindApplicationProfile"/> throws.</summary>
+    public bool FailLookups { get; set; }
+
+    /// <summary>The names <see cref="IDrsSession.FindApplicationProfile"/> was asked for.</summary>
+    public System.Collections.Concurrent.ConcurrentQueue<string> Lookups { get; } = new();
 
     /// <summary>Throw from the next <see cref="IDrsSession.Save"/> (once).</summary>
     public bool FailNextSave { get; set; }
@@ -39,7 +48,8 @@ public sealed class FakeDrs : IDrsProvider
 
             Opens++;
             return new Session(this, Copy(_settings), _apps.ToDictionary(kv => kv.Key, kv => new HashSet<string>(kv.Value, StringComparer.OrdinalIgnoreCase),
-                StringComparer.OrdinalIgnoreCase), new Dictionary<(string Profile, uint Id), uint>(_predefined, new PredefinedKeyComparer()));
+                StringComparer.OrdinalIgnoreCase), new Dictionary<(string Profile, uint Id), uint>(_predefined, new PredefinedKeyComparer()),
+                new HashSet<(string Profile, uint Id)>(_userSet, new PredefinedKeyComparer()));
         }
     }
 
@@ -83,6 +93,12 @@ public sealed class FakeDrs : IDrsProvider
             if (value is { } v)
             {
                 s[id] = v;
+                _userSet.Add((profile ?? "", id));
+            }
+            else if (profile is not null && _predefined.TryGetValue((profile, id), out var p))
+            {
+                s[id] = p;
+                _userSet.Remove((profile, id));
             }
             else
             {
@@ -115,6 +131,7 @@ public sealed class FakeDrs : IDrsProvider
             }
 
             _predefined[(profile, id)] = value;
+            _userSet.Remove((profile, id));
             (_settings.TryGetValue(profile, out var s) ? s : _settings[profile] = [])[id] = value;
         }
     }
@@ -131,7 +148,7 @@ public sealed class FakeDrs : IDrsProvider
     }
 
     private sealed class Session(FakeDrs owner, Dictionary<string, Dictionary<uint, uint>> settings, Dictionary<string, HashSet<string>> apps,
-        Dictionary<(string Profile, uint Id), uint> predefined)
+        Dictionary<(string Profile, uint Id), uint> predefined, HashSet<(string Profile, uint Id)> userSet)
         : IDrsSession
     {
         public bool ProfileExists(string name) => apps.ContainsKey(name);
@@ -166,19 +183,34 @@ public sealed class FakeDrs : IDrsProvider
             apps[profile].Add(executable);
         }
 
-        public string? FindApplicationProfile(string executable) =>
-            apps.Where(kv => kv.Value.Contains(executable)).Select(kv => kv.Key).FirstOrDefault();
+        public string? FindApplicationProfile(string executable)
+        {
+            owner.Lookups.Enqueue(executable);
+            if (owner.FailLookups)
+            {
+                throw new NvidiaDrsException($"NvAPI_DRS_FindApplicationByName({executable}): NVAPI_ERROR");
+            }
+
+            // A full path matches by its file name here.
+            var name = executable[(executable.LastIndexOfAny(['/', '\\']) + 1)..];
+            return apps.Where(kv => kv.Value.Contains(name)).Select(kv => kv.Key).FirstOrDefault();
+        }
 
         public bool IsPredefined(string? profile, uint settingId) =>
-            profile is not null && predefined.TryGetValue((profile, settingId), out var p)
+            profile is not null && predefined.TryGetValue((profile, settingId), out var p) && !userSet.Contains((profile, settingId))
             && Profile(profile).TryGetValue(settingId, out var v) && v == p;
 
         public uint? GetSetting(string? profile, uint settingId) => Profile(profile).TryGetValue(settingId, out var v) ? v : null;
 
-        public void SetSetting(string? profile, uint settingId, uint value) => Profile(profile)[settingId] = value;
+        public void SetSetting(string? profile, uint settingId, uint value)
+        {
+            Profile(profile)[settingId] = value;
+            userSet.Add((profile ?? "", settingId));
+        }
 
         public void DeleteSetting(string? profile, uint settingId)
         {
+            userSet.Remove((profile ?? "", settingId));
             if (profile is not null && predefined.TryGetValue((profile, settingId), out var p))
             {
                 Profile(profile)[settingId] = p;
@@ -200,6 +232,7 @@ public sealed class FakeDrs : IDrsProvider
                 }
 
                 owner._settings = Copy(settings);
+                owner._userSet = new HashSet<(string Profile, uint Id)>(userSet, new PredefinedKeyComparer());
                 owner._apps = apps.ToDictionary(kv => kv.Key, kv => new HashSet<string>(kv.Value, StringComparer.OrdinalIgnoreCase),
                     StringComparer.OrdinalIgnoreCase);
                 owner.Saves++;

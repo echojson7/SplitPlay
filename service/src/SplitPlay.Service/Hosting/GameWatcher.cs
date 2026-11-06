@@ -17,7 +17,7 @@ public sealed record GameDeskView(string Id, int? Session, int? ClientFps);
 /// <list type="bullet">
 /// <item>Every <see cref="Interval"/> it reads the per-process GPU load (<see cref="GpuUsageMonitor"/>, which samples
 /// only while somebody reads) of the desks whose limit is not off. A process that renders at
-/// <see cref="LoadPercent"/> or more in <see cref="HitsToDetect"/> reads, and that <see cref="GameLimits.MayBeGame"/>
+/// <see cref="LoadPercent"/> or more in <see cref="HitsToDetect"/> reads within <see cref="HitWindow"/>, and that <see cref="GameLimits.MayBeGame"/>
 /// accepts, is put on record in <c>games.json</c>.</item>
 /// <item>It remembers the frame rate each desk's Moonlight client asked for (Auto).</item>
 /// <item>When the resulting limits differ from the ones last applied, <see cref="NvidiaDriverSettings"/> applies them.</item>
@@ -33,6 +33,9 @@ public sealed class GameWatcher : BackgroundService
 
     /// <summary>Reads at <see cref="LoadPercent"/> or more before a process counts as a game (not necessarily in a row).</summary>
     public const int HitsToDetect = 3;
+
+    /// <summary>The <see cref="HitsToDetect"/> reads must fall within this time.</summary>
+    public static readonly TimeSpan HitWindow = TimeSpan.FromMinutes(1);
 
     private readonly ConfigService _config;
     private readonly DeskSupervisor _supervisor;
@@ -142,7 +145,7 @@ public sealed class GameWatcher : BackgroundService
         }
 
         var limits = _nvidia.WantedLimits();
-        if (!GameLimits.Same(limits, _nvidia.AppliedLimits))
+        if (_nvidia.NeedsApply(limits))
         {
             _nvidia.EnsureApplied("game FPS limits");
         }
@@ -153,7 +156,8 @@ public sealed class GameWatcher : BackgroundService
         // Desks that run in their own session with the limit on; no NVIDIA driver: nothing to limit, nothing to read.
         var sessions = desks
             .Where(d => d.Session is not null && config.Desks.FirstOrDefault(c => c.Id == d.Id)?.GameFpsLimit != GameLimits.Off)
-            .ToDictionary(d => d.Session!.Value, d => d.Id);
+            .GroupBy(d => d.Session!.Value)
+            .ToDictionary(g => g.Key, g => g.First().Id);
         if (sessions.Count == 0 || _nvidia.DriverPresent == false)
         {
             _watched.Clear();
@@ -181,15 +185,35 @@ public sealed class GameWatcher : BackgroundService
                 _watched[p.Pid] = w;
             }
 
-            if (w.Decided || p.GpuPercent < LoadPercent || ++w.Hits < HitsToDetect)
+            if (w.Decided || p.GpuPercent < LoadPercent)
             {
                 continue;
             }
 
-            // Decided once per process: its path is read once, and a non-game is not looked at again.
-            w.Decided = true;
+            // The reads with load must fall within one window: short spikes of an editor or a tool over hours do not add up.
+            var now = _time.GetTimestamp();
+            if (w.Hits == 0 || _time.GetElapsedTime(w.FirstHit, now) > HitWindow)
+            {
+                w.Hits = 0;
+                w.FirstHit = now;
+            }
+
+            if (++w.Hits < HitsToDetect)
+            {
+                continue;
+            }
+
             var path = _images.PathOf(p.Pid);
-            if (path is null || !GameLimits.MayBeGame(path, _images.WindowsDirectory))
+            if (path is null)
+            {
+                // Not readable now (exiting, access): tried again a few times before the process is given up.
+                w.Decided = ++w.PathFailures >= 3;
+                continue;
+            }
+
+            // Decided once per process: a non-game is not looked at again.
+            w.Decided = true;
+            if (!GameLimits.MayBeGame(path, _images.WindowsDirectory))
             {
                 continue;
             }
@@ -214,6 +238,10 @@ public sealed class GameWatcher : BackgroundService
         public int Session { get; } = session;
 
         public int Hits { get; set; }
+
+        public long FirstHit { get; set; }
+
+        public int PathFailures { get; set; }
 
         public bool Decided { get; set; }
     }

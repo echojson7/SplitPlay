@@ -33,6 +33,8 @@ public sealed class NvidiaDriverSettings : IHostedService
     private IReadOnlyDictionary<string, int>? _appliedLimits;
     private Dictionary<string, DrsAppResult> _gameStatus = new(StringComparer.OrdinalIgnoreCase);
     private bool? _driver;
+    private DateTime? _retryAt;
+    private readonly object _applyGate = new();
 
     /// <param name="games">The games seen in desks, for their FPS limits (null: none are managed).</param>
     public NvidiaDriverSettings(ConfigService config, DataPaths paths, IDrsProvider drs, ILogger<NvidiaDriverSettings> logger,
@@ -116,23 +118,45 @@ public sealed class NvidiaDriverSettings : IHostedService
     /// <summary>Before a worker starts, and when <c>host.nvidiaProfiles</c> changes. Never throws.</summary>
     public void EnsureApplied(string reason) => Apply(reason, running: !_stopping);
 
+    /// <summary>
+    /// True when <paramref name="limits"/> differ from the ones last applied, or a game's limit failed and
+    /// <see cref="RetryAfter"/> has passed.
+    /// </summary>
+    public bool NeedsApply(IReadOnlyDictionary<string, int> limits)
+    {
+        lock (_statusGate)
+        {
+            return !GameLimits.Same(limits, _appliedLimits) || (_retryAt is { } at && DateTime.UtcNow >= at);
+        }
+    }
+
+    /// <summary>How long a failed game limit waits before the watcher tries again.</summary>
+    public static readonly TimeSpan RetryAfter = TimeSpan.FromMinutes(1);
+
     private void Apply(string reason, bool running)
     {
+        // One apply at a time from computing the limits to publishing what became of them: otherwise an older set of
+        // limits could reach the driver after a newer one while the newer one is reported as applied.
+        lock (_applyGate)
+        {
+            ApplyLocked(reason, running);
+        }
+    }
+
+    private void ApplyLocked(string reason, bool running)
+    {
+        IReadOnlyDictionary<string, int> limits = new Dictionary<string, int>();
         try
         {
-            var limits = WantedLimits();
+            limits = WantedLimits();
+            var result = _profiles.Apply(Wanted(running), GameLimits.Specs(limits, _games?.Snapshot()));
             lock (_statusGate)
             {
-                // Before the apply: a failure is not retried every few seconds by the watcher, only at the next desk
-                // start or change.
                 _appliedLimits = limits;
-            }
-
-            var result = _profiles.Apply(Wanted(running), GameLimits.Specs(limits));
-            lock (_statusGate)
-            {
                 _driver = result.Driver;
                 _gameStatus = (result.Apps ?? []).ToDictionary(a => a.Executable, StringComparer.OrdinalIgnoreCase);
+                // A failed game is tried again later, not every few seconds.
+                _retryAt = _gameStatus.Values.Any(a => a.Status == DrsAppStatus.Failed) ? DateTime.UtcNow + RetryAfter : null;
             }
 
             if (!result.Driver)
@@ -166,6 +190,13 @@ public sealed class NvidiaDriverSettings : IHostedService
         {
             // Never fatal for a desk: the stream works without these settings, only less well.
             _logger.LogWarning("NVIDIA driver settings ({Reason}) failed: {Message}", reason, ex.Message);
+            lock (_statusGate)
+            {
+                // Nothing of this apply is known to be in the driver.
+                _appliedLimits = limits;
+                _gameStatus = limits.Keys.ToDictionary(exe => exe, exe => new DrsAppResult(exe, null, DrsAppStatus.Failed), StringComparer.OrdinalIgnoreCase);
+                _retryAt = DateTime.UtcNow + RetryAfter;
+            }
         }
     }
 }

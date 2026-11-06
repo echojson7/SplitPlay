@@ -85,12 +85,15 @@ public static class GameLimits
         return best;
     }
 
-    /// <summary>The driver settings for <paramref name="limits"/>.</summary>
-    public static IReadOnlyList<DrsAppSpec> Specs(IReadOnlyDictionary<string, int> limits)
+    /// <summary>The driver settings for <paramref name="limits"/>, with each game's last known path from <paramref name="state"/>.</summary>
+    public static IReadOnlyList<DrsAppSpec> Specs(IReadOnlyDictionary<string, int> limits, GameCatalogState? state = null)
     {
         ArgumentNullException.ThrowIfNull(limits);
+        string? PathOf(string exe) =>
+            state?.Games.FirstOrDefault(g => string.Equals(g.Exe, exe, StringComparison.OrdinalIgnoreCase))?.Path;
         return [.. limits.OrderBy(l => l.Key, StringComparer.OrdinalIgnoreCase)
-            .Select(l => new DrsAppSpec(l.Key, new Dictionary<uint, uint> { [DrsSettings.FrameRateLimit] = (uint)Math.Clamp(l.Value, MinFps, MaxFps) }))];
+            .Select(l => new DrsAppSpec(l.Key, new Dictionary<uint, uint> { [DrsSettings.FrameRateLimit] = (uint)Math.Clamp(l.Value, MinFps, MaxFps) },
+                PathOf(l.Key)))];
     }
 
     /// <summary>True when both hold the same games with the same limits.</summary>

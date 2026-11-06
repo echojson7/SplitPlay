@@ -62,7 +62,8 @@ public sealed class GameCatalog
                 if (_state.Games.Count > MaxGames)
                 {
                     // Bounded: a desk that runs many programs must not grow the file (and the driver profiles) forever.
-                    _state.Games.Remove(_state.Games.OrderBy(g => g.LastSeen).First());
+                    // The owner's exclusions go last.
+                    _state.Games.Remove(_state.Games.Where(g => g != game).OrderBy(g => g.Excluded).ThenBy(g => g.LastSeen).First());
                 }
             }
             else if (game.Desks.Contains(deskId, StringComparer.Ordinal))
@@ -186,18 +187,18 @@ public sealed class GameCatalog
         try
         {
             var state = JsonSerializer.Deserialize(File.ReadAllBytes(file), GameCatalogJsonContext.Default.GameCatalogState) ?? new GameCatalogState();
-            // Tolerate hand edits: no empty names, desks or duplicates.
-            state.Games = [.. state.Games.Where(g => !string.IsNullOrWhiteSpace(g.Exe))
+            // Tolerate hand edits: no nulls, empty names, desks or duplicates.
+            state.Games = [.. (state.Games ?? []).Where(g => g is not null && !string.IsNullOrWhiteSpace(g.Exe))
                 .GroupBy(g => g.Exe, StringComparer.OrdinalIgnoreCase).Select(g => g.First())];
             foreach (var game in state.Games)
             {
-                game.Desks = [.. game.Desks.Where(d => !string.IsNullOrEmpty(d)).Distinct(StringComparer.Ordinal)];
+                game.Desks = [.. (game.Desks ?? []).Where(d => !string.IsNullOrEmpty(d)).Distinct(StringComparer.Ordinal)];
             }
 
             state.ClientFps = new Dictionary<string, int>(state.ClientFps ?? [], StringComparer.Ordinal);
             return state;
         }
-        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             error = $"{file} could not be read ({ex.Message}); starting with no games";
             return new GameCatalogState();

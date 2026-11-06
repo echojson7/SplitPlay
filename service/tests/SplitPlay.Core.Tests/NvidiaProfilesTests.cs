@@ -398,4 +398,61 @@ public sealed class NvidiaProfilesTests : IDisposable
         Assert.False(_drs.HasProfile(NvidiaProfiles.GameProfile("own.exe")));
         Assert.False(File.Exists(StateFile));
     }
+
+    [Fact]
+    public void A_failed_lookup_keeps_the_game_where_it_was()
+    {
+        Profiles().Apply(Stopped, [Game("foo.exe", 60)]);
+        var profile = NvidiaProfiles.GameProfile("foo.exe");
+        _drs.FailLookups = true;
+
+        var result = Profiles().Apply(Stopped, [Game("foo.exe", 60)]);
+        Assert.Equal(DrsAppStatus.Failed, Assert.Single(result.Apps!).Status);
+        Assert.True(_drs.HasProfile(profile));
+        Assert.Equal(60u, _drs.Get(profile, Frl));
+
+        // Unknown before: nothing to keep, nothing changed.
+        var other = Profiles().Apply(Stopped, [Game("foo.exe", 60), Game("bar.exe", 30)]);
+        Assert.Equal(DrsAppStatus.Failed, other.Apps!.Single(a => a.Executable == "bar.exe").Status);
+        Assert.False(_drs.HasProfile(NvidiaProfiles.GameProfile("bar.exe")));
+    }
+
+    [Fact]
+    public void The_full_path_is_looked_up_when_known()
+    {
+        _drs.AddProfile("Foo", "foo.exe");
+        Profiles().Apply(Stopped, [new DrsAppSpec("foo.exe", new Dictionary<uint, uint> { [Frl] = 60 }, @"D:\Games\Foo\foo.exe")]);
+        Assert.Contains("D:/Games/Foo/foo.exe", _drs.Lookups);
+        Assert.Equal(60u, _drs.Get("Foo", Frl));
+    }
+
+    [Fact]
+    public void A_global_cap_of_the_owner_is_not_raised_per_game()
+    {
+        _drs.AddProfile("Game", "g.exe");
+        Profiles().Apply(Stopped, [Game("g.exe", 120)]);
+        Assert.Equal(120u, _drs.Get("Game", Frl));
+
+        // The owner caps every program at 60 afterwards: SplitPlay's 120 goes.
+        _drs.Set(null, Frl, 60);
+        var result = Profiles().Apply(Stopped, [Game("g.exe", 120)]);
+        Assert.Equal(DrsAppStatus.Owner, Assert.Single(result.Apps!).Status);
+        Assert.Null(_drs.Get("Game", Frl));
+        Assert.Equal(60u, _drs.Get(null, Frl));
+    }
+
+    [Fact]
+    public void A_profile_of_splitplay_with_the_owners_limit_is_kept()
+    {
+        var profile = NvidiaProfiles.GameProfile("foo.exe");
+        Profiles().Apply(Stopped, [Game("foo.exe", 60)]);
+        _drs.Set(profile, Frl, 30);
+        Profiles().Apply(Stopped, [Game("foo.exe", 60)]);
+
+        var result = Profiles().Apply(Stopped);
+        Assert.True(_drs.HasProfile(profile));
+        Assert.Equal(30u, _drs.Get(profile, Frl));
+        Assert.Contains(result.Notes, n => n.Contains("kept", StringComparison.Ordinal));
+        Assert.DoesNotContain(profile, Profiles().LoadState().CreatedProfiles);
+    }
 }

@@ -328,7 +328,12 @@ export class MockBackend {
           lossPct: jitter > 0.93 ? Math.round((jitter - 0.9) * 40) / 10 : 0,
           rttMs: Math.round(3 + 1.5 * jitter),
           clients: 1,
+          gpuPercent: Math.round(34 + 6 * phase),
+          encoderPercent: Math.round(11 + 2 * jitter),
+          vramMb: 2900 + Math.round(120 * phase),
         }
+      } else if (e.desk.state === 'Ready') {
+        e.desk.metrics = { ...IDLE_METRICS, gpuPercent: 2, encoderPercent: 0, vramMb: 640 }
       } else {
         e.desk.metrics = { ...IDLE_METRICS }
       }

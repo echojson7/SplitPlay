@@ -64,6 +64,7 @@ describe('app smoke', () => {
     expect(w.find('[data-live-ping]').text()).toMatch(/^\d+ мс$/)
     expect(w.find('[data-live-encode]').text()).toMatch(/^\d+,\d \/ \d+,\d мс$/)
     expect(w.find('[data-live-loss]').text()).toMatch(/ %$/)
+    expect(w.find('[data-live-gpu]').text()).toMatch(/^\d+ % · кодер \d+ % · \d+,\d ГБ$/)
     expect(w.find('[data-address]').text()).toBe('192.168.1.20:48089')
     expect(w.find('details.more').attributes('open')).toBeUndefined()
 

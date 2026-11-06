@@ -8,7 +8,7 @@ namespace SplitPlay.Service.Hosting;
 
 /// <summary>
 /// Lists hardware GPUs through DXGI (<c>IDXGIFactory1::EnumAdapters1</c>). Utilization, encoder load and VRAM use are
-/// not measured yet (Stage 4: D3DKMT / NVML), so those fields are null. Software adapters are skipped.
+/// null here; <see cref="GpuUsageMonitor"/> fills them in from the GPU performance counters. Software adapters are skipped.
 /// The list is cached for a minute. Returns an empty list off Windows or on any failure.
 /// </summary>
 public sealed class GpuInventory

@@ -258,6 +258,15 @@ public sealed record DeskMetricsEntryDto(
     double? RttMs,
     double Clients)
 {
+    /// <summary>The desk session's GPU load (busiest engine, all its processes), percent; null when not measured.</summary>
+    public double? GpuPercent { get; init; }
+
+    /// <summary>The desk session's video encoder load (NVENC), percent; null when not measured or no encoder.</summary>
+    public double? EncoderPercent { get; init; }
+
+    /// <summary>Dedicated video memory the desk session's processes use, MB; null when not measured.</summary>
+    public double? VramMb { get; init; }
+
     public static DeskMetricsEntryDto From(string id, DeskMetricsDto m)
     {
         ArgumentNullException.ThrowIfNull(m);

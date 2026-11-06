@@ -283,7 +283,7 @@ function importConfig(): Promise<void> {
     <h2 class="group-title">{{ t('settings.cpu') }}</h2>
     <div class="rows">
       <div class="srow" data-desk-cores>
-        <AppIcon name="cpu" :size="16" />
+        <AppIcon name="chip" :size="16" />
         <label class="text" for="desk-cores">
           <span class="title">{{ t('settings.deskCores') }}</span>
           <span v-if="cpuHint" class="desc" data-cpu-hint :title="cpuHint">{{ cpuHint }}</span>

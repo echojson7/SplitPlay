@@ -186,7 +186,7 @@ public sealed class ConfigTests : IDisposable
     {
         var config = new SplitPlayConfig
         {
-            Host = new HostConfig { WebPort = 0, BasePortStride = 10, ComposeIntervalMs = 0, LogLevel = "loud" },
+            Host = new HostConfig { WebPort = 0, BasePortStride = 10, ComposeIntervalMs = -1, LogLevel = "loud" },
         };
         var paths = ConfigValidator.Validate(config).Select(e => e.Path).ToList();
         Assert.Contains("host.webPort", paths);

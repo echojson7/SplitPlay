@@ -23,6 +23,8 @@ public sealed class NvidiaDriverSettings : IHostedService
     private readonly ILogger<NvidiaDriverSettings> _logger;
     private readonly NvidiaProfiles _profiles;
     private Task _started = Task.CompletedTask;
+    private volatile bool _stopping;
+    private bool _reportedNoDriver;
 
     public NvidiaDriverSettings(ConfigService config, DataPaths paths, IDrsProvider drs, ILogger<NvidiaDriverSettings> logger,
         string? legacyUndoFile = null)
@@ -52,12 +54,15 @@ public sealed class NvidiaDriverSettings : IHostedService
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         // Registered before the supervisor, so this runs after every worker has stopped.
+        // From now on a late caller (a PUT /host while Kestrel drains, a desk task past the supervisor's stop limit)
+        // must not set the global value again with nobody left to give it back.
+        _stopping = true;
         await _started.ConfigureAwait(false);
         Apply("service stop", running: false);
     }
 
     /// <summary>Before a worker starts, and when <c>host.nvidiaProfiles</c> changes. Never throws.</summary>
-    public void EnsureApplied(string reason) => Apply(reason, running: true);
+    public void EnsureApplied(string reason) => Apply(reason, running: !_stopping);
 
     private void Apply(string reason, bool running)
     {
@@ -66,7 +71,13 @@ public sealed class NvidiaDriverSettings : IHostedService
             var result = _profiles.Apply(Wanted(running));
             if (!result.Driver)
             {
-                _logger.LogDebug("NVIDIA driver settings ({Reason}): no NVIDIA driver", reason);
+                // Once at Information: on an NVIDIA host this means NvAPI saw no GPU from the service (session 0).
+                if (!_reportedNoDriver)
+                {
+                    _reportedNoDriver = true;
+                    _logger.LogInformation("NVIDIA driver settings: no NVIDIA driver or GPU found by NvAPI; nothing is managed");
+                }
+
                 return;
             }
 
@@ -85,8 +96,9 @@ public sealed class NvidiaDriverSettings : IHostedService
                 _logger.LogDebug("NVIDIA driver settings ({Reason}): unchanged", reason);
             }
         }
-        catch (Exception ex) when (ex is NvidiaDrsException or IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is not OutOfMemoryException)
         {
+            // Never fatal for a desk: the stream works without these settings, only less well.
             _logger.LogWarning("NVIDIA driver settings ({Reason}) failed: {Message}", reason, ex.Message);
         }
     }

@@ -805,7 +805,9 @@ begin
   if FindFirst(DataDir + '\*', F) then
   try
     repeat
-      if (F.Name <> '.') and (F.Name <> '..') and (CompareText(F.Name, 'desks') <> 0) then
+      { desks: what the next desk cleanup needs; nvidia-profiles.json: the NVIDIA values still to give back. }
+      if (F.Name <> '.') and (F.Name <> '..') and (CompareText(F.Name, 'desks') <> 0)
+        and (CompareText(F.Name, 'nvidia-profiles.json') <> 0) then
       begin
         if (F.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
           DelTree(DataDir + '\' + F.Name, True, True, True)
@@ -913,7 +915,8 @@ begin
     Code := RunHiddenWithTimeout(ExpandConstant('{app}\service\SplitPlay.Service.exe'), Params, 180, 'SplitPlay.Service');
     if Code <> 0 then
     begin
-      { The desk records (logon-hidden.json, the Steam state) are what a later cleanup needs: they are never purged now. }
+      { The desk records (logon-hidden.json, the Steam state) and nvidia-profiles.json are what a later cleanup needs:
+        they are never purged now. }
       CleanupFailed := True;
       Log(Format('Desk cleanup failed or timed out (code %d); keeping %s\desks', [Code, DataDir]));
       if not UninstallSilent then

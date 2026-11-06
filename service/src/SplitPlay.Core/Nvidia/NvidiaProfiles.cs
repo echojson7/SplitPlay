@@ -92,8 +92,13 @@ public sealed class NvidiaProfiles
     /// <summary>
     /// Makes the driver hold exactly <paramref name="wanted"/> of what SplitPlay manages: missing profiles, executables
     /// and values are set, and what SplitPlay set before but is not in <paramref name="wanted"/> any more is given back
-    /// (an empty list gives everything back). Throws <see cref="NvidiaDrsException"/> when a driver call fails; the
-    /// record keeps what was already done.
+    /// (an empty list gives everything back).
+    /// <para>
+    /// Crash safety: what SplitPlay is about to change (a new record, a new value of its own) reaches
+    /// <c>nvidia-profiles.json</c> before the driver changes; what it gave back leaves the record only after the
+    /// driver saved. A step that fails (one spec, one give-back) is reported in the notes and the rest still happens;
+    /// a failed driver save throws <see cref="NvidiaDrsException"/> and leaves the record as it was.
+    /// </para>
     /// </summary>
     public NvidiaProfilesResult Apply(IReadOnlyList<DrsProfileSpec> wanted)
     {
@@ -108,9 +113,23 @@ public sealed class NvidiaProfiles
                 return new NvidiaProfilesResult(false, changes, ["no NVIDIA driver"]);
             }
 
-            var state = Load();
-            TakeOverLegacyUndoFile(state, changes, notes);
+            // disk: what nvidia-profiles.json says until the driver saved (only grows); state: the record after it.
+            var disk = Load();
+            TakeOverLegacyUndoFile(disk, changes, notes);
+            var state = Clone(disk);
             var dirty = false;
+
+            void Step(string what, Action action)
+            {
+                try
+                {
+                    action();
+                }
+                catch (NvidiaDrsException ex)
+                {
+                    notes.Add($"{what} failed: {ex.Message}");
+                }
+            }
 
             // ---- give back what is no longer wanted (first, so that a value moving between profiles ends up clean)
             var wantedProfiles = wanted.Where(w => w.Profile is not null).Select(w => w.Profile!).ToHashSet(StringComparer.OrdinalIgnoreCase);
@@ -121,98 +140,40 @@ public sealed class NvidiaProfiles
             foreach (var owned in state.Settings.Where(s => !Wanted(s)).ToList())
             {
                 // A value in a profile that is deleted below goes with it.
-                if (owned.Profile is not { } p || !doomed.Contains(p))
+                if (owned.Profile is { } p && doomed.Contains(p))
                 {
-                    dirty |= GiveBack(drs, owned, changes, notes);
+                    state.Settings.Remove(owned);
+                    continue;
                 }
 
-                state.Settings.Remove(owned);
-                Save(state);
+                Step($"giving back {Where(owned.Profile)} {DrsSettings.Name(owned.Id)}", () =>
+                {
+                    dirty |= GiveBack(drs, owned, changes, notes);
+                    state.Settings.Remove(owned);
+                });
             }
 
             // Profiles SplitPlay created, and "SplitPlay worker" without a record (made by a worker before patch 0020).
             foreach (var profile in doomed.Order(StringComparer.OrdinalIgnoreCase))
             {
-                if (drs.ProfileExists(profile))
+                Step($"deleting profile \"{profile}\"", () =>
                 {
-                    drs.DeleteProfile(profile);
-                    changes.Add($"profile \"{profile}\" deleted");
-                    dirty = true;
-                }
+                    if (drs.ProfileExists(profile))
+                    {
+                        drs.DeleteProfile(profile);
+                        changes.Add($"profile \"{profile}\" deleted");
+                        dirty = true;
+                    }
 
-                if (state.CreatedProfiles.RemoveAll(p => SameProfile(p, profile)) > 0)
-                {
-                    Save(state);
-                }
+                    state.CreatedProfiles.RemoveAll(p => SameProfile(p, profile));
+                    state.Settings.RemoveAll(s => SameProfile(s.Profile, profile));
+                });
             }
 
-            // ---- set what is wanted
+            // ---- set what is wanted, one spec at a time
             foreach (var spec in wanted)
             {
-                if (spec.Profile is { } name)
-                {
-                    if (!drs.ProfileExists(name))
-                    {
-                        // Recorded before the driver is saved: a crash in between leaves at worst the record of a
-                        // profile that does not exist, which is harmless.
-                        if (!state.CreatedProfiles.Contains(name, StringComparer.OrdinalIgnoreCase))
-                        {
-                            state.CreatedProfiles.Add(name);
-                            Save(state);
-                        }
-
-                        drs.CreateProfile(name);
-                        changes.Add($"profile \"{name}\" created");
-                        dirty = true;
-                    }
-                    else if (IsOwnName(name) && !state.CreatedProfiles.Contains(name, StringComparer.OrdinalIgnoreCase))
-                    {
-                        state.CreatedProfiles.Add(name);
-                        Save(state);
-                        notes.Add($"profile \"{name}\" adopted (made by an earlier worker)");
-                    }
-
-                    foreach (var exe in spec.Applications)
-                    {
-                        if (!drs.HasApplication(name, exe))
-                        {
-                            drs.AddApplication(name, exe);
-                            changes.Add($"profile \"{name}\": {exe} added");
-                            dirty = true;
-                        }
-                    }
-                }
-
-                foreach (var (id, value) in spec.Settings)
-                {
-                    var current = drs.GetSetting(spec.Profile, id);
-                    var owned = state.Settings.FirstOrDefault(s => SameProfile(s.Profile, spec.Profile) && s.Id == id);
-                    var setBefore = owned?.Ours;
-                    if (owned is null)
-                    {
-                        // Remember what was there before the first change (also in SplitPlay's own profiles, so that a
-                        // value no longer wanted there is removed).
-                        state.Settings.Add(new OwnedSetting { Profile = spec.Profile, Id = id, Ours = value, Previous = current });
-                        Save(state);
-                    }
-                    else if (owned.Ours != value)
-                    {
-                        owned.Ours = value;
-                        Save(state);
-                    }
-
-                    if (current != value)
-                    {
-                        if (setBefore is { } before && current != before)
-                        {
-                            notes.Add($"{Where(spec.Profile)}: {DrsSettings.Name(id)} was changed to {Show(current)} outside SplitPlay; set again");
-                        }
-
-                        drs.SetSetting(spec.Profile, id, value);
-                        changes.Add($"{Where(spec.Profile)}: {DrsSettings.Name(id)} {Show(current)} -> {value}");
-                        dirty = true;
-                    }
-                }
+                Step(Where(spec.Profile), () => dirty |= SetWanted(drs, spec, disk, state, changes, notes));
             }
 
             if (dirty)
@@ -220,9 +181,111 @@ public sealed class NvidiaProfiles
                 drs.Save();
             }
 
+            foreach (var owned in state.Settings)
+            {
+                owned.OursBefore = null;
+            }
+
+            Save(state);
             return new NvidiaProfilesResult(true, changes, notes);
         }
     }
+
+    /// <summary>One wanted profile; returns true when the driver changed. Additions are recorded on disk first.</summary>
+    private bool SetWanted(IDrsSession drs, DrsProfileSpec spec, NvidiaProfilesState disk, NvidiaProfilesState state, List<string> changes,
+        List<string> notes)
+    {
+        var dirty = false;
+        if (spec.Profile is { } name)
+        {
+            var exists = drs.ProfileExists(name);
+            if (!exists || IsOwnName(name))
+            {
+                if (!state.CreatedProfiles.Contains(name, StringComparer.OrdinalIgnoreCase))
+                {
+                    state.CreatedProfiles.Add(name);
+                    if (exists)
+                    {
+                        notes.Add($"profile \"{name}\" adopted (made by an earlier worker)");
+                    }
+                }
+
+                if (!disk.CreatedProfiles.Contains(name, StringComparer.OrdinalIgnoreCase))
+                {
+                    disk.CreatedProfiles.Add(name);
+                    Save(disk);
+                }
+            }
+
+            if (!exists)
+            {
+                drs.CreateProfile(name);
+                changes.Add($"profile \"{name}\" created");
+                dirty = true;
+            }
+
+            foreach (var exe in spec.Applications)
+            {
+                if (!drs.HasApplication(name, exe))
+                {
+                    drs.AddApplication(name, exe);
+                    changes.Add($"profile \"{name}\": {exe} added");
+                    dirty = true;
+                }
+            }
+        }
+
+        foreach (var (id, value) in spec.Settings)
+        {
+            var current = drs.GetSetting(spec.Profile, id);
+            var owned = Find(state, spec.Profile, id);
+            var setBefore = owned?.Ours;
+            if (owned is null)
+            {
+                // Remember what was there before the first change (also in SplitPlay's own profiles, so that a value no
+                // longer wanted there is removed).
+                var record = new OwnedSetting { Profile = spec.Profile, Id = id, Ours = value, Previous = current };
+                state.Settings.Add(record);
+                disk.Settings.RemoveAll(s => SameProfile(s.Profile, spec.Profile) && s.Id == id);
+                disk.Settings.Add(new OwnedSetting { Profile = spec.Profile, Id = id, Ours = value, Previous = current });
+                Save(disk);
+            }
+            else if (owned.Ours != value)
+            {
+                // Until the driver saved, both values count as SplitPlay's.
+                var onDisk = Find(disk, spec.Profile, id);
+                if (onDisk is not null)
+                {
+                    onDisk.OursBefore = onDisk.Ours;
+                    onDisk.Ours = value;
+                    Save(disk);
+                }
+
+                owned.Ours = value;
+            }
+
+            if (current != value)
+            {
+                if (setBefore is { } before && current != before)
+                {
+                    notes.Add($"{Where(spec.Profile)}: {DrsSettings.Name(id)} was changed to {Show(current)} outside SplitPlay; set again");
+                }
+
+                drs.SetSetting(spec.Profile, id, value);
+                changes.Add($"{Where(spec.Profile)}: {DrsSettings.Name(id)} {Show(current)} -> {value}");
+                dirty = true;
+            }
+        }
+
+        return dirty;
+    }
+
+    private static OwnedSetting? Find(NvidiaProfilesState state, string? profile, uint id) =>
+        state.Settings.FirstOrDefault(s => SameProfile(s.Profile, profile) && s.Id == id);
+
+    private static NvidiaProfilesState Clone(NvidiaProfilesState state) =>
+        JsonSerializer.Deserialize(JsonSerializer.SerializeToUtf8Bytes(state, NvidiaProfilesJsonContext.Default.NvidiaProfilesState),
+            NvidiaProfilesJsonContext.Default.NvidiaProfilesState)!;
 
     // ------------------------------------------------------------------ internals
 
@@ -236,7 +299,7 @@ public sealed class NvidiaProfiles
         }
 
         var current = drs.GetSetting(owned.Profile, owned.Id);
-        if (current != owned.Ours)
+        if (current != owned.Ours && (owned.OursBefore is null || current != owned.OursBefore))
         {
             notes.Add($"{where}: {DrsSettings.Name(owned.Id)} was changed to {Show(current)} after SplitPlay set it; left alone");
             return false;
@@ -287,7 +350,6 @@ public sealed class NvidiaProfiles
                 }
             }
 
-            File.Delete(_legacyUndoFile);
         }
         catch (IOException ex)
         {
@@ -300,22 +362,30 @@ public sealed class NvidiaProfiles
             return;
         }
 
-        if (ours is not { } value)
+        if (ours is { } value)
         {
-            return;
+            if (state.Settings.Any(s => s.Profile is null && s.Id == DrsSettings.OglPreferDxPresent))
+            {
+                // SplitPlay already holds the original value; the file's is a later, second-hand one.
+                notes.Add($"{_legacyUndoFile} taken over (the original value was already recorded)");
+            }
+            else
+            {
+                // On record before the file goes: a crash in between leaves both, and the file is taken over again.
+                state.Settings.Add(new OwnedSetting { Profile = null, Id = DrsSettings.OglPreferDxPresent, Ours = value, Previous = previous });
+                Save(state);
+                changes.Add($"{_legacyUndoFile} taken over: global {DrsSettings.Name(DrsSettings.OglPreferDxPresent)} was {Show(previous)} before the workers changed it");
+            }
         }
 
-        if (state.Settings.Any(s => s.Profile is null && s.Id == DrsSettings.OglPreferDxPresent))
+        try
         {
-            // SplitPlay already holds the original value; the file's is a later, second-hand one.
-            notes.Add($"{_legacyUndoFile} taken over (the original value was already recorded)");
-            return;
+            File.Delete(_legacyUndoFile);
         }
-
-        var owned = new OwnedSetting { Profile = null, Id = DrsSettings.OglPreferDxPresent, Ours = value, Previous = previous };
-        state.Settings.Add(owned);
-        Save(state);
-        changes.Add($"{_legacyUndoFile} taken over: global {DrsSettings.Name(owned.Id)} was {Show(previous)} before the workers changed it");
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            notes.Add($"{_legacyUndoFile} could not be deleted: {ex.Message}");
+        }
     }
 
     private static uint? Number(JsonElement obj, string name) =>
@@ -357,7 +427,13 @@ public sealed class NvidiaProfiles
 
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(_stateFile))!);
         var temp = _stateFile + ".tmp";
-        File.WriteAllBytes(temp, JsonSerializer.SerializeToUtf8Bytes(state, NvidiaProfilesJsonContext.Default.NvidiaProfilesState));
+        using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            file.Write(JsonSerializer.SerializeToUtf8Bytes(state, NvidiaProfilesJsonContext.Default.NvidiaProfilesState));
+            // Through to the disk before the rename: after a power cut the record is the old one or the new one.
+            file.Flush(flushToDisk: true);
+        }
+
         File.Move(temp, _stateFile, overwrite: true);
     }
 }
@@ -383,6 +459,9 @@ public sealed class OwnedSetting
     public uint Id { get; set; }
 
     public uint Ours { get; set; }
+
+    /// <summary>SplitPlay's previous value while a change of <see cref="Ours"/> is not saved in the driver yet.</summary>
+    public uint? OursBefore { get; set; }
 
     public uint? Previous { get; set; }
 }

@@ -107,14 +107,30 @@ public static class UninstallCleanup
 
         if (nvidia is not null)
         {
-            Try("NVIDIA driver settings restored", () =>
+            try
             {
                 var result = nvidia.Apply([]);
                 foreach (var line in result.Changes.Concat(result.Notes))
                 {
                     logger.LogInformation("NVIDIA driver settings: {Line}", line);
                 }
-            });
+
+                // A failed step keeps its record in nvidia-profiles.json, which the installer then keeps for a later cleanup.
+                var failure = result.Notes.FirstOrDefault(n => n.Contains(" failed: ", StringComparison.Ordinal));
+                if (failure is not null)
+                {
+                    failed.Add($"NVIDIA driver settings: {failure}");
+                }
+                else
+                {
+                    done.Add(result.Driver ? "NVIDIA driver settings restored" : "NVIDIA driver settings: no NVIDIA driver, nothing to restore");
+                }
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                failed.Add($"NVIDIA driver settings: {ex.Message}");
+                logger.LogWarning("NVIDIA driver settings could not be restored: {Message}", ex.Message);
+            }
         }
 
         return new Report(done, failed);

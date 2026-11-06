@@ -351,7 +351,5 @@ Capture stays DXGI Desktop Duplication and gamepads stay on ViGEmBus with DualSh
 
 - Frame tracing and the input ring (the contract headers are already on the include path); capturing on frame
   arrival; the profile's `gpu_priority`, `gpu_luid` and `cpu_set`.
-- Upstream's NVIDIA profile tweaks (`nvprefs`) still change the global driver profile from each worker (patch 0015);
-  with several workers they should move to the service.
 - mDNS with several desks is not yet tested on hardware (lab B): each desk now publishes its own instance (patch
   0017); adding `HOST:port` by hand always works.

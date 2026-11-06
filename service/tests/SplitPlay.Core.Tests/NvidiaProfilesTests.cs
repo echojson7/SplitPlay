@@ -225,9 +225,43 @@ public sealed class NvidiaProfilesTests : IDisposable
     }
 
     [Fact]
-    public void A_worker_executable_in_another_profile_fails_loudly()
+    public void A_failing_profile_is_reported_and_the_rest_still_applies()
     {
         _drs.AddProfile("Someone else", NvidiaProfiles.WorkerExecutable);
-        Assert.Throws<NvidiaDrsException>(() => Profiles().Apply(Running));
+        var result = Profiles().Apply(Running);
+        Assert.Contains(result.Notes, n => n.Contains("failed", StringComparison.Ordinal) && n.Contains("ALREADY_IN_USE", StringComparison.Ordinal));
+        Assert.Equal(DrsSettings.OglPreferDxPresentEnabled, _drs.Get(null, Present));
+    }
+
+    [Fact]
+    public void A_failed_save_while_giving_back_keeps_the_record_so_the_next_attempt_restores()
+    {
+        _drs.Set(null, Present, 0);
+        Profiles().Apply(Running);
+        _drs.FailNextSave = true;
+        Assert.Throws<NvidiaDrsException>(() => Profiles().Apply(Stopped));
+        Assert.Equal(DrsSettings.OglPreferDxPresentEnabled, _drs.Get(null, Present));
+        Assert.Equal(0u, Assert.Single(Profiles().LoadState().Settings, s => s.Profile is null).Previous);
+
+        // After a restart the original value is still known.
+        Profiles().Apply(Running);
+        Profiles().Apply([]);
+        Assert.Equal(0u, _drs.Get(null, Present));
+        Assert.False(_drs.HasProfile(NvidiaProfiles.WorkerProfile));
+    }
+
+    [Fact]
+    public void A_new_value_of_SplitPlays_that_was_not_saved_still_counts_as_SplitPlays()
+    {
+        // Step 7 changes values in place (a new FPS limit): a failed save must not make the old one look like the owner's.
+        _drs.Set(null, Present, 0);
+        Profiles().Apply(Running);
+        var changed = new DrsProfileSpec(null, [], new Dictionary<uint, uint> { [Present] = 5 });
+        _drs.FailNextSave = true;
+        Assert.Throws<NvidiaDrsException>(() => Profiles().Apply([NvidiaProfiles.Worker, changed]));
+        Assert.Equal(DrsSettings.OglPreferDxPresentEnabled, _drs.Get(null, Present));
+
+        Profiles().Apply(Stopped);
+        Assert.Equal(0u, _drs.Get(null, Present));
     }
 }

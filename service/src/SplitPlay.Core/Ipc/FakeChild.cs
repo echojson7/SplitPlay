@@ -68,6 +68,7 @@ public sealed record FakeChildOptions
 
     /// <summary>Worker: send <c>display_hdr</c> with this state (one display on "Fake GPU") right after ready.</summary>
     public string? DisplayHdr { get; init; }
+
     /// <summary>
     /// Worker: a Moonlight client waits for its PIN from the start: heartbeats carry <c>pairing</c> until a <c>pair</c>
     /// arrives (patch 0021).

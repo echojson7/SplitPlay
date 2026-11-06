@@ -71,14 +71,16 @@ Rules:
   frame rate the desk's last Moonlight client asked for (the desk's `profile.fps` before any client connected); `0`:
   off; `10`–`1000`: that many FPS. Changes apply while the desk runs. How it works:
   - While a desk runs with the limit on, the service reads the GPU load per process every 5 s (the counters behind
-    `/metrics`). A process in the desk's session that renders at 10 % or more in 3 reads is a game unless it lives in
+    `/metrics`). A process in the desk's session that renders at 10 % or more in 3 reads within a minute is a game unless it lives in
     `%WINDIR%`, is SplitPlay's, or is a known non-game (launchers, browsers, chat, overlays, players). Games are kept
     in `games.json` in the data folder, with the desks they ran in and each desk's last client frame rate.
-  - Each game gets the largest limit of its desks, in the driver profile that already lists its executable (often
-    one of NVIDIA's game profiles), else in a profile "SplitPlay game <exe>" that SplitPlay creates. The previous
+  - Each game gets the largest limit of its desks, in the driver profile the driver applies to its full path (often
+    one of NVIDIA's game profiles), else in a profile "SplitPlay game <exe>" that SplitPlay creates. A lookup that
+    fails keeps the game in the profile it had; failed games are tried again after a minute. The previous
     value is recorded in `nvidia-profiles.json` (see `host.nvidiaProfiles`) and comes back when the limit goes;
     NVIDIA's predefined values are restored by deleting the setting. A limit the owner set for that game in NVIDIA
-    Control Panel (any value but 0) is left alone.
+    Control Panel (any value but 0) is left alone, and so is a global Max Frame Rate the owner set (SplitPlay then
+    sets nothing per game). A "SplitPlay game" profile that holds the owner's own limit is left to the owner.
   - The driver reads its profiles when a game starts: a limit applies from the game's next start, and it holds for
     that executable on the whole PC, the console included. Limits stay while SplitPlay is installed and go with
     `host.nvidiaProfiles=false` or on uninstall. `GET /games` (web-api.md) lists the games; one can be excluded.

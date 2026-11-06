@@ -238,6 +238,11 @@ public static partial class ConfigValidator
         {
             errors.Add(new("host.logLevel", $"must be one of {string.Join(", ", LogLevels)}"));
         }
+
+        if (host.DeskCores is null || !Host.DeskCoresMode.All.Contains(host.DeskCores))
+        {
+            errors.Add(new("host.deskCores", $"must be one of {string.Join(", ", Host.DeskCoresMode.All)}"));
+        }
     }
 
     private static void ValidateDesk(DeskConfig desk, string path, HostConfig? host, List<ConfigError> errors)

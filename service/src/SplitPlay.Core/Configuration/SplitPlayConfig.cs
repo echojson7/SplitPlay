@@ -46,6 +46,12 @@ public sealed class HostConfig
 
     /// <summary>Keep the PC from sleeping on its own while a Moonlight client streams from any desk (default true).</summary>
     public bool KeepAwake { get; set; } = true;
+
+    /// <summary>
+    /// Which processor cores desk processes may use: <c>"off"</c> (default) or <c>"auto"</c> (one CCD per desk on a CPU
+    /// with several L3 caches, the P-cores on an Intel hybrid CPU). See <see cref="Host.DeskCorePlanner"/>.
+    /// </summary>
+    public string DeskCores { get; set; } = Host.DeskCoresMode.Off;
 }
 
 /// <summary>One desk (an isolated Windows session streamed to Moonlight).</summary>

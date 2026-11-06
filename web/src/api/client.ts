@@ -6,10 +6,13 @@ import type {
   AuthSession,
   ClientPack,
   ClientPlatform,
+  CpuKind,
   Desk,
   DeskConfig,
+  DeskCpu,
   DeskProfile,
   Health,
+  HostCpu,
   HostNetwork,
   HostService,
   HostSettings,
@@ -297,6 +300,28 @@ export class ApiClient {
       addresses: Array.isArray(raw?.addresses) ? raw.addresses.filter((a): a is string => typeof a === 'string') : [],
       profile: profile === 'Public' || profile === 'Private' || profile === 'Domain' ? profile : null,
       mdnsAllowed: typeof raw?.mdnsAllowed === 'boolean' ? raw.mdnsAllowed : null,
+    }
+  }
+
+  /** The CPU and how `host.deskCores` splits it; unknown or malformed fields become safe defaults. */
+  async hostCpu(): Promise<HostCpu> {
+    const raw = await this.request<Partial<HostCpu> | undefined>('GET', '/host/cpu')
+    const kinds: readonly CpuKind[] = ['uniform', 'hybrid', 'ccd', 'x3d']
+    const count = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0)
+    const desks = (v: unknown): DeskCpu[] =>
+      Array.isArray(v)
+        ? v
+            .filter((d): d is DeskCpu => typeof d?.id === 'string')
+            .map((d) => ({ id: d.id, cpus: Array.isArray(d.cpus) ? d.cpus.filter((c) => Number.isInteger(c) && c >= 0) : null }))
+        : []
+    return {
+      name: typeof raw?.name === 'string' && raw.name ? raw.name : null,
+      cores: count(raw?.cores),
+      threads: count(raw?.threads),
+      kind: kinds.includes(raw?.kind as CpuKind) ? (raw?.kind as CpuKind) : 'uniform',
+      mode: raw?.mode === 'auto' ? 'auto' : 'off',
+      desks: desks(raw?.desks),
+      auto: desks(raw?.auto),
     }
   }
 

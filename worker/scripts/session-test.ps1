@@ -260,6 +260,7 @@ function Read-Message([int]$TimeoutSec, [string]$What, [scriptblock]$Predicate) 
     if ($null -eq $line) { Fail "control pipe closed by the worker while waiting for $What" }
     $msg = $line | ConvertFrom-Json
     if ($msg.type -ne 'heartbeat') { Write-Host "    <- $line" }
+    if ($msg.type -eq 'event' -and $msg.name -eq 'display_hdr') { $script:DisplayHdr = $msg.data }
     if (& $Predicate $msg) { return $msg }
   }
 }
@@ -308,6 +309,10 @@ function Test-SelfTest {
   Assert ($t.capture.frames -gt 0) 'no frame was captured'
   Assert ($t.input.cursor_moved) 'the cursor did not follow SendInput'
   Write-Host "    encoder $($t.encoder), $($t.capture.frames) frame(s) at $($t.capture.width)x$($t.capture.height), cursor moved"
+  # HDR probe (patch 0019): informational, an SDR-only session passes. The answer for lab F is in this line.
+  Assert ($null -ne $t.hdr -and $null -ne $t.hdr.before.state) 'self-test.json has no hdr probe'
+  $sets = (@($t.hdr.attempts) | ForEach-Object { "$($_.name)=$($_.set_result)" }) -join ', '
+  Write-Host "    HDR: before $($t.hdr.before.state), after switching on $($t.hdr.after.state), ok=$($t.hdr.ok); set results: $sets"
   $endpoints = @($log -split "`n" | Where-Object { $_ -match 'render endpoint\(s\) in session|SplitPlay:   ' })
   $endpoints | ForEach-Object { Write-Host "    endpoint: $($_.Trim())" }
   if ($RequireAudio) {
@@ -340,6 +345,7 @@ function Test-Ipc {
     $script:Writer.NewLine = "`n"
     $script:Writer.AutoFlush = $true
     $script:Pending = $null
+    $script:DisplayHdr = $null
 
     $hello = Read-Message 30 'hello' { param($m) $true }
     Assert ($hello.type -eq 'hello' -and $hello.role -eq 'worker') 'first message is not a worker hello'
@@ -347,6 +353,12 @@ function Test-Ipc {
     Send-Message '{"type":"welcome","protocol":1,"profile":{"fps":60,"width":1280,"height":720}}'
     $ready = Read-Message 240 'ready' { param($m) $m.type -eq 'ready' }
     Assert ($ready.ports.base -eq $BasePort) "ready.ports.base is $($ready.ports.base)"
+    # The first heartbeat carries the display's HDR state (patch 0019); it may come before or after ready.
+    if ($null -eq $script:DisplayHdr) {
+      $null = Read-Message 15 'display_hdr' { param($m) $m.type -eq 'event' -and $m.name -eq 'display_hdr' }
+    }
+    Assert ($script:DisplayHdr.state -in @('enabled', 'off', 'unsupported', 'unknown')) "display_hdr.state is '$($script:DisplayHdr.state)'"
+    Write-Host "    display HDR: $($script:DisplayHdr.state), $(@($script:DisplayHdr.displays).Count) display(s)"
 
     $log = Get-Content -Raw (Join-Path $deskDir 'sunshine.log')
     Assert ($log -match "SplitPlay session\s+: $($script:Session)") 'the encoder probe did not open the session output'

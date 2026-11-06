@@ -55,6 +55,9 @@ public static class IpcProtocol
         /// <summary>Worker: a Moonlight client asked for a mode, <c>data: {width, height, fps}</c>; forwarded to the seat as <c>set_mode</c>.</summary>
         public const string ModeRequested = "mode_requested";
 
+        /// <summary>Worker: the HDR state of the session's displays changed (sent once at start too), <c>data</c> = <see cref="IpcDisplayHdr"/>.</summary>
+        public const string DisplayHdr = "display_hdr";
+
         /// <summary>Seat: the RDP connection dropped and the seat is reconnecting, <c>data: {reason}</c>.</summary>
         public const string SessionLost = "session_lost";
 

@@ -207,6 +207,45 @@ public sealed class LiveStatsTests
     }
 
     [Fact]
+    public async Task The_desk_shows_its_display_hdr_state_while_the_worker_runs()
+    {
+        await using var svc = await TestService.StartAsync(setup: l =>
+            l.Customize = (r, o) => r.Role == IpcProtocol.Roles.Worker ? o with { DisplayHdr = DeskHdrStates.Unsupported } : o);
+        await svc.CreateDeskAsync("desk-1");
+        Assert.Null((await svc.GetDeskAsync("desk-1")).Hdr);
+        await svc.PostDeskActionAsync("desk-1", "start");
+
+        var ready = await svc.WaitForAsync("desk-1", d => d.State == DeskState.Ready && d.Hdr is not null, what: "ready with the HDR state");
+        Assert.Equal(DeskHdrStates.Unsupported, ready.Hdr!.State);
+        Assert.Equal("Fake GPU", ready.Hdr.Adapter);
+        Assert.Equal(8, ready.Hdr.BitsPerColor);
+
+        var json = await svc.Client.GetStringAsync("/api/v1/desks/desk-1");
+        Assert.Contains("\"hdr\":{\"state\":\"unsupported\"", json, StringComparison.Ordinal);
+
+        await svc.PostDeskActionAsync("desk-1", "stop");
+        var stopped = await svc.WaitForStateAsync("desk-1", DeskState.Stopped);
+        Assert.Null(stopped.Hdr);
+    }
+
+    [Fact]
+    public async Task Display_hdr_from_an_old_worker_connection_is_ignored_and_a_repeat_is_not_published()
+    {
+        var rt = Runtime();
+        await using var current = new IpcConnection(new MemoryStream());
+        await using var old = new IpcConnection(new MemoryStream());
+        rt.Connection = current;
+        var hdr = new DeskHdrDto { State = DeskHdrStates.Off, Adapter = "GPU", UpdatedAt = DateTimeOffset.UnixEpoch };
+
+        Assert.Equal(WorkerUpdate.Ignored, rt.ApplyDisplayHdr(old, hdr));
+        Assert.Null(rt.Hdr);
+        Assert.Equal(WorkerUpdate.Publish, rt.ApplyDisplayHdr(current, hdr));
+        Assert.Equal(WorkerUpdate.Applied, rt.ApplyDisplayHdr(current, hdr with { UpdatedAt = DateTimeOffset.UtcNow }));
+        Assert.Equal(WorkerUpdate.Publish, rt.ApplyDisplayHdr(current, hdr with { State = DeskHdrStates.Enabled }));
+        Assert.Equal(DeskHdrStates.Enabled, rt.ToDto().Hdr!.State);
+    }
+
+    [Fact]
     public async Task Client_disconnected_returns_the_desk_to_ready()
     {
         await using var svc = await TestService.StartAsync(setup: l =>

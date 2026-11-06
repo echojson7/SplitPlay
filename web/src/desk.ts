@@ -171,7 +171,34 @@ export function streamSummary(stream: DeskStream): string {
 export function streamLine(stream: DeskStream, metrics: Partial<DeskMetrics>): string {
   const parts = [deviceName(stream), t('unit.fps', { value: fmtNumber(metrics.fps ?? 0) })]
   if (metrics.rttMs != null) parts.push(fmtMs(metrics.rttMs, false))
+  const gpu = gpuShort(metrics)
+  if (gpu) parts.push(gpu)
   return parts.join(' · ')
+}
+
+/** "GPU 34 %" for a desk row; null while the desk's GPU load is not measured. */
+export function gpuShort(metrics: Partial<DeskMetrics> | undefined): string | null {
+  if (metrics?.gpuPercent == null) return null
+  return t('gpu.short', { value: fmtNumber(metrics.gpuPercent) })
+}
+
+/** "34 % · NVENC 12 % · 1,2 GB" for the desk page; null while not measured. */
+export function gpuLine(metrics: Partial<DeskMetrics> | undefined): string | null {
+  if (metrics?.gpuPercent == null) return null
+  const parts = [t('unit.percent', { value: fmtNumber(metrics.gpuPercent) })]
+  if (metrics.encoderPercent != null) parts.push(t('gpu.encoderValue', { value: fmtNumber(metrics.encoderPercent) }))
+  if (metrics.vramMb != null) parts.push(fmtGb(metrics.vramMb))
+  return parts.join(' · ')
+}
+
+/** Megabytes as gigabytes with one decimal ("1,2 GB"); "—" when unknown. */
+export function fmtGb(mb: number | null | undefined): string {
+  return mb == null ? t('common.none') : t('unit.gb', { value: fmtNumber(mb / 1024, 1) })
+}
+
+/** A percentage ("34 %"); "—" when unknown. */
+export function fmtPercent(value: number | null | undefined): string {
+  return value == null ? t('common.none') : t('unit.percent', { value: fmtNumber(value) })
 }
 
 const PORT_BUSY = /^Port (\d+) busy: (.+)$/

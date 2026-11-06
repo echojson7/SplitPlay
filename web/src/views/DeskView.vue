@@ -19,6 +19,7 @@ import {
   deviceName,
   fmtMs,
   FPS_PRESETS,
+  gpuLine,
   isPresetResolution,
   liveStream,
   moonlightAddress,
@@ -61,6 +62,8 @@ const live = computed(() => {
     compose: m.captureFps != null ? t('unit.hz', { value: fmtNumber(m.captureFps) }) : t('common.none'),
   }
 })
+
+const gpu = computed(() => gpuLine(desk.value?.metrics))
 
 async function load(): Promise<void> {
   try {
@@ -336,6 +339,11 @@ async function remove(): Promise<void> {
             <div class="ctl val" data-live-compose>{{ live?.compose }}</div>
           </div>
         </template>
+        <div v-if="gpu" class="srow compact">
+          <AppIcon name="chip" :size="16" />
+          <div class="text"><span class="title">{{ t('live.gpu') }}</span></div>
+          <div class="ctl val" data-live-gpu>{{ gpu }}</div>
+        </div>
       </div>
 
       <h2 class="group-title">{{ t('desk.connection') }}</h2>

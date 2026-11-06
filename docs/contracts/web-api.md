@@ -242,16 +242,27 @@ The host cannot take V-Sync latency out of the client, only recommend settings t
 {
   "host": {
     "cpuPercent": 7.5, "memoryUsedMb": 9120, "memoryTotalMb": 32607, "composeHz": 250,
-    "gpus": [{ "luid": "0x0000000000012345", "name": "NVIDIA GeForce RTX 4080", "utilizationPercent": null,
-               "encoderPercent": null, "vramUsedMb": null, "vramTotalMb": 16376 }]
+    "gpus": [{ "luid": "0x0000000000012345", "name": "NVIDIA GeForce RTX 4080", "utilizationPercent": 41,
+               "encoderPercent": 12, "vramUsedMb": 6230, "vramTotalMb": 16376 }]
   },
   "desks": [{ "id": "desk-1", "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4,
-              "lossPct": 0, "rttMs": 4, "clients": 1, "captureFps": 238.4 }]
+              "lossPct": 0, "rttMs": 4, "clients": 1, "captureFps": 238.4, "gpuPercent": 34, "encoderPercent": 12, "vramMb": 2900 }]
 }
 ```
 
 `composeHz` is the composition rate the host is set to (`host.composeIntervalMs`, Auto resolved; config.md), each desk's
 `captureFps` the rate DWM actually composes at. Values that are not measured yet are `null`. Software adapters (Microsoft Basic Render Driver) are not listed.
+
+GPU numbers come from the performance counters Task Manager reads (`GPU Engine`, `GPU Process Memory`,
+`GPU Adapter Memory`), sampled once a second while someone reads metrics and not at all 30 s after the last read.
+The first read after a pause returns `null` for them; they appear about a second later.
+
+- `utilizationPercent`: the busiest engine of the adapter, all processes summed (Task Manager's "GPU").
+  `encoderPercent`: the busiest video encode engine (NVENC; AMD's shared `VideoCodec`), `null` when the adapter has
+  none. `vramUsedMb`: dedicated memory in use.
+- Per desk, the same figures over the processes of the desk's Windows session (its games and its worker, which
+  owns the NVENC session): `gpuPercent`, `encoderPercent`, `vramMb` (dedicated memory). `null` while the desk has no
+  session of its own (stopped, or a worker on the console).
 The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}` with the same fields.
 
 ## Error codes

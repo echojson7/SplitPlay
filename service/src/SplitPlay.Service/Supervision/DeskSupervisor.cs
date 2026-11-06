@@ -54,6 +54,7 @@ public sealed class DeskSupervisor : IHostedService
     private readonly ILogger<DeskSupervisor> _logger;
     private readonly ILogger _childLogger;
     private readonly GpuInventory _gpus;
+    private readonly GpuUsageMonitor _gpuUsage;
     private readonly IDeskPlatform _platform;
     private readonly DateTimeOffset _startedAt;
     private TimeSpan _lastCpu;
@@ -71,12 +72,13 @@ public sealed class DeskSupervisor : IHostedService
 
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
-        PowerEvents power, RequiredServicesStarter requiredServices)
+        PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage)
     {
         ArgumentNullException.ThrowIfNull(power);
         power.Changed += OnPowerChange;
         _requiredServices = requiredServices;
         _gpus = gpus;
+        _gpuUsage = gpuUsage;
         _platform = platform;
         _childLogger = loggerFactory.CreateLogger(Logging.LogStoreLoggerProvider.ChildCategory);
         _config = config;
@@ -475,6 +477,7 @@ public sealed class DeskSupervisor : IHostedService
             _lastCpuAt = now;
         }
 
+        var usage = _gpuUsage.Current();
         var (memoryUsedMb, memoryTotalMb) = GpuInventory.PhysicalMemory();
         var composeMs = EffectiveComposeIntervalMs();
         var host = new HostMetricsDto(
@@ -482,9 +485,42 @@ public sealed class DeskSupervisor : IHostedService
             memoryUsedMb,
             memoryTotalMb,
             composeMs > 0 ? Math.Round(1000.0 / composeMs, 1) : null,
-            _gpus.Get());
-        var desks = List().Select(d => DeskMetricsEntryDto.From(d.Id, d.Metrics)).ToList();
+            GpusWithUsage(usage));
+        // A desk without its own session (a dev worker on the console) would show the console's games: leave it empty.
+        var console = _platform.ConsoleSessionId();
+        var anyEncoder = usage?.Adapters.Values.Any(a => a.EncoderPercent is not null) == true;
+        var desks = List().Select(d =>
+        {
+            var entry = DeskMetricsEntryDto.From(d.Id, d.Metrics);
+            if (usage is null || d.SessionId is not int session || session == console)
+            {
+                return entry;
+            }
+
+            // A running desk whose processes use no GPU yet shows 0, not "unknown".
+            var mine = usage.Sessions.GetValueOrDefault(session);
+            return entry with
+            {
+                GpuPercent = mine?.GpuPercent ?? 0,
+                EncoderPercent = mine?.EncoderPercent ?? (anyEncoder ? 0 : null),
+                VramMb = mine?.VramMb ?? 0,
+            };
+        }).ToList();
         return new MetricsDto(host, desks);
+    }
+
+    /// <summary>The DXGI adapter list with live load, encoder and VRAM use filled in where the counters have them.</summary>
+    private IReadOnlyList<GpuDto> GpusWithUsage(GpuUsageSnapshot? usage)
+    {
+        var gpus = _gpus.Get();
+        if (usage is null)
+        {
+            return gpus;
+        }
+
+        return gpus.Select(g => usage.Adapters.TryGetValue(g.Luid, out var a)
+            ? g with { UtilizationPercent = a.UtilizationPercent, EncoderPercent = a.EncoderPercent, VramUsedMb = a.VramUsedMb }
+            : g).ToList();
     }
 
     // ------------------------------------------------------------------ CRUD

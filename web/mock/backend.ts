@@ -335,7 +335,12 @@ export class MockBackend {
           rttMs: Math.round(3 + 1.5 * jitter),
           captureFps: Math.round(10 * (238 + 3 * jitter)) / 10,
           clients: 1,
+          gpuPercent: Math.round(34 + 6 * phase),
+          encoderPercent: Math.round(11 + 2 * jitter),
+          vramMb: 2900 + Math.round(120 * phase),
         }
+      } else if (e.desk.state === 'Ready') {
+        e.desk.metrics = { ...IDLE_METRICS, gpuPercent: 2, encoderPercent: 0, vramMb: 640 }
       } else {
         e.desk.metrics = { ...IDLE_METRICS }
       }

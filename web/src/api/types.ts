@@ -314,6 +314,8 @@ export interface HostSettings {
   logLevel: string
   /** Keep the PC from sleeping while a client streams (default true; older services leave it out). */
   keepAwake?: boolean
+  /** The service manages the NVIDIA driver settings (default true; older services leave it out). */
+  nvidiaProfiles?: boolean
   /** Which processor cores desk processes may use (default `off`; older services leave it out). */
   deskCores?: DeskCoresMode
 }

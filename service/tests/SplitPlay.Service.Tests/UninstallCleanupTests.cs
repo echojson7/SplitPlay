@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 using Microsoft.Extensions.Logging.Abstractions;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Nvidia;
 using SplitPlay.Service.Hosting;
 using SplitPlay.Service.Platform;
 
@@ -80,5 +81,21 @@ public sealed class UninstallCleanupTests : IDisposable
         var (platform, _, _) = Setup();
         Assert.Throws<DeskUserNotManagedException>(() => platform.DeleteManagedAccount("owner2"));
         Assert.True(platform.Accounts.ContainsKey("owner2"));
+    }
+
+    [Fact]
+    public void The_NVIDIA_driver_settings_are_given_back()
+    {
+        var (platform, paths, config) = Setup();
+        var drs = new FakeDrs();
+        drs.Set(null, DrsSettings.OglPreferDxPresent, 0);
+        var nvidia = new NvidiaProfiles(drs, NvidiaProfiles.StateFileIn(paths.Root), null);
+        nvidia.Apply([NvidiaProfiles.Worker, NvidiaProfiles.Global]);
+
+        var report = UninstallCleanup.Run(platform, paths, config, deleteAccounts: false, NullLogger.Instance, nvidia);
+        Assert.Empty(report.Failed);
+        Assert.Contains("NVIDIA driver settings restored", report.Done);
+        Assert.False(drs.HasProfile(NvidiaProfiles.WorkerProfile));
+        Assert.Equal(0u, drs.Get(null, DrsSettings.OglPreferDxPresent));
     }
 }

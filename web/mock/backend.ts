@@ -5,6 +5,7 @@
 import type {
   Desk,
   DeskConfig,
+  DeskHdr,
   DeskMetrics,
   DeskState,
   HostCpu,
@@ -71,6 +72,9 @@ function err(status: number, code: string, message: string): MockResponse {
 function ok(body: unknown, status = 200): MockResponse {
   return { status, body }
 }
+
+/** What a worker reports for an RDP desk display: SDR only (Microsoft's RdpIdd without RDP GFX). */
+const DESK_HDR: DeskHdr = { state: 'unsupported', monitor: null, adapter: 'NVIDIA GeForce RTX 5070', bitsPerColor: 8, maxNits: 270 }
 
 const IDLE_METRICS: DeskMetrics = { fps: 0, bitrateKbps: 0, encodeMsP50: 0, encodeMsP99: 0, lossPct: 0, rttMs: null, clients: 0 }
 
@@ -227,6 +231,7 @@ export class MockBackend {
     a.desk.userManaged = false
     a.clients.push({ id: 'c0ffee00-0000-4000-8000-000000000001', name: 'Ноутбук Ани', pairedAt: '2026-10-20T18:00:00Z' })
     a.clientAddress = '192.168.1.37'
+    a.desk.hdr = { ...DESK_HDR }
     this.connectClient(a)
     const b = this.addDesk({
       id: 'guest',
@@ -252,6 +257,7 @@ export class MockBackend {
         sessionId: null,
         metrics: { ...IDLE_METRICS },
         stream: null,
+        hdr: null,
         lastError: null,
       },
       clients: [],
@@ -311,6 +317,9 @@ export class MockBackend {
         e.nextAt += this.stepMs
         if (e.desk.state === 'SessionReady') e.desk.sessionId = 2 + [...this.desks.keys()].indexOf(e.desk.id)
         if (e.desk.state === 'Stopped') e.desk.sessionId = null
+        // The worker reports its display's HDR state once it runs: an RDP desk display is SDR only.
+        if (e.desk.state === 'Ready' && !e.desk.hdr) e.desk.hdr = { ...DESK_HDR, updatedAt: new Date(t).toISOString() }
+        if (e.desk.state === 'Stopped' || e.desk.state === 'Stopping') e.desk.hdr = null
         if (e.desk.state === 'Streaming') this.connectClient(e)
         else e.desk.stream = null
       }

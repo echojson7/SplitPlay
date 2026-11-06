@@ -108,6 +108,11 @@ export const en = {
   'live.gpu': 'GPU',
   'gpu.short': 'GPU {value} %',
   'gpu.encoderValue': 'encoder {value} %',
+  'live.hdr': 'HDR',
+  'live.hdrOn': 'On',
+  'live.hdrOff': 'Off in Windows',
+  'live.hdrUnsupported': 'Not available',
+  'live.sdrNotHdr': 'SDR instead of HDR',
 
   'pack.title': 'Moonlight settings',
   'pack.resolution': 'Resolution and FPS',
@@ -394,6 +399,11 @@ export const ru: Partial<Messages> = {
   'live.gpu': 'Видеокарта',
   'gpu.short': 'GPU {value} %',
   'gpu.encoderValue': 'кодер {value} %',
+  'live.hdr': 'HDR',
+  'live.hdrOn': 'Включён',
+  'live.hdrOff': 'Выключен в Windows',
+  'live.hdrUnsupported': 'Недоступен',
+  'live.sdrNotHdr': 'SDR вместо HDR',
 
   'pack.title': 'Настройки Moonlight',
   'pack.resolution': 'Разрешение и FPS',

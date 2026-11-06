@@ -47,6 +47,9 @@ internal sealed class DeskRuntime
 
     private const int EndedStreamsKept = 32;
 
+    /// <summary>The HDR state of the session's display from the worker's last <c>display_hdr</c>; null while unknown.</summary>
+    public DeskHdrDto? Hdr { get; set; }
+
     public DateTimeOffset LastHeartbeat { get; set; }
 
     /// <summary>The worker's control connection while it is connected (used for pair, list_clients, …).</summary>
@@ -122,6 +125,7 @@ internal sealed class DeskRuntime
                 WorkerSettings = Config.WorkerSettings,
                 Metrics = Metrics,
                 Stream = Streams.Count > 0 ? ToStreamDto(Streams[0]) : null,
+                Hdr = Hdr,
                 LastError = Machine.LastError ?? Warning,
             };
         }
@@ -167,6 +171,30 @@ internal sealed class DeskRuntime
         lock (Gate)
         {
             return IsCurrent(from) ? Settle(AddStream(stream)) : WorkerUpdate.Ignored;
+        }
+    }
+
+    /// <summary>
+    /// <c>display_hdr</c> from <paramref name="from"/>; ignored unless it is the current worker connection. Publish when
+    /// the state or the display changed (the worker sends the event only on a change, so this is rare).
+    /// </summary>
+    public WorkerUpdate ApplyDisplayHdr(IpcConnection from, DeskHdrDto hdr)
+    {
+        ArgumentNullException.ThrowIfNull(hdr);
+        lock (Gate)
+        {
+            if (!IsCurrent(from))
+            {
+                return WorkerUpdate.Ignored;
+            }
+
+            if (Hdr is not null && Hdr with { UpdatedAt = hdr.UpdatedAt } == hdr)
+            {
+                return WorkerUpdate.Applied;  // The same state: keep the time of the last change, as published.
+            }
+
+            Hdr = hdr;
+            return WorkerUpdate.Publish;
         }
     }
 

@@ -180,6 +180,23 @@ export interface DeskStream {
   startedAt?: string | null
 }
 
+/** `desk.hdr.state`: whether the desk's display composes in HDR (see DeskHdr). */
+export type HdrState = 'enabled' | 'off' | 'unsupported' | 'unknown'
+
+/**
+ * HDR of the desk session's display, as the worker measures it. `enabled`: a Moonlight client that asks for HDR gets
+ * HDR; `off`: the display supports HDR but it is switched off in Windows; `unsupported`: SDR only.
+ */
+export interface DeskHdr {
+  state: HdrState | string
+  monitor?: string | null
+  /** The GPU that renders the session. */
+  adapter?: string | null
+  bitsPerColor?: number | null
+  maxNits?: number | null
+  updatedAt?: string
+}
+
 /** Desk object as returned by GET /desks and GET /desks/{id}. */
 export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   basePort: number
@@ -194,6 +211,8 @@ export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   metrics: DeskMetrics
   /** The stream being served; null (or absent from older services) when nobody is connected. */
   stream?: DeskStream | null
+  /** The display's HDR state; null (or absent from older services) while no worker has reported it. */
+  hdr?: DeskHdr | null
   lastError: string | null
 }
 

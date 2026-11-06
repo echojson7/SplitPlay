@@ -1014,6 +1014,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.SessionLost = false;
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
+                rt.Hdr = null;
                 if (rt.Machine.State == DeskState.Stopping)
                 {
                     rt.Machine.Fire(DeskTrigger.Stopped);
@@ -1288,6 +1289,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.ChildPid = null;
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
+                rt.Hdr = null;
             }
         }
     }
@@ -2041,6 +2043,29 @@ public sealed class DeskSupervisor : IHostedService
                 _logger.LogInformation("Desk {Desk}: {Client} ({Address}) disconnected", rt.Id, stream.Client ?? "unnamed client", stream.Address ?? "?");
                 if (update == WorkerUpdate.Publish)
                 {
+                    Publish(rt);
+                }
+
+                break;
+            }
+
+            case EventMessage { Name: IpcProtocol.Events.DisplayHdr } e:
+            {
+                if (IpcDisplayHdr.FromJson(e.Data, _time.GetUtcNow()) is not { } hdr)
+                {
+                    break;
+                }
+
+                var update = rt.ApplyDisplayHdr(worker.Connection, hdr);
+                if (update == WorkerUpdate.Ignored)
+                {
+                    break;
+                }
+
+                if (update == WorkerUpdate.Publish)
+                {
+                    _logger.LogInformation("Desk {Desk}: display HDR {State} ({Adapter}, {Bits} bits)", rt.Id, hdr.State,
+                        hdr.Adapter ?? "?", hdr.BitsPerColor);
                     Publish(rt);
                 }
 

@@ -207,6 +207,7 @@ export class MockBackend {
     composeIntervalMs: 0,
     logLevel: 'info',
     keepAwake: true,
+    nvidiaProfiles: true,
     deskCores: 'off',
   }
   private clientSeq = 1

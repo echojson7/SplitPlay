@@ -53,7 +53,7 @@ public static partial class ConfigValidator
         // Encoder and codec
         "encoder", "hevc_mode", "av1_mode", "qp", "min_threads", "sw_preset", "sw_tune",
         "nvenc_preset", "nvenc_vbv_increase", "nvenc_spatial_aq", "nvenc_twopass", "nvenc_h264_cavlc", "nvenc_split_encode",
-        "nvenc_realtime_hags", "nvenc_latency_over_power",
+        "nvenc_realtime_hags",
         "qsv_preset", "qsv_coder", "qsv_slow_hevc",
         "amd_quality", "amd_rc", "amd_coder", "amd_usage", "amd_preanalysis", "amd_vbaq", "amd_enforce_hrd",
 

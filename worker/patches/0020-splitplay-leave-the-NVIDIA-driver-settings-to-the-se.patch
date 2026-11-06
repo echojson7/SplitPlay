@@ -1,0 +1,89 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 12:00:00 +0000
+Subject: [PATCH] splitplay: leave the NVIDIA driver settings to the service
+
+The workers changed one shared driver database (DRS) each: the "SplitPlay
+worker" application profile (PREFERRED_PSTATE = PREFER_MAX) and the global
+OGL_CPL_PREFER_DXPRESENT on the base profile, at start-up, again at every
+stream start, and the global value back when they exited. With several
+desks the workers raced on create and save, and the first worker to exit
+restored the global value while other desks were still streaming.
+
+The SplitPlay service now owns these settings (NvAPI DRS from the
+service, one writer, its own record of the previous values): it applies
+them before every worker start and restores them when it stops and on
+uninstall. The worker no longer touches them:
+
+- no nvprefs at start-up, at stream start (streaming_will_start) or at
+  exit;
+- `--restore-nvprefs-undo` is kept: it restores the global value from an
+  undo file left by a worker from before this change and deletes the
+  application profile (patch 0015).
+
+nvenc_latency_over_power and nvenc_opengl_vulkan_on_dxgi no longer do
+anything in the worker; the service's host settings decide instead.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm2K11gCVojFauZ8YWQ
+
+diff --git a/src/main.cpp b/src/main.cpp
+index ccb5f01a0421fc61f04b583dd5e0f2febffc8510..a6a4102d08c892203b7b961fe1f0c4a818566810 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -278,17 +278,10 @@ int main(int argc, char *argv[]) {
+   }
+ 
+ #ifdef _WIN32
+-  // Modify relevant NVIDIA control panel settings if the system has corresponding gpu
+-  if (nvprefs_instance.load()) {
+-    // Restore global settings to the undo file left by improper termination of sunshine.exe
+-    nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
+-    // Modify application settings for sunshine.exe
+-    nvprefs_instance.modify_application_profile();
+-    // Modify global settings, undo file is produced in the process to restore after improper termination
+-    nvprefs_instance.modify_global_profile();
+-    // Unload dynamic library to survive driver re-installation
+-    nvprefs_instance.unload();
+-  }
++  // SplitPlay: the NVIDIA driver settings (the worker's "prefer maximum performance" application profile and the
++  // global Vulkan/OpenGL present method) belong to the SplitPlay service, which applies them once for every desk and
++  // restores them; several workers changing one driver database at once raced. `--restore-nvprefs-undo` still
++  // cleans up what workers before this change left behind.
+ 
+   // Wait as long as possible to terminate Sunshine.exe during logoff/shutdown
+   SetProcessShutdownParameters(0x100, SHUTDOWN_NORETRY);
+@@ -519,11 +512,7 @@ int main(int argc, char *argv[]) {
+   task_pool.join();
+ 
+ #ifdef _WIN32
+-  // Restore global NVIDIA control panel settings
+-  if (nvprefs_instance.owning_undo_file() && nvprefs_instance.load()) {
+-    nvprefs_instance.restore_global_profile();
+-    nvprefs_instance.unload();
+-  }
++  // SplitPlay: nothing to restore, the service owns the NVIDIA driver settings (see above).
+ #endif
+ 
+   return lifetime::desired_exit_code;
+diff --git a/src/platform/windows/misc.cpp b/src/platform/windows/misc.cpp
+index 3dfe35123c9413cc74c6d1f14ddb044ad83cf103..9b0a898a95937732f7b9dfde8bf695d5f4069441 100644
+--- a/src/platform/windows/misc.cpp
++++ b/src/platform/windows/misc.cpp
+@@ -1207,15 +1207,7 @@ namespace platf {
+     // Promote ourselves to high priority class
+     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+ 
+-    // Modify NVIDIA control panel settings again, in case they have been changed externally since sunshine launch
+-    if (nvprefs_instance.load()) {
+-      if (!nvprefs_instance.owning_undo_file()) {
+-        nvprefs_instance.restore_from_and_delete_undo_file_if_exists();
+-      }
+-      nvprefs_instance.modify_application_profile();
+-      nvprefs_instance.modify_global_profile();
+-      nvprefs_instance.unload();
+-    }
++    // SplitPlay: the NVIDIA driver settings are the service's; it applies them again before every worker start.
+ 
+     // Enable low latency mode on all connected WLAN NICs if wlanapi.dll is available
+     if (fn_WlanOpenHandle) {

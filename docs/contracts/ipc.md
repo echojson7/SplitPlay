@@ -78,8 +78,8 @@ Events by role:
   after. Windows' own record of a reset (System log, provider `Display`, event 4101) has the same effect: the service
   restarts the worker of every running desk after 3 s (`Supervisor:GpuResetDelayMs`) and keeps the seats, so the
   desks' sessions, games and windows stay. Signals within 20 s are one reset. A restart for a reset does not use up
-  the desk's failure budget, up to 3 resets in 10 minutes; a failure in the 20 s after a reset (or up to 30 s before
-  Windows reports it) is put down to it.
+  the desk's failure budget, up to 3 resets in 10 minutes; a failure in the 20 s after a reset (or up to 20 s before
+  Windows reports it; one per desk and reset) is put down to it.
 - seat `session_lost`: the RDP connection dropped; the seat is reconnecting. The service keeps the worker running.
 - seat `session_restored`: reconnected. If the session id changed, the service restarts the worker in the new session.
 

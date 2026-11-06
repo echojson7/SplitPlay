@@ -64,6 +64,9 @@ internal sealed class DeskRuntime
     /// <summary>While the run loop waits out a retry: completed when <c>RetryAt</c> moved (a graphics driver reset), so it re-reads it.</summary>
     public TaskCompletionSource? RetryWake { get; set; }
 
+    /// <summary>The graphics driver reset (by its time) already put down to this desk: one reset, one restart.</summary>
+    public DateTimeOffset? GpuResetHandled { get; set; }
+
     /// <summary>The seat reported <c>session_lost</c> and has not reported <c>session_restored</c> yet.</summary>
     public bool SessionLost { get; set; }
 

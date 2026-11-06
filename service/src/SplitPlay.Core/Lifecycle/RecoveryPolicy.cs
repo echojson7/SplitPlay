@@ -38,7 +38,7 @@ public sealed record RecoveryPolicy
     /// A failure at most this long before a reset is reported is put down to the reset and forgiven: the worker often
     /// dies of the lost device before Windows logs the reset.
     /// </summary>
-    public TimeSpan GpuResetForgiveWindow { get; init; } = TimeSpan.FromSeconds(30);
+    public TimeSpan GpuResetForgiveWindow { get; init; } = TimeSpan.FromSeconds(20);
 
     /// <summary>
     /// Delay before retry number <paramref name="consecutiveFailures"/> (1-based): initial · 2^(n-1), capped at the maximum.

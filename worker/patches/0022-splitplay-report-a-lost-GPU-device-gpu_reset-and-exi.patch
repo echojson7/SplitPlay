@@ -5,28 +5,33 @@ Subject: [PATCH] splitplay: report a lost GPU device (gpu_reset) and exit
 
 When the graphics driver is reset (TDR), hangs or is updated, the
 worker's D3D11 device and the NVENC session built on it are dead for
-good: Desktop Duplication returns DXGI_ERROR_DEVICE_REMOVED (or another
-error), upstream maps that to capture_e::error and the stream ends, but
-the process keeps running with no usable device and Moonlight cannot
-start a new stream reliably.
+good. Desktop Duplication then reports DXGI_ERROR_ACCESS_LOST (upstream:
+capture_e::reinit, which rebuilds the display on a device that may still
+be the lost one, or never succeeds) or DXGI_ERROR_DEVICE_REMOVED and
+friends (capture_e::error, the stream ends while the process keeps
+running without a usable device).
 
-On capture_e::error the DXGI capture now asks the device for
-GetDeviceRemovedReason(). If the device is gone, the worker logs the
-reason, sends event gpu_reset {reason, where} on the control pipe
-(docs/contracts/ipc.md) and exits with code 5. The service then restarts
-the worker of every desk in the same RDP session after a short pause, so
-games and windows in the desk survive and the client reconnects to a
-fresh device. Only the first report does anything; without a control
-pipe (standalone) it only logs.
+Whenever DXGI capture returns reinit or error, and when releasing a frame
+fails, the worker now asks its device for GetDeviceRemovedReason() (S_OK
+and cheap while the device is alive). If the device is gone, the worker
+logs the reason, sends event gpu_reset {reason, where} on the control
+pipe (docs/contracts/ipc.md) and exits with code 5. The service then
+restarts the worker of every desk in the same RDP session after a short
+pause, so games and windows in the desk survive and the client
+reconnects to a fresh device. Only the first report does anything;
+without a control pipe (standalone) it only logs and upstream's handling
+goes on.
 
-Errors with a live device (a failed copy, a duplication error) keep
-upstream's behaviour.
+With a live device (a mode change, a desktop switch, a failed copy)
+upstream's behaviour is unchanged. Encoder failures are not checked
+here; the service also reacts to Windows' own record of a reset
+(System log, Display event 4101).
 
 Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01J21Rm2jYdxMoAEwPF6QxKH
 
 diff --git a/src/platform/windows/display_base.cpp b/src/platform/windows/display_base.cpp
-index b28fbbc5c0f81a8bc70c2ba062747972302619ce..185c888a5fb3cb761cd0a6db31b4bbaac20a7bc4 100644
+index b28fbbc5c0f81a8bc70c2ba062747972302619ce..c5caa42554d31ee1c53c94df225bb989e984e19d 100644
 --- a/src/platform/windows/display_base.cpp
 +++ b/src/platform/windows/display_base.cpp
 @@ -43,6 +43,7 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
@@ -37,21 +42,42 @@ index b28fbbc5c0f81a8bc70c2ba062747972302619ce..185c888a5fb3cb761cd0a6db31b4bbaa
  #include "src/video.h"
  
  namespace platf {
-@@ -326,8 +327,13 @@ namespace platf::dxgi {
+@@ -210,6 +211,13 @@ namespace platf::dxgi {
+   }
+ 
+   capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
++    // SplitPlay: cheap, and S_OK while the device is alive.
++    auto report_if_device_lost = [this]() {
++      if (const auto removed = device->GetDeviceRemovedReason(); FAILED(removed)) {
++        splitplay::control::report_gpu_lost(removed, "capture");
++      }
++    };
++
+     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
+       // Use exactly the requested rate if the client sent an X100 value
+       if (client_frame_rate_strict.Numerator > 0) {
+@@ -326,8 +334,12 @@ namespace platf::dxgi {
        }
  
        switch (status) {
 -        case platf::capture_e::reinit:
          case platf::capture_e::error:
-+          // SplitPlay: a lost device (TDR, hang, driver update) never comes back; the worker reports it and is replaced.
-+          if (const auto removed = device->GetDeviceRemovedReason(); FAILED(removed)) {
-+            splitplay::control::report_gpu_lost(removed, "capture");
-+          }
-+          return status;
 +        case platf::capture_e::reinit:
++          // SplitPlay: a lost device (TDR, hang, driver update) never comes back, also when Desktop Duplication only
++          // says ACCESS_LOST (reinit); the worker reports it and is replaced.
++          report_if_device_lost();
++          return status;
          case platf::capture_e::interrupted:
            return status;
          case platf::capture_e::timeout:
+@@ -347,6 +359,7 @@ namespace platf::dxgi {
+ 
+       status = release_snapshot();
+       if (status != platf::capture_e::ok) {
++        report_if_device_lost();
+         return status;
+       }
+     }
 diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
 index e818d8dad7a0cc703f9d640ca221e932d51ccea5..a49dc10fd56da95482690bfe6b4325b8bb589bb1 100644
 --- a/src/splitplay/control_client.cpp

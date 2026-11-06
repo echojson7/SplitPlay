@@ -64,15 +64,24 @@ public sealed class GpuResetTests
             TimeSpan.FromSeconds(30), "the worker restarted after three resets");
         Assert.Equal(1, svc.Launcher.LaunchesOf(Seat));
 
-        var logs = await svc.Client.GetStringAsync("/api/v1/logs?tail=500");
-        Assert.Contains("reported by the worker of desk desk-1", logs, StringComparison.Ordinal);
+        var logs = "";
+        for (var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10); DateTime.UtcNow < deadline; await Task.Delay(100))
+        {
+            logs = await svc.Client.GetStringAsync("/api/v1/logs?tail=500");
+            if (logs.Contains("reason 0x887A0007", StringComparison.Ordinal))
+            {
+                break;
+            }
+        }
+
+        Assert.Contains("the worker of desk desk-1", logs, StringComparison.Ordinal);
         Assert.Contains("reason 0x887A0007", logs, StringComparison.Ordinal);
     }
 
     [Fact]
     public async Task A_crash_just_before_Windows_reports_the_reset_is_taken_back()
     {
-        await using var svc = await TestService.StartAsync(["--Supervisor:GpuResetDelayMs=100", "--Supervisor:InitialBackoffMs=10000", "--Supervisor:MaxBackoffMs=10000"],
+        await using var svc = await TestService.StartAsync(["--Supervisor:GpuResetDelayMs=100", "--Supervisor:InitialBackoffMs=30000", "--Supervisor:MaxBackoffMs=30000"],
             setup: l => l.Behavior = r => r.Role == Worker && r.Attempt == 1 ? FakeChildBehavior.ExitAfterReady : FakeChildBehavior.Normal);
         await svc.CreateDeskAsync("desk-1");
         await svc.PostDeskActionAsync("desk-1", "start");
@@ -84,7 +93,7 @@ public sealed class GpuResetTests
         var started = DateTime.UtcNow;
         await svc.WaitForAsync("desk-1", d => d.State == DeskState.Ready && svc.Launcher.LaunchesOf(Worker) == 2, TimeSpan.FromSeconds(20),
             "the worker restarted");
-        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(2), "the retry waited out the failure backoff");
+        Assert.True(DateTime.UtcNow - started < TimeSpan.FromSeconds(10), "the retry waited out the failure backoff");
     }
 
     [Fact]

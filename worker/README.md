@@ -44,8 +44,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0015` NVIDIA profile | the "prefer maximum performance" application profile (`PREFERRED_PSTATE`) is bound to the running executable's file name (`splitplay-worker.exe`) under the profile name "SplitPlay worker" instead of upstream's `sunshine.exe`/"SunshineStream"; `--restore-nvprefs-undo` also deletes that profile. See *NVIDIA driver settings* below |
 | `0016` input thread | input is injected on its own thread (`input_pool`, one thread, MMCSS "Games") instead of Sunshine's shared task-pool thread; key repeat, gamepads, rumble/LED callbacks and touch/pen repeat run there too, so ordering and the input state's synchronisation are upstream's. See *Scheduling* below |
 | `0017` mDNS per desk | the DNS-SD instance is named after `sunshine_name` instead of the host name every desk shares (`net::mdns_desk_instance_name`: ASCII punctuation and spaces become `-`, other UTF-8 is kept, at most 63 bytes on a character boundary; an ASCII fallback ending in the port if Windows refuses a non-ASCII name); `sunshine_name=` is also read from the UTF-8 command line, since the narrow `argv` is in the ANSI code page. See *mDNS* below |
-
-| `0022` lost GPU device | when DXGI capture fails and the D3D device reports `GetDeviceRemovedReason()` (driver reset/TDR, hang, driver update), the worker logs it, sends `event gpu_reset {reason, where}` and exits with code 5; the service starts a new worker in the same session. Standalone it only logs. See *Graphics driver reset* below |
+| `0022` lost GPU device | when DXGI capture fails or asks for a re-init and the D3D device reports `GetDeviceRemovedReason()` (driver reset/TDR, hang, driver update), the worker logs it, sends `event gpu_reset {reason, where}` and exits with code 5; the service starts a new worker in the same session. Standalone it only logs. See *Graphics driver reset* below |
 
 Patch numbers 0018–0024 are reserved per Stage 4 PR (docs/ARCHITECTURE.md §10), so a file may keep its number while
 earlier ones are still in review; `export-patches.sh` numbers files in queue order, so rename them back after an export.
@@ -338,8 +337,8 @@ starts. Both settle once the service owns driver profiles (below).
 ### Graphics driver reset (patch 0022)
 
 A TDR (Windows resets a GPU that stopped answering for 2 s), a driver crash or a driver update takes the worker's
-D3D11 device with it, and the NVENC session built on that device. Neither comes back: upstream ends the stream and
-the next one may fail too. Patch 0022 checks the device when DXGI capture reports an error; a lost device is reported
+D3D11 device with it, and the NVENC session built on that device. Neither comes back: upstream ends the stream or re-inits capture on the dead
+device. Patch 0022 checks the device whenever DXGI capture reports an error or asks for a re-init; a lost device is reported
 to the service (`gpu_reset`) and the worker exits with code 5. The service also watches the System event log for
 "Display driver … stopped responding and has successfully recovered" (provider `Display`, event 4101), which covers
 workers that were idle or failed elsewhere (in the encoder). Either way every desk's worker is restarted 3 s later

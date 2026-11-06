@@ -52,7 +52,7 @@ public sealed unsafe partial class WindowsGpuResetSource : IGpuResetSource
     private readonly object _gate = new();
     private GCHandle _self;
     private nint _subscription;
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public WindowsGpuResetSource(ILogger<WindowsGpuResetSource> logger)
     {
@@ -94,10 +94,10 @@ public sealed unsafe partial class WindowsGpuResetSource : IGpuResetSource
             _disposed = true;
             if (_subscription != 0)
             {
-                // EvtClose waits for a running callback to return, so the handle is only freed after it.
+                // The GCHandle is deliberately never freed: whether EvtClose waits for a callback that is already running
+                // is not documented, and a freed handle there would crash the service. It holds one small object.
                 EvtClose(_subscription);
                 _subscription = 0;
-                _self.Free();
             }
         }
     }
@@ -107,7 +107,7 @@ public sealed unsafe partial class WindowsGpuResetSource : IGpuResetSource
     {
         try
         {
-            if (GCHandle.FromIntPtr(context).Target is not WindowsGpuResetSource self)
+            if (GCHandle.FromIntPtr(context).Target is not WindowsGpuResetSource { _disposed: false } self)
             {
                 return 0;
             }

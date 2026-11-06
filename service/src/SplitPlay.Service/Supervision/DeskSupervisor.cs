@@ -1010,9 +1010,7 @@ public sealed class DeskSupervisor : IHostedService
                 {
                     // A worker that died of a graphics driver reset restarts after a short pause without using up the
                     // desk's failure budget (DeskTrigger.GpuReset; a driver that keeps resetting still faults it).
-                    var trigger = ReferenceEquals(reason, GpuResetReason) || GpuResetSince(_time.GetUtcNow() - GpuResetAttribution)
-                        ? DeskTrigger.GpuReset
-                        : DeskTrigger.Fail;
+                    var trigger = AttributeToGpuReset(rt, reason) ? DeskTrigger.GpuReset : DeskTrigger.Fail;
                     if (!rt.Machine.TryFire(trigger, out _, reason) || rt.Machine.State == DeskState.Faulted)
                     {
                         return;
@@ -1316,7 +1314,9 @@ public sealed class DeskSupervisor : IHostedService
             var failure = await worker.Completion.ConfigureAwait(false);
             if (worker.Process.Exited is { IsCompletedSuccessfully: true, Result: IpcProtocol.ExitCodes.GpuReset })
             {
-                // The worker lost its GPU device; its gpu_reset event normally got here first and this is the same reset.
+                // The worker lost its GPU device. Its gpu_reset event (with the device-removed reason) may still be in the
+                // pipe when the exit wins the race: give the reader a moment, then this signal is the same reset.
+                await Task.Delay(TimeSpan.FromMilliseconds(300), _time, CancellationToken.None).ConfigureAwait(false);
                 OnGpuReset(new GpuResetSignal(rt.Id, failure));
                 return GpuResetReason;
             }
@@ -1955,13 +1955,36 @@ public sealed class DeskSupervisor : IHostedService
 
     // ------------------------------------------------------------------ graphics driver reset
 
-    /// <summary>True if a graphics driver reset was handled at or after <paramref name="since"/>.</summary>
-    private bool GpuResetSince(DateTimeOffset since)
+    /// <summary>When the latest graphics driver reset was handled, if at or after <paramref name="since"/>; it identifies the reset.</summary>
+    private DateTimeOffset? GpuResetSince(DateTimeOffset since)
     {
         lock (_gpuResetGate)
         {
-            return _lastGpuReset is { } last && last.At >= since;
+            return _lastGpuReset is { } last && last.At >= since ? last.At : null;
         }
+    }
+
+    /// <summary>
+    /// True if the desk's run that just ended is put down to a driver reset: it was restarted for one, or it failed
+    /// shortly after one that has not been put down to this desk yet (one reset uses up one of the desk's resets, not
+    /// one per follow-up failure). Caller holds <c>rt.Gate</c>.
+    /// </summary>
+    private bool AttributeToGpuReset(DeskRuntime rt, string reason)
+    {
+        var reset = GpuResetSince(_time.GetUtcNow() - GpuResetAttribution);
+        if (ReferenceEquals(reason, GpuResetReason))
+        {
+            rt.GpuResetHandled = reset ?? rt.GpuResetHandled;
+            return true;
+        }
+
+        if (reset is { } at && rt.GpuResetHandled != at)
+        {
+            rt.GpuResetHandled = at;
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -1976,7 +1999,9 @@ public sealed class DeskSupervisor : IHostedService
         {
             if (_lastGpuReset is { } last && now - last.At < GpuResetCoalesce)
             {
-                _logger.LogDebug("Graphics driver reset also reported by {Source} ({Detail})", signal.Source, signal.Detail);
+                // The same reset; a worker's report carries the device-removed reason, which is worth keeping.
+                _logger.Log(signal.Detail is null ? LogLevel.Debug : LogLevel.Information, "Graphics driver reset also reported by {Source}{Detail}",
+                    signal.Source == "Windows" ? "Windows" : $"the worker of desk {signal.Source}", signal.Detail is null ? "" : $": {signal.Detail}");
                 return;
             }
 
@@ -1990,6 +2015,7 @@ public sealed class DeskSupervisor : IHostedService
             {
                 if (rt.WorkerAbort is { } abort)
                 {
+                    rt.GpuResetHandled = now;
                     // A worker is starting or running: RunOnceAsync kills it and the desk retries after the reset delay.
                     if (abort.TrySetResult(GpuResetReason))
                     {
@@ -1998,6 +2024,7 @@ public sealed class DeskSupervisor : IHostedService
                 }
                 else if (rt.Machine.State == DeskState.Recovering && rt.Machine.TryFire(DeskTrigger.GpuReset, out _, GpuResetReason))
                 {
+                    rt.GpuResetHandled = now;
                     // Its worker already died of the reset and counted as a failure: that failure is taken back, and
                     // the run loop stops waiting out the failure's backoff.
                     rt.RetryWake?.TrySetResult();

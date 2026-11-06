@@ -153,6 +153,12 @@ export interface DeskMetrics {
   /** Round-trip time to the Moonlight client, ms; null until one is measured (older services: absent). */
   rttMs?: number | null
   clients: number
+  /** The desk session's GPU load (busiest engine, as in Task Manager), percent; from the metrics push, null when not measured. */
+  gpuPercent?: number | null
+  /** The desk session's video encoder (NVENC) load, percent; null when not measured or the GPU has no encoder. */
+  encoderPercent?: number | null
+  /** Dedicated video memory used by the desk session, MB. */
+  vramMb?: number | null
 }
 
 /** The Moonlight stream a desk is serving (`desk.stream`): who is connected and what it asked for. */
@@ -243,14 +249,16 @@ export interface PairRequest {
   name: string
 }
 
-/** GPU adapter entry inside host metrics (assumed shape). */
+/** GPU adapter entry inside host metrics. Live values are null while not measured. */
 export interface GpuInfo {
   luid: string
   name: string
-  utilizationPercent?: number
-  encoderPercent?: number
-  vramUsedMb?: number
-  vramTotalMb?: number
+  /** Busiest engine, as Task Manager's "GPU" column. */
+  utilizationPercent?: number | null
+  /** Busiest video encoder (NVENC); null when the adapter has none. */
+  encoderPercent?: number | null
+  vramUsedMb?: number | null
+  vramTotalMb?: number | null
 }
 
 /** Host part of GET /metrics (assumed shape). */

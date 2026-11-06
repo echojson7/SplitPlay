@@ -123,7 +123,13 @@ const cpuHint = computed(() => {
   const c = cpu.value
   if (!c) return ''
   const what = t(`settings.cpuKind.${c.kind}`)
-  return c.name ? `${c.name} · ${what}` : what
+  // "AMD Ryzen 9 7950X3D 16-Core Processor" -> "AMD Ryzen 9 7950X3D", "Intel(R) Core(TM) i9" -> "Intel Core i9".
+  const name = c.name
+    ?.replace(/\((R|TM)\)/gi, '')
+    .replace(/\s+\d+-Core Processor$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return name ? `${name} · ${what}` : what
 })
 
 /** With Auto on: which processors each desk got ("Desk 1: 16–31 · Desk 2: 0–15"). */

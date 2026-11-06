@@ -34,7 +34,7 @@ describe('cores for desks', () => {
 
     const row = w.find('[data-desk-cores]')
     expect(row.find('.title').text()).toBe('Ядра для столов')
-    expect(row.find('[data-cpu-hint]').text()).toBe('AMD Ryzen 9 7950X3D 16-Core Processor · Каждому столу свой CCD, первому — с 3D V-Cache')
+    expect(row.find('[data-cpu-hint]').text()).toBe('AMD Ryzen 9 7950X3D · Каждому столу свой CCD, первому — с 3D V-Cache')
     expect(row.find('[data-cpu-plan]').exists()).toBe(false)
     const select = row.find('select')
     expect((select.element as HTMLSelectElement).value).toBe('off')

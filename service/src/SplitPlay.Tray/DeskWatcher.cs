@@ -22,6 +22,9 @@ internal sealed class DeskWatcher : IDisposable
     private static readonly TimeSpan ServiceDownInterval = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan RefusedInterval = TimeSpan.FromMinutes(5);
 
+    /// <summary>Host warnings (TermWrap) are read every this many desk polls (they change rarely).</summary>
+    private const int WarningsEvery = 5;
+
     /// <summary>Failed polls in a row before the list is dropped: one timeout or a 503 at start-up keeps the menu.</summary>
     private const int FailuresBeforeEmpty = 3;
 
@@ -37,6 +40,7 @@ internal sealed class DeskWatcher : IDisposable
     private AdminToken? _token;
     private IReadOnlyList<TrayDesk>? _last;
     private int _failures;
+    private int _polls;
     private volatile bool _disposed;
 
     /// <param name="baseUrl">The web UI's address (the API is under <c>api/v1/</c>).</param>
@@ -52,6 +56,12 @@ internal sealed class DeskWatcher : IDisposable
 
     /// <summary>The desk list changed (any field).</summary>
     public event Action? Changed;
+
+    /// <summary>The latest host warnings (<c>GET /host/warnings</c>); empty until read and while the service is down.</summary>
+    public IReadOnlyList<TrayWarning> Warnings { get; private set; } = [];
+
+    /// <summary>The host warnings changed; the argument holds the codes that are new.</summary>
+    public event Action<IReadOnlyList<TrayWarning>>? WarningsChanged;
 
     /// <summary>A Moonlight client started waiting for its PIN on these desks.</summary>
     public event Action<IReadOnlyList<TrayDesk>>? PinRequested;
@@ -173,7 +183,44 @@ internal sealed class DeskWatcher : IDisposable
 
         _failures = 0;
         Publish(desks);
+        if (_polls++ % WarningsEvery == 0)
+        {
+            await PollWarningsAsync(ct);
+        }
+
         return true;
+    }
+
+    /// <summary>One <c>GET /host/warnings</c>; a failure (an older service answers 404) keeps the previous list.</summary>
+    private async Task PollWarningsAsync(CancellationToken ct)
+    {
+        try
+        {
+            using var response = await SendAsync(HttpMethod.Get, "host/warnings", ct);
+            if (response.IsSuccessStatusCode)
+            {
+                PublishWarnings(TrayWarnings.Parse(await response.Content.ReadAsStringAsync(ct)));
+            }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or IOException
+                                       || (ex is TaskCanceledException && !ct.IsCancellationRequested))
+        {
+        }
+    }
+
+    private void PublishWarnings(IReadOnlyList<TrayWarning> warnings)
+    {
+        _post(() =>
+        {
+            if (_disposed || Warnings.SequenceEqual(warnings))
+            {
+                return;
+            }
+
+            var fresh = warnings.Where(w => !Warnings.Contains(w)).ToList();
+            Warnings = warnings;
+            WarningsChanged?.Invoke(fresh);
+        });
     }
 
     /// <summary>A poll failed: the list is kept for a few rounds, then dropped (at once when <paramref name="force"/>).</summary>
@@ -182,6 +229,8 @@ internal sealed class DeskWatcher : IDisposable
         if (force || ++_failures >= FailuresBeforeEmpty)
         {
             Publish([]);
+            PublishWarnings([]);
+            _polls = 0;
         }
     }
 

@@ -323,13 +323,27 @@ export interface HostMetrics {
   warnings?: HostWarning[]
 }
 
-/** One host warning: `gpuReset` (at, desks), `encoderBusy` and `vramFull` (gpu, percent). Unknown codes are ignored. */
+/**
+ * One host warning: `gpuReset` (at, desks), `encoderBusy` and `vramFull` (gpu, percent), and the TermWrap ones:
+ * `termWrapReboot` (repaired), `termWrapUnsupported` (version), `termWrapMissing`, `termWrapRepairFailed`.
+ * Unknown codes are ignored.
+ */
 export interface HostWarning {
-  code: 'gpuReset' | 'encoderBusy' | 'vramFull' | string
+  code:
+    | 'gpuReset'
+    | 'encoderBusy'
+    | 'vramFull'
+    | 'termWrapReboot'
+    | 'termWrapUnsupported'
+    | 'termWrapMissing'
+    | 'termWrapRepairFailed'
+    | string
   gpu?: string | null
   percent?: number | null
   at?: string | null
   desks?: number | null
+  repaired?: boolean
+  version?: string | null
 }
 
 /** Per-desk part of GET /metrics (assumed shape). */

@@ -57,6 +57,32 @@ describe('host warnings', () => {
     w.unmount()
   })
 
+  it('shows TermWrap problems after a Windows update first, as one line each', async () => {
+    const w = await open('/', [
+      { code: 'termWrapReboot', repaired: true },
+      { code: 'termWrapUnsupported', version: '10.0.26100.7000' },
+      { code: 'encoderBusy', gpu: 'RTX', percent: 97 },
+    ])
+    const rows = w.findAll('[data-host-warnings] [data-warning]')
+    expect(rows.map((r) => r.attributes('data-warning'))).toEqual(['termWrapReboot', 'termWrapUnsupported', 'encoderBusy'])
+    expect(rows[0]!.text()).toContain('Перезагрузите ПК')
+    expect(rows[0]!.text()).toContain('SplitPlay вернул его')
+    expect(rows[1]!.text()).toContain('несовместимо с TermWrap')
+    expect(rows[1]!.text()).toContain('termsrv 10.0.26100.7000')
+    w.unmount()
+  })
+
+  it('names the TermWrap fix in English too', async () => {
+    locale.value = 'en'
+    const w = await open('/', [{ code: 'termWrapReboot' }, { code: 'termWrapMissing' }, { code: 'termWrapRepairFailed' }])
+    const rows = w.findAll('[data-host-warnings] [data-warning]')
+    expect(rows[0]!.text()).toContain('Restart the PC')
+    expect(rows[0]!.text()).toContain('Desks start after the restart')
+    expect(rows[1]!.text()).toContain('Reinstall SplitPlay')
+    expect(rows[2]!.text()).toContain('Run SplitPlay setup again')
+    w.unmount()
+  })
+
   it('shows them on the metrics page too', async () => {
     const w = await open('/diagnostics', [{ code: 'vramFull', gpu: 'RTX', percent: 96 }])
     expect(w.find('[data-warning="vramFull"]').exists()).toBe(true)

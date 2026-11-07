@@ -107,6 +107,14 @@ public interface IDeskPlatform
     /// </summary>
     bool ApplyComposeInterval(int composeIntervalMs);
 
+    /// <summary>
+    /// Checks that TermWrap survived Windows updates (<see cref="SplitPlay.Core.Host.TermWrapGuard"/>): writes its
+    /// <c>ServiceDll</c> back when an update reset it, probes a new <c>termsrv.dll</c> build once, and checks that the
+    /// running TermService loaded TermWrap. <see cref="SplitPlay.Core.Host.TermWrapHealth.NotManaged"/> on a host not
+    /// prepared with TermWrap. Never throws for host problems; they are in the result.
+    /// </summary>
+    SplitPlay.Core.Host.TermWrapHealth CheckTermWrap();
+
     /// <summary>The active console session id, or null if there is none.</summary>
     int? ConsoleSessionId();
 

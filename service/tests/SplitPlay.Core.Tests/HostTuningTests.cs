@@ -4,7 +4,7 @@ using SplitPlay.Core.Host;
 
 namespace SplitPlay.Core.Tests;
 
-public sealed class HostTuningTests : IDisposable
+public sealed partial class HostTuningTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "splitplay-host-" + Guid.NewGuid().ToString("N")[..8]);
     private readonly FakeRegistry _registry = new();

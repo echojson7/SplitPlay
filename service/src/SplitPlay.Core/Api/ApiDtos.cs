@@ -374,7 +374,16 @@ public sealed record HostMetricsDto(
 /// (encoder and VRAM warnings), <see cref="Percent"/> is the load behind it, <see cref="At"/> when it happened (driver
 /// reset) and <see cref="Desks"/> how many desks were restarted.
 /// </summary>
-public sealed record HostWarningDto(string Code, string? Gpu = null, double? Percent = null, DateTimeOffset? At = null, int? Desks = null);
+public sealed record HostWarningDto(string Code, string? Gpu = null, double? Percent = null, DateTimeOffset? At = null, int? Desks = null)
+{
+    /// <summary><see cref="HostWarningCodes.TermWrapReboot"/>: SplitPlay just wrote TermWrap's <c>ServiceDll</c> back.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool Repaired { get; init; }
+
+    /// <summary><see cref="HostWarningCodes.TermWrapUnsupported"/>: the <c>termsrv.dll</c> version.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Version { get; init; }
+}
 
 public static class HostWarningCodes
 {
@@ -386,6 +395,18 @@ public static class HostWarningCodes
 
     /// <summary>The graphics driver was reset recently; the desks' workers were restarted.</summary>
     public const string GpuReset = "gpuReset";
+
+    /// <summary>TermWrap is set up but TermService runs without it until the PC restarts (often after Windows Update).</summary>
+    public const string TermWrapReboot = "termWrapReboot";
+
+    /// <summary>The installed <c>termsrv.dll</c> cannot be patched by this TermWrap: desks cannot start.</summary>
+    public const string TermWrapUnsupported = "termWrapUnsupported";
+
+    /// <summary>TermWrap's files are gone: reinstall.</summary>
+    public const string TermWrapMissing = "termWrapMissing";
+
+    /// <summary>TermWrap's <c>ServiceDll</c> could not be written back.</summary>
+    public const string TermWrapRepairFailed = "termWrapRepairFailed";
 }
 
 /// <summary>Metrics of one desk inside <see cref="MetricsDto"/>.</summary>

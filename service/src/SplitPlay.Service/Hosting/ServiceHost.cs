@@ -120,6 +120,8 @@ public static class ServiceHost
             sp.GetRequiredService<GameCatalog>()));
         // Before the supervisor, so that it stops after every worker (the global value is given back last).
         builder.Services.AddHostedService(sp => sp.GetRequiredService<NvidiaDriverSettings>());
+        builder.Services.AddSingleton<TermWrapMonitor>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<TermWrapMonitor>());
         builder.Services.AddSingleton<DeskSupervisor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<DeskSupervisor>());
         builder.Services.AddSingleton<FakePowerRequest>();

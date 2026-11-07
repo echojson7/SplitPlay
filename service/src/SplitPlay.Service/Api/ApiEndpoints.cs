@@ -349,6 +349,7 @@ public static partial class ApiEndpoints
         });
 
         // ---- Windows services SplitPlay depends on (allow-list in RelatedServices)
+        api.MapGet("/host/warnings", (DeskSupervisor s) => Results.Json(s.HostWarnings().ToList(), Ctx.ListHostWarningDto));
         api.MapGet("/host/services", (RelatedServices services) => Results.Json(services.List().ToList(), Ctx.ListHostServiceDto));
         api.MapPost("/host/services/{name}/start", (string name, RelatedServices services) =>
             Results.Json(services.Start(name), Ctx.HostServiceDto, statusCode: StatusCodes.Status202Accepted));

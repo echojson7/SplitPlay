@@ -35,6 +35,7 @@ namespace SplitPlay.Core.Json;
 [JsonSerializable(typeof(ClientDto))]
 [JsonSerializable(typeof(List<ClientDto>))]
 [JsonSerializable(typeof(MetricsDto))]
+[JsonSerializable(typeof(List<HostWarningDto>))]
 [JsonSerializable(typeof(LogLineDto))]
 [JsonSerializable(typeof(List<LogLineDto>))]
 [JsonSerializable(typeof(WsDeskEvent))]

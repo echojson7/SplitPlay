@@ -73,6 +73,7 @@ public sealed class DeskSupervisor : IHostedService
     private readonly object _gpuResetGate = new();
     private (DateTimeOffset At, int Desks)? _lastGpuReset;
     private readonly IDeskPlatform _platform;
+    private readonly TermWrapMonitor _termWrap;
     private readonly ICpuControl _cpu;
     private readonly DateTimeOffset _startedAt;
     private TimeSpan _lastCpu;
@@ -95,8 +96,9 @@ public sealed class DeskSupervisor : IHostedService
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
         PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage, ICpuControl cpu, NvidiaDriverSettings nvidia,
-        IGpuResetSource gpuResets)
+        IGpuResetSource gpuResets, TermWrapMonitor termWrap)
     {
+        _termWrap = termWrap;
         _nvidia = nvidia;
         ArgumentNullException.ThrowIfNull(power);
         ArgumentNullException.ThrowIfNull(gpuResets);
@@ -499,6 +501,9 @@ public sealed class DeskSupervisor : IHostedService
         _config.Snapshot().Desks.Any(d => string.Equals(d.User, user, StringComparison.OrdinalIgnoreCase))
         || _platform.FindAccount(user)?.CreatedBySplitPlay == true;
 
+    /// <summary>Host warnings that need no GPU counters (TermWrap): first in <see cref="Metrics"/>, and <c>GET /host/warnings</c>.</summary>
+    public IReadOnlyList<HostWarningDto> HostWarnings() => _termWrap.Warning is { } w ? [w] : [];
+
     public MetricsDto Metrics()
     {
         var now = _time.GetUtcNow();
@@ -524,6 +529,8 @@ public sealed class DeskSupervisor : IHostedService
                 warnings.Insert(0, new HostWarningDto(HostWarningCodes.GpuReset, At: reset.At, Desks: reset.Desks));
             }
         }
+
+        warnings.InsertRange(0, HostWarnings());
 
         var host = new HostMetricsDto(
             Math.Round(Math.Clamp(cpuPercent, 0, 100), 1),

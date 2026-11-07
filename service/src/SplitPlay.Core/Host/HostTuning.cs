@@ -65,6 +65,13 @@ public sealed record HostStatus(
           + (Items.FirstOrDefault(i => !i.IsOk) is { } bad ? $"; {bad.Id} is {bad.Current?.ToString() ?? "missing"}, expected {bad.Desired}" : "");
 }
 
+/// <summary>Result of <see cref="HostTuner.RepairTermWrap"/>.</summary>
+/// <param name="Managed">The host was prepared with TermWrap (otherwise nothing was looked at).</param>
+/// <param name="Changes">The <c>ServiceDll</c> values written back.</param>
+/// <param name="MissingFiles">Wrapper DLLs the recorded values point at that no longer exist.</param>
+/// <param name="RebootRequired">A <c>ServiceDll</c> changed while its service was running and no reboot happened since.</param>
+public sealed record TermWrapRepair(bool Managed, IReadOnlyList<string> Changes, IReadOnlyList<string> MissingFiles, bool RebootRequired);
+
 /// <summary>Result of prepare or revert.</summary>
 public sealed record HostTuningResult(IReadOnlyList<string> Changes, bool RebootRequired, IReadOnlyList<string> Notes);
 
@@ -419,6 +426,60 @@ public sealed class HostTuner
 
         var reboot = state is not null && IsRebootRequired(state);
         return new HostStatus(prepared && items.All(i => i.IsOk), reboot, skipped, Edition, items, notes);
+    }
+
+    // ------------------------------------------------------------------ TermWrap repair
+
+    /// <summary>
+    /// Puts back the TermWrap <c>ServiceDll</c> values prepare recorded when something else changed them (a feature
+    /// update rewrites TermService's <c>ServiceDll</c> to <c>termsrv.dll</c>). Only on a host prepared with TermWrap;
+    /// a value whose wrapper DLL no longer exists is left alone and reported in <see cref="TermWrapRepair.MissingFiles"/>.
+    /// A value changed while its service runs takes effect after a reboot (<see cref="TermWrapRepair.RebootRequired"/>).
+    /// </summary>
+    /// <exception cref="UnauthorizedAccessException">The registry or the state file cannot be written.</exception>
+    /// <exception cref="IOException">The state file cannot be written.</exception>
+    public TermWrapRepair RepairTermWrap()
+    {
+        var state = LoadState();
+        var records = state is { State: HostTuningState.PreparedState }
+            ? state.Items.Where(r => r.TermWrap && r.Desired is not null).ToList()
+            : [];
+        if (records.Count == 0)
+        {
+            return new TermWrapRepair(Managed: false, [], [], RebootRequired: false);
+        }
+
+        var changes = new List<string>();
+        var missing = new List<string>();
+        var serviceDllChanged = new List<string>();
+        foreach (var record in records)
+        {
+            var desired = record.Desired!;
+            var file = Environment.ExpandEnvironmentVariables(desired.Data);
+            if (!File.Exists(file))
+            {
+                missing.Add(file);
+                continue;
+            }
+
+            var current = _registry.Get(record.Key, record.Name);
+            if (desired.SameAs(current))
+            {
+                continue;
+            }
+
+            _registry.Set(record.Key, record.Name, desired);
+            changes.Add($"{record.Id}: {current?.ToString() ?? "(missing)"} -> {desired}");
+            serviceDllChanged.Add(record.Key == TermServiceParametersKey ? TermService : UmRdpService);
+        }
+
+        if (serviceDllChanged.Count > 0)
+        {
+            MarkServiceDllChange(state!, serviceDllChanged);
+            SaveState(state!);
+        }
+
+        return new TermWrapRepair(Managed: true, changes, missing, IsRebootRequired(state!));
     }
 
     // ------------------------------------------------------------------ compose interval

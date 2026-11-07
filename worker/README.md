@@ -48,9 +48,12 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0019` HDR probe | `event display_hdr` with the HDR state of the session's displays (DXGI colour space, Display Configuration API advanced colour / 24H2 HDR info), probed every 5 s on a thread of its own and sent with the next heartbeat on change; `--self-test` also switches HDR on for each display that is not in HDR and back (`hdr` in `self-test.json`); a stream that asks for HDR on an SDR display logs a warning. Number `0018` is reserved for capture on frame arrival. See *HDR* below |
 | `0020` NVIDIA settings outside | no NvAPI driver settings at start-up, at stream start or at exit: the SplitPlay service owns them (one writer for every desk, with its own record of the previous values); `--restore-nvprefs-undo` stays for what workers before this patch left behind. See *NVIDIA driver settings* below |
 | `0021` PIN request | a Moonlight client that waits for its PIN (`getservercert` parked until `pair`) is reported in every heartbeat as `pairing: {address, since}`, the newest one when several wait, `null` otherwise; the mark goes when `pair` hands the PIN over, when the pairing session ends or fails, and after 5 minutes (Sunshine never notices a client that gave up) |
-| `0023` loss telemetry | the client's per-frame FEC reports (`SS_FRAME_FEC_STATUS`, control type `0x5502`, which upstream drops) are counted per stream; heartbeats gain `packet_loss_pct`, `burst_loss_pct`, `fec_recovered`, `fec_failed` and `fec_percent`, the stream object `fec_feedback`. Number `0022` is reserved for another Stage 4 PR. See *Loss telemetry and live bitrate* below |
-| `0024` RDP input | the Profile's `input` (live): `windows` keeps SendInput, `rdp` writes keyboard and mouse into the seat's input ring (`input_ring.h`), and the seat sends them into the session as RDP input PDUs (no injection flag, UAC and Ctrl+Alt+Del work); relative motion stays on SendInput unless the RDP server takes relative mouse PDUs; any event the ring cannot take goes to SendInput; heartbeats gain `input` and `input_fallbacks`. Number `0022` is reserved for another Stage 4 PR. See *RDP input* below |
+| `0022` lost GPU device | when DXGI capture fails or asks for a re-init and the D3D device reports `GetDeviceRemovedReason()` (driver reset/TDR, hang, driver update), the worker logs it, sends `event gpu_reset {reason, where}` and exits with code 5; the service starts a new worker in the same session. Standalone it only logs. See *Graphics driver reset* below |
+| `0023` loss telemetry | the client's per-frame FEC reports (`SS_FRAME_FEC_STATUS`, control type `0x5502`, which upstream drops) are counted per stream; heartbeats gain `packet_loss_pct`, `burst_loss_pct`, `fec_recovered`, `fec_failed` and `fec_percent`, the stream object `fec_feedback`. See *Loss telemetry and live bitrate* below |
+| `0024` RDP input | the Profile's `input` (live): `windows` keeps SendInput, `rdp` writes keyboard and mouse into the seat's input ring (`input_ring.h`), and the seat sends them into the session as RDP input PDUs (no injection flag, UAC and Ctrl+Alt+Del work); relative motion stays on SendInput unless the RDP server takes relative mouse PDUs; any event the ring cannot take goes to SendInput; heartbeats gain `input` and `input_fallbacks`. See *RDP input* below |
 | `0025` live bitrate | the Profile's `bitrate_cap_kbps` (live): native NVENC follows it with `NvEncReconfigureEncoder` (CBR bitrate and VBV, no IDR); heartbeats gain `encoder_kbps`. See *Loss telemetry and live bitrate* below |
+
+Patch numbers 0018–0024 are reserved per Stage 4 PR (docs/ARCHITECTURE.md §10); `export-patches.sh` numbers files in queue order, so rename them back after an export.
 
 ### Changing a patch or adding one
 
@@ -439,6 +442,18 @@ separate change.
 
 A Moonlight client that asks for HDR on a desk without it still connects: Sunshine encodes SDR in 10 bits, the worker
 logs "the client asked for HDR, but this desk's display is not in HDR", and the desk page shows "SDR instead of HDR".
+
+### Graphics driver reset (patch 0022)
+
+A TDR (Windows resets a GPU that stopped answering for 2 s), a driver crash or a driver update takes the worker's
+D3D11 device with it, and the NVENC session built on that device. Neither comes back: upstream ends the stream or re-inits capture on the dead
+device. Patch 0022 checks the device whenever DXGI capture reports an error or asks for a re-init; a lost device is reported
+to the service (`gpu_reset`) and the worker exits with code 5. The service also watches the System event log for
+"Display driver … stopped responding and has successfully recovered" (provider `Display`, event 4101), which covers
+workers that were idle or failed elsewhere (in the encoder). Either way every desk's worker is restarted 3 s later
+in its unchanged RDP session: games and windows survive, Moonlight reconnects to a fresh device, and the Desks page
+shows "Сбой драйвера видеокарты" for 15 minutes. A driver that keeps resetting (more than 3 times in 10 minutes)
+counts as ordinary failures, so the desk faults instead of looping.
 
 ## Not possible without drivers of our own
 

@@ -39,6 +39,18 @@ public sealed class DeskSupervisor : IHostedService
     /// <summary>What <see cref="RunOnceAsync"/> returns when the worker was stopped because the PC goes to sleep (compared by reference).</summary>
     private static readonly string PausedForSleep = new("the PC is going to sleep".AsSpan());
 
+    /// <summary>Sentinel run result (compared by reference): the worker was restarted because the graphics driver was reset.</summary>
+    private static readonly string GpuResetReason = new("the graphics driver was reset".AsSpan());
+
+    /// <summary>Reset signals this close together are one reset (the event log and every worker report the same TDR).</summary>
+    internal static readonly TimeSpan GpuResetCoalesce = TimeSpan.FromSeconds(20);
+
+    /// <summary>A worker that fails this soon after a reset failed because of it.</summary>
+    internal static readonly TimeSpan GpuResetAttribution = TimeSpan.FromSeconds(20);
+
+    /// <summary>How long the UI shows that the driver was reset.</summary>
+    internal static readonly TimeSpan GpuResetNotice = TimeSpan.FromMinutes(15);
+
     private readonly ConcurrentDictionary<string, DeskRuntime> _desks = new(StringComparer.Ordinal);
     private readonly object _registryGate = new();
     private readonly ConfigService _config;
@@ -56,6 +68,10 @@ public sealed class DeskSupervisor : IHostedService
     private readonly ILogger _childLogger;
     private readonly GpuInventory _gpus;
     private readonly GpuUsageMonitor _gpuUsage;
+    private readonly IGpuResetSource _gpuResetSource;
+    private readonly GpuLoadWarnings _gpuLoad;
+    private readonly object _gpuResetGate = new();
+    private (DateTimeOffset At, int Desks)? _lastGpuReset;
     private readonly IDeskPlatform _platform;
     private readonly ICpuControl _cpu;
     private readonly DateTimeOffset _startedAt;
@@ -78,12 +94,17 @@ public sealed class DeskSupervisor : IHostedService
 
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
-        PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage, ICpuControl cpu, NvidiaDriverSettings nvidia)
+        PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage, ICpuControl cpu, NvidiaDriverSettings nvidia,
+        IGpuResetSource gpuResets)
     {
         _nvidia = nvidia;
         ArgumentNullException.ThrowIfNull(power);
+        ArgumentNullException.ThrowIfNull(gpuResets);
         _cpu = cpu;
         power.Changed += OnPowerChange;
+        _gpuResetSource = gpuResets;
+        gpuResets.Reset += OnGpuReset;
+        _gpuLoad = new GpuLoadWarnings(time, logger);
         _requiredServices = requiredServices;
         _gpus = gpus;
         _gpuUsage = gpuUsage;
@@ -123,6 +144,7 @@ public sealed class DeskSupervisor : IHostedService
     public Task StartAsync(CancellationToken cancellationToken)
     {
         _startup = Task.Run(StartupChecksAsync, CancellationToken.None);
+        _gpuResetSource.Start();
         if (!_options.Value.Autostart)
         {
             return Task.CompletedTask;
@@ -145,6 +167,7 @@ public sealed class DeskSupervisor : IHostedService
 
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        _gpuResetSource.Reset -= OnGpuReset;
         var tasks = new List<Task>();
         foreach (var rt in _desks.Values)
         {
@@ -492,12 +515,25 @@ public sealed class DeskSupervisor : IHostedService
         var usage = _gpuUsage.Current();
         var (memoryUsedMb, memoryTotalMb) = GpuInventory.PhysicalMemory();
         var composeMs = EffectiveComposeIntervalMs();
+        var gpus = GpusWithUsage(usage);
+        var warnings = _gpuLoad.Update(gpus).ToList();
+        lock (_gpuResetGate)
+        {
+            if (_lastGpuReset is { } reset && now - reset.At < GpuResetNotice)
+            {
+                warnings.Insert(0, new HostWarningDto(HostWarningCodes.GpuReset, At: reset.At, Desks: reset.Desks));
+            }
+        }
+
         var host = new HostMetricsDto(
             Math.Round(Math.Clamp(cpuPercent, 0, 100), 1),
             memoryUsedMb,
             memoryTotalMb,
             composeMs > 0 ? Math.Round(1000.0 / composeMs, 1) : null,
-            GpusWithUsage(usage));
+            gpus)
+        {
+            Warnings = warnings,
+        };
         // A desk without its own session (a dev worker on the console) would show the console's games: leave it empty.
         var console = _platform.ConsoleSessionId();
         var anyEncoder = usage?.Adapters.Values.Any(a => a.EncoderPercent is not null) == true;
@@ -1150,7 +1186,10 @@ public sealed class DeskSupervisor : IHostedService
 
                 lock (rt.Gate)
                 {
-                    if (!rt.Machine.TryFire(DeskTrigger.Fail, out _, reason) || rt.Machine.State == DeskState.Faulted)
+                    // A worker that died of a graphics driver reset restarts after a short pause without using up the
+                    // desk's failure budget (DeskTrigger.GpuReset; a driver that keeps resetting still faults it).
+                    var trigger = AttributeToGpuReset(rt, reason) ? DeskTrigger.GpuReset : DeskTrigger.Fail;
+                    if (!rt.Machine.TryFire(trigger, out _, reason) || rt.Machine.State == DeskState.Faulted)
                     {
                         return;
                     }
@@ -1286,23 +1325,30 @@ public sealed class DeskSupervisor : IHostedService
         while (true)
         {
             DateTimeOffset at;
+            Task wake;
             lock (rt.Gate)
             {
                 if (rt.Machine.State != DeskState.Recovering || rt.Machine.RetryAt is not { } retryAt)
                 {
+                    rt.RetryWake = null;
                     return false;
                 }
 
                 if (rt.Machine.TryFire(DeskTrigger.RetryDue, out _))
                 {
+                    rt.RetryWake = null;
                     return true;
                 }
 
                 at = retryAt;
+                rt.RetryWake = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                wake = rt.RetryWake.Task;
             }
 
             var delay = at - _time.GetUtcNow();
-            await Task.Delay(delay > TimeSpan.FromMilliseconds(1) ? delay : TimeSpan.FromMilliseconds(1), _time, stop).ConfigureAwait(false);
+            await Task.WhenAny(Task.Delay(delay > TimeSpan.FromMilliseconds(1) ? delay : TimeSpan.FromMilliseconds(1), _time, stop), wake)
+                .ConfigureAwait(false);
+            stop.ThrowIfCancellationRequested();
         }
     }
 
@@ -1452,7 +1498,17 @@ public sealed class DeskSupervisor : IHostedService
                 return await abort.Task.ConfigureAwait(false);
             }
 
-            return await worker.Completion.ConfigureAwait(false);
+            var failure = await worker.Completion.ConfigureAwait(false);
+            if (worker.Process.Exited is { IsCompletedSuccessfully: true, Result: IpcProtocol.ExitCodes.GpuReset })
+            {
+                // The worker lost its GPU device. Its gpu_reset event (with the device-removed reason) may still be in the
+                // pipe when the exit wins the race: give the reader a moment, then this signal is the same reset.
+                await Task.Delay(TimeSpan.FromMilliseconds(300), _time, CancellationToken.None).ConfigureAwait(false);
+                OnGpuReset(new GpuResetSignal(rt.Id, failure));
+                return GpuResetReason;
+            }
+
+            return failure;
         }
         catch (IOException ex) when (!stop.IsCancellationRequested)
         {
@@ -2166,6 +2222,98 @@ public sealed class DeskSupervisor : IHostedService
         }
     }
 
+    // ------------------------------------------------------------------ graphics driver reset
+
+    /// <summary>When the latest graphics driver reset was handled, if at or after <paramref name="since"/>; it identifies the reset.</summary>
+    private DateTimeOffset? GpuResetSince(DateTimeOffset since)
+    {
+        lock (_gpuResetGate)
+        {
+            return _lastGpuReset is { } last && last.At >= since ? last.At : null;
+        }
+    }
+
+    /// <summary>
+    /// True if the desk's run that just ended is put down to a driver reset: it was restarted for one, or it failed
+    /// shortly after one that has not been put down to this desk yet (one reset uses up one of the desk's resets, not
+    /// one per follow-up failure). Caller holds <c>rt.Gate</c>.
+    /// </summary>
+    private bool AttributeToGpuReset(DeskRuntime rt, string reason)
+    {
+        var reset = GpuResetSince(_time.GetUtcNow() - GpuResetAttribution);
+        if (ReferenceEquals(reason, GpuResetReason))
+        {
+            rt.GpuResetHandled = reset ?? rt.GpuResetHandled;
+            return true;
+        }
+
+        if (reset is { } at && rt.GpuResetHandled != at)
+        {
+            rt.GpuResetHandled = at;
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// The graphics driver was reset (TDR), as Windows logged it or a worker saw its device go. Every running worker
+    /// holds a dead D3D device and NVENC session, so each one is restarted after <see cref="SupervisorOptions.GpuResetDelayMs"/>;
+    /// the seats and their sessions stay, so the desks' games and windows survive. Signals of one reset are coalesced.
+    /// </summary>
+    private void OnGpuReset(GpuResetSignal signal)
+    {
+        var now = _time.GetUtcNow();
+        lock (_gpuResetGate)
+        {
+            if (_lastGpuReset is { } last && now - last.At < GpuResetCoalesce)
+            {
+                // The same reset; a worker's report carries the device-removed reason, which is worth keeping.
+                _logger.Log(signal.Detail is null ? LogLevel.Debug : LogLevel.Information, "Graphics driver reset also reported by {Source}{Detail}",
+                    signal.Source == "Windows" ? "Windows" : $"the worker of desk {signal.Source}", signal.Detail is null ? "" : $": {signal.Detail}");
+                return;
+            }
+
+            _lastGpuReset = (now, 0);
+        }
+
+        var restarted = 0;
+        foreach (var rt in _desks.Values)
+        {
+            lock (rt.Gate)
+            {
+                if (rt.WorkerAbort is { } abort)
+                {
+                    rt.GpuResetHandled = now;
+                    // A worker is starting or running: RunOnceAsync kills it and the desk retries after the reset delay.
+                    if (abort.TrySetResult(GpuResetReason))
+                    {
+                        restarted++;
+                    }
+                }
+                else if (rt.Machine.State == DeskState.Recovering && rt.Machine.TryFire(DeskTrigger.GpuReset, out _, GpuResetReason))
+                {
+                    rt.GpuResetHandled = now;
+                    // Its worker already died of the reset and counted as a failure: that failure is taken back, and
+                    // the run loop stops waiting out the failure's backoff.
+                    rt.RetryWake?.TrySetResult();
+                    restarted++;
+                }
+            }
+        }
+
+        lock (_gpuResetGate)
+        {
+            if (_lastGpuReset is { } last && last.At == now)
+            {
+                _lastGpuReset = (now, restarted);
+            }
+        }
+
+        _logger.LogWarning("The graphics driver was reset (reported by {Source}{Detail}); restarting the workers of {Count} desks, their sessions stay",
+            signal.Source == "Windows" ? "Windows" : $"the worker of desk {signal.Source}", signal.Detail is null ? "" : $": {signal.Detail}", restarted);
+    }
+
     // ------------------------------------------------------------------ worker messages
 
     private async Task HandleWorkerMessageAsync(DeskRuntime rt, ChildChannel worker, IpcMessage message, CancellationToken ct)
@@ -2270,6 +2418,15 @@ public sealed class DeskSupervisor : IHostedService
             case EventMessage { Name: IpcProtocol.Events.ModeRequested } e:
                 _ = ForwardModeAsync(rt, EventInt(e, "width"), EventInt(e, "height"), EventInt(e, "fps"));
                 break;
+
+            case EventMessage { Name: IpcProtocol.Events.GpuReset } e:
+            {
+                // Any worker's lost device is evidence of a reset, even one that is already being replaced.
+                var detail = string.Join(", ", new[] { "reason", "where" }
+                    .Select(k => EventString(e, k) is { Length: > 0 } v ? $"{k} {v}" : null).OfType<string>());
+                OnGpuReset(new GpuResetSignal(rt.Id, detail.Length > 0 ? detail : null));
+                break;
+            }
 
             case EventMessage other:
                 _logger.LogInformation("Desk {Desk} event {Event}", rt.Id, other.Name);

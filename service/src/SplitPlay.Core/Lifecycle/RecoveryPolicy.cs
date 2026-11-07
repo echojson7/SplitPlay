@@ -23,6 +23,24 @@ public sealed record RecoveryPolicy
     public int MaxConsecutiveFailures { get; init; } = 10;
 
     /// <summary>
+    /// After a graphics driver reset the worker restarts this much later: the driver and DWM come back within a couple
+    /// of seconds, and a worker started into the reset would only fail again.
+    /// </summary>
+    public TimeSpan GpuResetDelay { get; init; } = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// Driver resets inside <see cref="FailureWindow"/> that restart a desk without counting as failures; more than this
+    /// (a driver that keeps crashing) count as ordinary failures, so the desk still faults instead of looping.
+    /// </summary>
+    public int MaxGpuResetsInWindow { get; init; } = 3;
+
+    /// <summary>
+    /// A failure at most this long before a reset is reported is put down to the reset and forgiven: the worker often
+    /// dies of the lost device before Windows logs the reset.
+    /// </summary>
+    public TimeSpan GpuResetForgiveWindow { get; init; } = TimeSpan.FromSeconds(20);
+
+    /// <summary>
     /// Delay before retry number <paramref name="consecutiveFailures"/> (1-based): initial · 2^(n-1), capped at the maximum.
     /// </summary>
     public TimeSpan BackoffFor(int consecutiveFailures)

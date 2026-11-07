@@ -363,7 +363,30 @@ public sealed record HostMetricsDto(
     double? MemoryUsedMb,
     double? MemoryTotalMb,
     double? ComposeHz,
-    IReadOnlyList<GpuDto> Gpus);
+    IReadOnlyList<GpuDto> Gpus)
+{
+    /// <summary>Problems worth a line in the UI right now (GPU overload, a recent driver reset); empty when all is well.</summary>
+    public IReadOnlyList<HostWarningDto> Warnings { get; init; } = [];
+}
+
+/// <summary>
+/// One host warning. <see cref="Code"/> is one of <see cref="HostWarningCodes"/>; <see cref="Gpu"/> names the adapter
+/// (encoder and VRAM warnings), <see cref="Percent"/> is the load behind it, <see cref="At"/> when it happened (driver
+/// reset) and <see cref="Desks"/> how many desks were restarted.
+/// </summary>
+public sealed record HostWarningDto(string Code, string? Gpu = null, double? Percent = null, DateTimeOffset? At = null, int? Desks = null);
+
+public static class HostWarningCodes
+{
+    /// <summary>The video encoder (NVENC) of an adapter has been nearly fully busy for a few seconds.</summary>
+    public const string EncoderBusy = "encoderBusy";
+
+    /// <summary>An adapter's dedicated video memory has been nearly full for a few seconds.</summary>
+    public const string VramFull = "vramFull";
+
+    /// <summary>The graphics driver was reset recently; the desks' workers were restarted.</summary>
+    public const string GpuReset = "gpuReset";
+}
 
 /// <summary>Metrics of one desk inside <see cref="MetricsDto"/>.</summary>
 public sealed record DeskMetricsEntryDto(

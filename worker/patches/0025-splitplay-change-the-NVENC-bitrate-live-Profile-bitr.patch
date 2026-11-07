@@ -144,10 +144,10 @@ index d7338bb19d5c0f7498f2c76c5fa5eb099610667e..13d116ff4b77353b8bc6fd13a2935acf
        uint64_t last_encoded_frame_index = 0;
        bool rfi_needs_confirmation = false;
 diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
-index 5c06507e72a865519e0d26abc4c7fdcc51943af7..29c88aa16d64ab1402b479dbd0bbc9a9878ac2e8 100644
+index b7282f149831bb4bbbfaaea213fb153bdbdba2ff..f3618be4510d80b1924db89252aa77a8d0c61f56 100644
 --- a/src/splitplay/control_client.cpp
 +++ b/src/splitplay/control_client.cpp
-@@ -99,6 +99,7 @@ namespace splitplay::control {
+@@ -107,6 +107,7 @@ namespace splitplay::control {
        {"min_fps", 1, 1000, &splitplay::profile::set_min_fps, true},
        {"pacing_mbps", 1, 100000, &splitplay::profile::set_pacing_mbps, true},
        {"dpb_frames", 0, 16, &splitplay::profile::set_dpb_frames, false},

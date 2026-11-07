@@ -319,6 +319,17 @@ export interface HostMetrics {
   memoryTotalMb?: number
   composeHz?: number
   gpus: GpuInfo[]
+  /** Problems worth a line in the UI; missing from an older service. */
+  warnings?: HostWarning[]
+}
+
+/** One host warning: `gpuReset` (at, desks), `encoderBusy` and `vramFull` (gpu, percent). Unknown codes are ignored. */
+export interface HostWarning {
+  code: 'gpuReset' | 'encoderBusy' | 'vramFull' | string
+  gpu?: string | null
+  percent?: number | null
+  at?: string | null
+  desks?: number | null
 }
 
 /** Per-desk part of GET /metrics (assumed shape). */

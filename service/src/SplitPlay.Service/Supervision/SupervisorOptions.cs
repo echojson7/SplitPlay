@@ -84,6 +84,9 @@ public sealed class SupervisorOptions
     /// <summary>Failures in a row (without reaching Ready) after which a desk gives up and goes to Faulted.</summary>
     public int MaxConsecutiveFailures { get; set; } = 10;
 
+    /// <summary>After a graphics driver reset, how long the desks wait before their workers start again.</summary>
+    public int GpuResetDelayMs { get; set; } = 3_000;
+
     /// <summary>
     /// Time a provisioning attempt (account, password, host check, firewall) may take. Windows can answer account and
     /// Remote Desktop calls very slowly right after a reboot or an update; a call that never returns faults the desk.
@@ -140,6 +143,7 @@ public sealed class SupervisorOptions
         MaxFailuresInWindow = MaxFailuresInWindow,
         FailureWindow = TimeSpan.FromSeconds(FailureWindowSeconds),
         MaxConsecutiveFailures = MaxConsecutiveFailures,
+        GpuResetDelay = TimeSpan.FromMilliseconds(Math.Max(0, GpuResetDelayMs)),
     };
 
     /// <summary>The effective launcher kind.</summary>

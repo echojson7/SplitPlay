@@ -276,7 +276,9 @@ The host cannot take V-Sync latency out of the client, only recommend settings t
   "host": {
     "cpuPercent": 7.5, "memoryUsedMb": 9120, "memoryTotalMb": 32607, "composeHz": 250,
     "gpus": [{ "luid": "0x0000000000012345", "name": "NVIDIA GeForce RTX 4080", "utilizationPercent": 41,
-               "encoderPercent": 12, "vramUsedMb": 6230, "vramTotalMb": 16376 }]
+               "encoderPercent": 12, "vramUsedMb": 6230, "vramTotalMb": 16376 }],
+    "warnings": [{ "code": "gpuReset", "at": "2026-11-06T21:40:00Z", "desks": 2 },
+                 { "code": "encoderBusy", "gpu": "NVIDIA GeForce RTX 4080", "percent": 96 }]
   },
   "desks": [{ "id": "desk-1", "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4,
               "lossPct": 0, "rttMs": 4, "clients": 1, "captureFps": 238.4, "gpuPercent": 34, "encoderPercent": 12, "vramMb": 2900 }]
@@ -296,6 +298,12 @@ The first read after a pause returns `null` for them; they appear about a second
 - Per desk, the same figures over the processes of the desk's Windows session (its games and its worker, which
   owns the NVENC session): `gpuPercent`, `encoderPercent`, `vramMb` (dedicated memory). `null` while the desk has no
   session of its own (stopped, or a worker on the console).
+- `host.warnings`: problems worth a line in the UI, empty when all is well. `gpuReset`: the graphics driver was
+  reset (TDR) within the last 15 minutes, `at` when, `desks` how many desks had their workers restarted (their
+  sessions stay). `encoderBusy`: an adapter's video encoder has been at 90 % or more for 5 s (it clears below 80 %).
+  `vramFull`: its dedicated memory has been 95 % full or more for 5 s (clears below 90 %). Both carry `gpu` (the
+  adapter name) and `percent`, and need the GPU counters above. Clients ignore codes they do not know.
+
 The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}` with the same fields.
 
 ## Error codes

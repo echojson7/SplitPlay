@@ -32,6 +32,9 @@ public enum FakeChildBehavior
 
     /// <summary>Seat: becomes ready, reports <c>session_lost</c> and keeps running without ever restoring it (a hung reconnect).</summary>
     LoseSessionAfterReady,
+
+    /// <summary>Worker: becomes ready, then reports <c>gpu_reset</c> and exits with code 5 (its GPU device was lost).</summary>
+    GpuResetAfterReady,
 }
 
 /// <summary>Options for <see cref="FakeChild.RunAsync"/>.</summary>
@@ -223,6 +226,14 @@ public static class FakeChild
                     {
                     }
                 }, CancellationToken.None);
+            }
+
+            if (options.Behavior == FakeChildBehavior.GpuResetAfterReady)
+            {
+                await Task.Delay(options.HeartbeatInterval, cancellationToken).ConfigureAwait(false);
+                await SendEventAsync(connection, IpcProtocol.Events.GpuReset,
+                    """{"reason":"0x887A0007","where":"capture"}""", cancellationToken).ConfigureAwait(false);
+                return IpcProtocol.ExitCodes.GpuReset;
             }
 
             if (options.Behavior == FakeChildBehavior.ExitAfterReady)

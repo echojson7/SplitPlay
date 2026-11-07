@@ -1,0 +1,176 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 21:55:03 +0000
+Subject: [PATCH] splitplay: report a lost GPU device (gpu_reset) and exit
+
+When the graphics driver is reset (TDR), hangs or is updated, the
+worker's D3D11 device and the NVENC session built on it are dead for
+good. Desktop Duplication then reports DXGI_ERROR_ACCESS_LOST (upstream:
+capture_e::reinit, which rebuilds the display on a device that may still
+be the lost one, or never succeeds) or DXGI_ERROR_DEVICE_REMOVED and
+friends (capture_e::error, the stream ends while the process keeps
+running without a usable device).
+
+Whenever DXGI capture returns reinit or error, and when releasing a frame
+fails, the worker now asks its device for GetDeviceRemovedReason() (S_OK
+and cheap while the device is alive). If the device is gone, the worker
+logs the reason, sends event gpu_reset {reason, where} on the control
+pipe (docs/contracts/ipc.md) and exits with code 5. The service then
+restarts the worker of every desk in the same RDP session after a short
+pause, so games and windows in the desk survive and the client
+reconnects to a fresh device. Only the first report does anything;
+without a control pipe (standalone) it only logs and upstream's handling
+goes on.
+
+With a live device (a mode change, a desktop switch, a failed copy)
+upstream's behaviour is unchanged. Encoder failures are not checked
+here; the service also reacts to Windows' own record of a reset
+(System log, Display event 4101).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm2jYdxMoAEwPF6QxKH
+
+diff --git a/src/platform/windows/display_base.cpp b/src/platform/windows/display_base.cpp
+index d8a6947826c68e9dbcab146035b8ee9542cddb53..a4f89e857b19438423c4d095a235a0db53f6a00b 100644
+--- a/src/platform/windows/display_base.cpp
++++ b/src/platform/windows/display_base.cpp
+@@ -44,6 +44,7 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
+ #include "src/display_device.h"
+ #include "src/logging.h"
+ #include "src/platform/common.h"
++#include "src/splitplay/control_client.h"
+ #include "src/splitplay/live_stats.h"
+ #include "src/splitplay/profile.h"
+ #include "src/video.h"
+@@ -218,6 +219,13 @@ namespace platf::dxgi {
+   }
+ 
+   capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
++    // SplitPlay: cheap, and S_OK while the device is alive.
++    auto report_if_device_lost = [this]() {
++      if (const auto removed = device->GetDeviceRemovedReason(); FAILED(removed)) {
++        splitplay::control::report_gpu_lost(removed, "capture");
++      }
++    };
++
+     auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
+       // Use exactly the requested rate if the client sent an X100 value
+       if (client_frame_rate_strict.Numerator > 0) {
+@@ -378,8 +386,12 @@ namespace platf::dxgi {
+       }
+ 
+       switch (status) {
+-        case platf::capture_e::reinit:
+         case platf::capture_e::error:
++        case platf::capture_e::reinit:
++          // SplitPlay: a lost device (TDR, hang, driver update) never comes back, also when Desktop Duplication only
++          // says ACCESS_LOST (reinit); the worker reports it and is replaced.
++          report_if_device_lost();
++          return status;
+         case platf::capture_e::interrupted:
+           return status;
+         case platf::capture_e::timeout:
+@@ -399,6 +411,7 @@ namespace platf::dxgi {
+ 
+       status = release_snapshot();
+       if (status != platf::capture_e::ok) {
++        report_if_device_lost();
+         return status;
+       }
+     }
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index 6b5e359d5e3b69a4e0896661d3378c258d533ba2..88f0da06b53d1871be5af62d25b921458bb65a68 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -13,6 +13,7 @@
+ #include <chrono>
+ #include <condition_variable>
+ #include <cstdint>
++#include <cstdio>
+ #include <memory>
+ #include <mutex>
+ #include <optional>
+@@ -63,6 +64,13 @@ namespace splitplay::control {
+     constexpr auto hdr_probe_interval = 5s;  ///< Time between two HDR probes of the session's displays.
+     constexpr DWORD write_timeout_ms = 5000;
+     constexpr int exit_code_pipe_lost = 3;  ///< Process exit code when the service goes away.
++    constexpr int exit_code_gpu_lost = 5;  ///< Process exit code after `gpu_reset`: the GPU device was lost.
++
++    std::string hresult_text(long value) {
++      char buffer[16];
++      std::snprintf(buffer, sizeof(buffer), "0x%08lX", static_cast<unsigned long>(value));
++      return buffer;
++    }
+ 
+     std::wstring to_wide(const std::string &utf8) {
+       if (utf8.empty()) {
+@@ -314,6 +322,14 @@ namespace splitplay::control {
+         send({{"type", "event"}, {"name", name}, {"data", std::move(data)}});
+       }
+ 
++      /**
++       * @brief Report the lost GPU device (event `gpu_reset`) and exit with `exit_code_gpu_lost`.
++       */
++      void gpu_lost(long reason, const char *where) {
++        send_event("gpu_reset", {{"reason", hresult_text(reason)}, {"where", where}});
++        request_exit(exit_code_gpu_lost);
++      }
++
+       void shutdown() {
+         stopping = true;
+         if (stop_event) {
+@@ -705,6 +721,21 @@ namespace splitplay::control {
+     }
+   }
+ 
++  void report_gpu_lost(long reason, const char *where) {
++    static std::atomic_bool reported {false};
++    if (reported.exchange(true)) {
++      return;
++    }
++    BOOST_LOG(error) << "SplitPlay: the GPU device was lost in "sv << where << " ["sv << hresult_text(reason)
++                     << "]: the driver was reset or the GPU stopped responding"sv;
++    if (!client) {
++      BOOST_LOG(warning) << "SplitPlay: standalone, the worker keeps running without its GPU device"sv;
++      return;
++    }
++    BOOST_LOG(info) << "SplitPlay: exiting so that the service starts a new worker in this session"sv;
++    client->gpu_lost(reason, where);
++  }
++
+   void stop() {
+     client.reset();
+   }
+@@ -723,6 +754,9 @@ namespace splitplay::control {
+   void request_mode(int, int, int, std::chrono::milliseconds) {
+   }
+ 
++  void report_gpu_lost(long, const char *) {
++  }
++
+   void stop() {
+   }
+ #endif
+diff --git a/src/splitplay/control_client.h b/src/splitplay/control_client.h
+index 69cbb360773281f4a03e097dc84b2177441121cd..0b479c37d4a6831df740ff8e6cc573507442eecf 100644
+--- a/src/splitplay/control_client.h
++++ b/src/splitplay/control_client.h
+@@ -39,6 +39,18 @@ namespace splitplay::control {
+    */
+   void request_mode(int width, int height, int fps, std::chrono::milliseconds timeout);
+ 
++  /**
++   * @brief The worker's GPU device was lost (driver reset, hang or removal): send event `gpu_reset` and exit.
++   *
++   * A lost D3D device and its NVENC session never come back, so the worker ends with exit code 5 and the service
++   * starts a new one in the same session (docs/contracts/ipc.md). Only the first call does anything. Standalone (no
++   * control pipe) this only logs, and the stream ends as upstream ends it.
++   *
++   * @param reason The device's `GetDeviceRemovedReason()`, e.g. `DXGI_ERROR_DEVICE_RESET`.
++   * @param where What noticed it, e.g. `"capture"`.
++   */
++  void report_gpu_lost(long reason, const char *where);
++
+   /**
+    * @brief Stop the heartbeat and reader threads and close the pipe.
+    */

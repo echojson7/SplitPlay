@@ -8,6 +8,7 @@ import type { Desk, DeskConfig, HostUser } from '../api/types'
 import AddDeskWizard from '../components/AddDeskWizard.vue'
 import AppIcon from '../components/AppIcon.vue'
 import DeskCard from '../components/DeskCard.vue'
+import HostWarnings from '../components/HostWarnings.vue'
 import PairDialog from '../components/PairDialog.vue'
 import { errorText, useLive } from '../composables'
 import { moonlightAddress } from '../desk'
@@ -97,6 +98,7 @@ function onPaired(name: string): void {
       </RouterLink>
     </header>
 
+    <HostWarnings />
     <p v-if="!s.desksLoaded" class="muted">{{ t('common.loading') }}</p>
     <div v-else class="rows">
       <DeskCard

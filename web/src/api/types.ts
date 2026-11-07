@@ -24,6 +24,9 @@ export type Codec = (typeof CODECS)[number]
 export const GPU_PRIORITIES = ['normal', 'high', 'realtime'] as const
 export type GpuPriority = (typeof GPU_PRIORITIES)[number]
 
+export const CAPTURE_MODES = ['slot', 'arrival'] as const
+export type CaptureMode = (typeof CAPTURE_MODES)[number]
+
 /** Desk streaming profile (config.md `desks[].profile`). */
 export interface DeskProfile {
   fps: number
@@ -35,6 +38,8 @@ export interface DeskProfile {
   minFps?: number
   dpbFrames?: number
   pacingMbps?: number
+  /** When the worker takes a new frame: at the stream's frame slot (default) or as soon as DWM composes it. */
+  captureMode?: CaptureMode
   gpuPriority?: GpuPriority
 }
 
@@ -58,6 +63,11 @@ export interface DeskConfig {
    * SplitPlay created); a request that leaves it out keeps the current one.
    */
   hideFromLogon?: boolean
+  /**
+   * NVIDIA frame rate limit for the games seen in this desk: null or absent Auto (the Moonlight client's fps), 0 off,
+   * otherwise FPS. A desk update that leaves it out keeps the current value.
+   */
+  gameFpsLimit?: number | null
   /** Extra Sunshine settings passed to the worker verbatim. */
   workerSettings?: Record<string, string>
   /**
@@ -153,6 +163,8 @@ export interface DeskMetrics {
   /** Round-trip time to the Moonlight client, ms; null until one is measured (older services: absent). */
   rttMs?: number | null
   clients: number
+  /** Frames DWM composed per second in the desk session (the real composition rate); null without a stream. */
+  captureFps?: number | null
   /** The desk session's GPU load (busiest engine, as in Task Manager), percent; from the metrics push, null when not measured. */
   gpuPercent?: number | null
   /** The desk session's video encoder (NVENC) load, percent; null when not measured or the GPU has no encoder. */
@@ -180,6 +192,30 @@ export interface DeskStream {
   startedAt?: string | null
 }
 
+/** `desk.hdr.state`: whether the desk's display composes in HDR (see DeskHdr). */
+export type HdrState = 'enabled' | 'off' | 'unsupported' | 'unknown'
+
+/**
+ * HDR of the desk session's display, as the worker measures it. `enabled`: a Moonlight client that asks for HDR gets
+ * HDR; `off`: the display supports HDR but it is switched off in Windows; `unsupported`: SDR only.
+ */
+export interface DeskHdr {
+  state: HdrState | string
+  monitor?: string | null
+  /** The GPU that renders the session. */
+  adapter?: string | null
+  bitsPerColor?: number | null
+  maxNits?: number | null
+  updatedAt?: string
+}
+
+/** A Moonlight client that shows a PIN and waits for it (`desk.pinRequest`). */
+export interface DeskPinRequest {
+  /** Client IP address; null when unknown. */
+  address: string | null
+  since: string
+}
+
 /** Desk object as returned by GET /desks and GET /desks/{id}. */
 export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   basePort: number
@@ -194,6 +230,10 @@ export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   metrics: DeskMetrics
   /** The stream being served; null (or absent from older services) when nobody is connected. */
   stream?: DeskStream | null
+  /** The display's HDR state; null (or absent from older services) while no worker has reported it. */
+  hdr?: DeskHdr | null
+  /** A Moonlight client waiting for its PIN; null (or absent from older services) when none is. */
+  pinRequest?: DeskPinRequest | null
   lastError: string | null
 }
 
@@ -299,6 +339,52 @@ export interface HostSettings {
   logLevel: string
   /** Keep the PC from sleeping while a client streams (default true; older services leave it out). */
   keepAwake?: boolean
+  /** The service manages the NVIDIA driver settings (default true; older services leave it out). */
+  nvidiaProfiles?: boolean
+  /** Which processor cores desk processes may use (default `off`; older services leave it out). */
+  deskCores?: DeskCoresMode
+}
+
+export const DESK_CORES_MODES = ['off', 'auto'] as const
+export type DeskCoresMode = (typeof DESK_CORES_MODES)[number]
+
+/** How `auto` splits this CPU: `ccd`/`x3d` one L3 cache (CCD) per desk, `hybrid` the P-cores, `uniform` nothing. */
+export type CpuKind = 'uniform' | 'hybrid' | 'ccd' | 'x3d'
+
+/** The processors of one desk; null: every processor (not restricted). */
+export interface DeskCpu {
+  id: string
+  cpus: number[] | null
+}
+
+/** GET /host/cpu: the CPU and the processors each desk gets now (`desks`) and would get with `auto`. */
+export interface HostCpu {
+  name: string | null
+  cores: number
+  threads: number
+  kind: CpuKind
+  mode: DeskCoresMode
+  desks: DeskCpu[]
+  auto: DeskCpu[]
+}
+
+export const GAME_STATUSES = ['limited', 'owner', 'failed', 'pending', 'off', 'excluded', 'noDriver', 'disabled'] as const
+export type GameStatus = (typeof GAME_STATUSES)[number]
+
+/** GET /games: a game the service saw in a desk and its FPS limit. */
+export interface Game {
+  /** The executable's file name; the id in /games/{exe}. */
+  exe: string
+  path: string | null
+  /** Desks it was seen in. */
+  desks: string[]
+  /** The limit SplitPlay wants for it; null: none. */
+  limit: number | null
+  status: GameStatus
+  /** The owner turned the limit off for this game. */
+  excluded: boolean
+  firstSeen: string
+  lastSeen: string
 }
 
 /** Events pushed over GET /ws. */

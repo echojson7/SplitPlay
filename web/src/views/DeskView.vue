@@ -1,10 +1,10 @@
 <!-- SPDX-License-Identifier: MIT -->
-<!-- Desk page: status and Play / Stop, the stream right now, the Moonlight address, PIN pairing, devices, display and advanced settings. -->
+<!-- Desk page: status and Play / Stop, the stream right now, the Moonlight address, PIN pairing, devices, display, game FPS limits and advanced settings. -->
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { api, ApiError, deskToConfig } from '../api/client'
-import type { DeskConfig, PairedClient } from '../api/types'
+import type { DeskConfig, Game, PairedClient } from '../api/types'
 import AppIcon from '../components/AppIcon.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import ConnectPack from '../components/ConnectPack.vue'
@@ -26,6 +26,7 @@ import {
   RESOLUTION_PRESETS,
   resolutionKey,
   streamSummary,
+  hdrLabel,
 } from '../desk'
 import { fmtDateTime, fmtNumber, t } from '../i18n'
 import { store } from '../store'
@@ -48,6 +49,7 @@ const error = computed(() => (desk.value ? deskError(desk.value) : null))
 
 // ---- now: the connected device and live numbers (desk events and the 2 s metrics push)
 const stream = computed(() => (desk.value ? liveStream(desk.value) : null))
+const hdr = computed(() => (running.value ? hdrLabel(desk.value?.hdr) : null))
 const live = computed(() => {
   const m = desk.value?.metrics
   if (!m) return null
@@ -59,6 +61,7 @@ const live = computed(() => {
         ? t('live.encodeValue', { p50: fmtNumber(m.encodeMsP50, 1, 1), p99: fmtNumber(m.encodeMsP99 ?? 0, 1, 1) })
         : fmtMs(m.encodeMsP99 ?? 0),
     loss: m.lossPct !== undefined ? t('unit.percent', { value: fmtNumber(m.lossPct, 1) }) : t('common.none'),
+    compose: m.captureFps != null ? t('unit.hz', { value: fmtNumber(m.captureFps) }) : t('common.none'),
   }
 })
 
@@ -73,7 +76,7 @@ async function load(): Promise<void> {
     else toast(errorText(e), 'error')
     return
   }
-  await loadClients()
+  await Promise.all([loadClients(), loadGames()])
 }
 
 async function loadClients(): Promise<void> {
@@ -85,10 +88,16 @@ async function loadClients(): Promise<void> {
   }
 }
 
+// Games appear while the desk runs: looked up again every few seconds then.
+let gamesTimer: ReturnType<typeof setInterval> | undefined
 onMounted(() => {
   void load()
   if (s.addresses === null) void store.refreshAddresses()
+  gamesTimer = setInterval(() => {
+    if (running.value) void loadGames()
+  }, 10_000)
 })
+onUnmounted(() => clearInterval(gamesTimer))
 watch(() => props.id, load)
 watch(
   () => desk.value?.state,
@@ -208,6 +217,59 @@ function onFps(e: Event): void {
   void saveProfile({ fps: Number((e.target as HTMLSelectElement).value) })
 }
 
+// ---- games: the desk's FPS limit and the games seen in it
+const GAME_FPS_PRESETS = [30, 60, 90, 120, 144, 165, 240]
+const games = ref<Game[]>([])
+const gameBusy = ref(false)
+const deskGames = computed(() => games.value.filter((g) => g.desks.includes(props.id)))
+const gameLimitChoice = computed(() => {
+  const v = desk.value?.gameFpsLimit
+  return v === null || v === undefined ? 'auto' : String(v)
+})
+const gameFpsOptions = computed(() => {
+  const v = desk.value?.gameFpsLimit
+  return v && !GAME_FPS_PRESETS.includes(v) ? [...GAME_FPS_PRESETS, v].sort((a, b) => a - b) : GAME_FPS_PRESETS
+})
+
+async function loadGames(): Promise<void> {
+  try {
+    games.value = await api.listGames()
+  } catch {
+    // An older service without /games: the group stays empty.
+    games.value = []
+  }
+}
+
+function gameName(g: Game): string {
+  return g.exe.replace(/\.exe$/i, '')
+}
+
+function gameStatus(g: Game): string {
+  const fps = g.limit ?? 0
+  return t(`games.status.${g.status}`, { fps })
+}
+
+function onGameLimit(e: Event): void {
+  const value = (e.target as HTMLSelectElement).value
+  const config = deskToConfig(desk.value!)
+  config.gameFpsLimit = value === 'auto' ? null : Number(value)
+  void saveConfig(config).then((ok) => (ok ? loadGames() : undefined))
+}
+
+async function toggleGame(g: Game, e: Event): Promise<void> {
+  const input = e.target as HTMLInputElement
+  gameBusy.value = true
+  try {
+    await api.setGameExcluded(g.exe, !input.checked)
+    await loadGames()
+  } catch (err) {
+    input.checked = !g.excluded
+    toast(errorText(err), 'error')
+  } finally {
+    gameBusy.value = false
+  }
+}
+
 // ---- advanced and delete
 const settingsKey = ref(0)
 async function saveAdvanced(config: DeskConfig): Promise<void> {
@@ -310,7 +372,7 @@ async function remove(): Promise<void> {
           <div class="srow compact">
             <AppIcon name="monitor" :size="16" />
             <div class="text"><span class="title">{{ t('live.stream') }}</span></div>
-            <div class="ctl val" data-live-stream>{{ streamSummary(stream) }}</div>
+            <div class="ctl val" data-live-stream>{{ streamSummary(stream, desk.hdr) }}</div>
           </div>
           <div class="srow compact">
             <AppIcon name="activity" :size="16" />
@@ -332,11 +394,21 @@ async function remove(): Promise<void> {
             <div class="text"><span class="title">{{ t('live.loss') }}</span></div>
             <div class="ctl val" data-live-loss>{{ live?.loss }}</div>
           </div>
+          <div class="srow compact">
+            <span class="row-pad" />
+            <div class="text"><span class="title">{{ t('live.compose') }}</span></div>
+            <div class="ctl val" data-live-compose>{{ live?.compose }}</div>
+          </div>
         </template>
         <div v-if="gpu" class="srow compact">
           <AppIcon name="chip" :size="16" />
           <div class="text"><span class="title">{{ t('live.gpu') }}</span></div>
           <div class="ctl val" data-live-gpu>{{ gpu }}</div>
+        </div>
+        <div v-if="hdr" class="srow compact" data-live-hdr-row>
+          <AppIcon name="monitor" :size="16" />
+          <div class="text"><span class="title">{{ t('live.hdr') }}</span></div>
+          <div class="ctl val" data-live-hdr :title="desk.hdr?.adapter ?? undefined">{{ hdr }}</div>
         </div>
       </div>
 
@@ -460,6 +532,46 @@ async function remove(): Promise<void> {
             />
           </div>
         </details>
+      </div>
+
+      <h2 class="group-title">{{ t('games.title') }}</h2>
+      <div class="rows" data-games>
+        <div class="srow">
+          <AppIcon name="gamepad" :size="16" />
+          <label class="text" for="q-game-fps">
+            <span class="title">{{ t('games.limit') }}</span>
+            <span class="desc">{{ t('games.hint') }}</span>
+          </label>
+          <div class="ctl">
+            <select id="q-game-fps" name="gameFpsLimit" :value="gameLimitChoice" :disabled="busy" @change="onGameLimit">
+              <option value="auto">{{ t('games.auto') }}</option>
+              <option value="0">{{ t('games.off') }}</option>
+              <option v-for="f in gameFpsOptions" :key="f" :value="String(f)">{{ f }} FPS</option>
+            </select>
+          </div>
+        </div>
+        <div v-if="deskGames.length === 0" class="srow compact" data-games-none>
+          <span class="row-pad" />
+          <span class="text muted">{{ t('games.none') }}</span>
+        </div>
+        <div v-for="g in deskGames" :key="g.exe" class="srow compact" :data-game="g.exe">
+          <span class="row-pad" />
+          <div class="text" :title="g.path ?? undefined">
+            <span class="title">{{ gameName(g) }}</span>
+            <span class="desc" data-game-status>{{ gameStatus(g) }}</span>
+          </div>
+          <div class="ctl">
+            <span class="switch">
+              <input
+                type="checkbox"
+                :checked="!g.excluded"
+                :aria-label="t('games.toggle', { name: gameName(g) })"
+                :disabled="gameBusy"
+                @change="toggleGame(g, $event)"
+              />
+            </span>
+          </div>
+        </div>
       </div>
 
       <div class="rows danger">

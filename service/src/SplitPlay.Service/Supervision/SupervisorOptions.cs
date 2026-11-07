@@ -129,6 +129,9 @@ public sealed class SupervisorOptions
     /// <summary>How often the desk session's BluetoothUserService instance is checked (and stopped again).</summary>
     public int BluetoothPollMs { get; set; } = 10_000;
 
+    /// <summary>How often a desk session's new processes are put on the desk's processors (<c>host.deskCores</c>).</summary>
+    public int CpuSweepMs { get; set; } = 2_000;
+
     public TimeSpan HeartbeatInterval => TimeSpan.FromMilliseconds(HeartbeatIntervalMs);
 
     public TimeSpan HeartbeatTimeout => TimeSpan.FromMilliseconds((long)HeartbeatIntervalMs * MissedHeartbeats);

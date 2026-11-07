@@ -55,6 +55,9 @@ public static class IpcProtocol
         /// <summary>Worker: a Moonlight client asked for a mode, <c>data: {width, height, fps}</c>; forwarded to the seat as <c>set_mode</c>.</summary>
         public const string ModeRequested = "mode_requested";
 
+        /// <summary>Worker: the HDR state of the session's displays changed (sent once at start too), <c>data</c> = <see cref="IpcDisplayHdr"/>.</summary>
+        public const string DisplayHdr = "display_hdr";
+
         /// <summary>Seat: the RDP connection dropped and the seat is reconnecting, <c>data: {reason}</c>.</summary>
         public const string SessionLost = "session_lost";
 
@@ -136,6 +139,12 @@ public sealed record HeartbeatMessage : IpcMessage
     /// report them). Kept as raw JSON and parsed leniently with <see cref="IpcStreamSession.ListFromJson"/>.
     /// </summary>
     public JsonElement? Sessions { get; init; }
+
+    /// <summary>
+    /// Worker: the Moonlight client waiting for its PIN, <c>{address, since}</c>, or <c>null</c> (patch 0021; absent from
+    /// older workers). Kept as raw JSON and parsed leniently with <see cref="IpcPinRequest.FromJson"/>.
+    /// </summary>
+    public JsonElement? Pairing { get; init; }
 }
 
 public sealed record LogMessage : IpcMessage
@@ -292,6 +301,9 @@ public sealed record IpcProfile
     public int? DpbFrames { get; init; }
 
     public int? PacingMbps { get; init; }
+
+    /// <summary><c>capture_mode</c>: <c>slot</c> or <c>arrival</c>.</summary>
+    public string? CaptureMode { get; init; }
 
     public string? GpuPriority { get; init; }
 

@@ -6,6 +6,7 @@ import { api } from './api/client'
 import AppIcon from './components/AppIcon.vue'
 import BrandMark from './components/BrandMark.vue'
 import { trayHost } from './host'
+import PinRequests from './components/PinRequests.vue'
 import ServicesFlyout from './components/ServicesFlyout.vue'
 import ToastHost from './components/ToastHost.vue'
 import { t } from './i18n'
@@ -76,6 +77,7 @@ async function logout(): Promise<void> {
         <span class="spacer">{{ t('app.noPassword') }}</span>
         <RouterLink to="/settings" class="btn">{{ t('app.setPassword') }}</RouterLink>
       </div>
+      <PinRequests v-if="!bare && s.session?.authenticated" :desks="s.desks" live />
       <RouterView />
     </main>
     <ToastHost />

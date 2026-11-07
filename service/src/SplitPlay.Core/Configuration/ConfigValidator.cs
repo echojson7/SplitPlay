@@ -53,7 +53,7 @@ public static partial class ConfigValidator
         // Encoder and codec
         "encoder", "hevc_mode", "av1_mode", "qp", "min_threads", "sw_preset", "sw_tune",
         "nvenc_preset", "nvenc_vbv_increase", "nvenc_spatial_aq", "nvenc_twopass", "nvenc_h264_cavlc", "nvenc_split_encode",
-        "nvenc_realtime_hags", "nvenc_latency_over_power",
+        "nvenc_realtime_hags",
         "qsv_preset", "qsv_coder", "qsv_slow_hevc",
         "amd_quality", "amd_rc", "amd_coder", "amd_usage", "amd_preanalysis", "amd_vbaq", "amd_enforce_hrd",
 
@@ -229,14 +229,19 @@ public static partial class ConfigValidator
             errors.Add(new("host.basePortStride", $"must be at least {BasePortAllocator.PortSpan} so that desks do not overlap"));
         }
 
-        if (host.ComposeIntervalMs is < 1 or > 100)
+        if (host.ComposeIntervalMs is < 0 or > 100)
         {
-            errors.Add(new("host.composeIntervalMs", "must be between 1 and 100"));
+            errors.Add(new("host.composeIntervalMs", "must be 0 (auto) or between 1 and 100"));
         }
 
         if (host.LogLevel is null || !LogLevels.Contains(host.LogLevel))
         {
             errors.Add(new("host.logLevel", $"must be one of {string.Join(", ", LogLevels)}"));
+        }
+
+        if (host.DeskCores is null || !Host.DeskCoresMode.All.Contains(host.DeskCores))
+        {
+            errors.Add(new("host.deskCores", $"must be one of {string.Join(", ", Host.DeskCoresMode.All)}"));
         }
     }
 
@@ -273,6 +278,12 @@ public static partial class ConfigValidator
         if (desk.Gpu is null || (desk.Gpu != "auto" && !LuidRegex().IsMatch(desk.Gpu)))
         {
             errors.Add(new($"{path}.gpu", "must be \"auto\" or an adapter LUID \"0x…\""));
+        }
+
+        if (desk.GameFpsLimit is int limit && limit != Games.GameLimits.Off && limit is < Games.GameLimits.MinFps or > Games.GameLimits.MaxFps)
+        {
+            errors.Add(new($"{path}.gameFpsLimit",
+                $"must be null (auto), 0 (off) or between {Games.GameLimits.MinFps} and {Games.GameLimits.MaxFps}"));
         }
 
         if (desk.WorkerSettings is not null)
@@ -363,6 +374,11 @@ public static partial class ConfigValidator
         if (p.PacingMbps is < 1 or > 100_000)
         {
             errors.Add(new($"{path}.pacingMbps", "must be between 1 and 100000"));
+        }
+
+        if (p.CaptureMode is not null && !ProfileConfig.CaptureModes.Contains(p.CaptureMode))
+        {
+            errors.Add(new($"{path}.captureMode", "must be one of slot, arrival"));
         }
 
         if (p.GpuPriority is not null && !GpuPriorities.Contains(p.GpuPriority))

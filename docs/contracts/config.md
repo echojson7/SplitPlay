@@ -12,9 +12,11 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
     "lanAccess": false,
     "basePortStart": 48089,
     "basePortStride": 100,
-    "composeIntervalMs": 4,
+    "composeIntervalMs": 0,
     "logLevel": "info",
-    "keepAwake": true
+    "keepAwake": true,
+    "nvidiaProfiles": true,
+    "deskCores": "off"
   },
   "desks": [
     {
@@ -27,6 +29,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
       "gpu": "auto",
       "disableBluetoothUserService": true,
       "steamIsolation": true,
+      "gameFpsLimit": 60,
       "workerSettings": { "min_log_level": "warning" },
       "profile": {
         "fps": 120,
@@ -38,6 +41,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
         "minFps": 15,
         "dpbFrames": 16,
         "pacingMbps": 800,
+        "captureMode": "arrival",
         "gpuPriority": "high"
       }
     }
@@ -62,6 +66,25 @@ Rules:
   recorded in `desks\<id>\logon-hidden.json` and comes back when the setting goes off, the user changes, the desk is
   deleted or SplitPlay is uninstalled (a value someone changed since is left alone). A request that leaves it out
   keeps the current value unless the user changes.
+- `gameFpsLimit` (optional; a request that leaves it out keeps the current value): the NVIDIA driver's frame rate
+  limit ("Max Frame Rate", `FRL_FPS`) for the games the service finds in this desk. Left out or `null`: Auto, the
+  frame rate the desk's last Moonlight client asked for (the desk's `profile.fps` before any client connected); `0`:
+  off; `10`–`1000`: that many FPS. Changes apply while the desk runs. How it works:
+  - While a desk runs with the limit on, the service reads the GPU load per process every 5 s (the counters behind
+    `/metrics`). A process in the desk's session that renders at 10 % or more in 3 reads within a minute is a game unless it lives in
+    `%WINDIR%`, is SplitPlay's, or is a known non-game (launchers, browsers, chat, overlays, players). Games are kept
+    in `games.json` in the data folder, with the desks they ran in and each desk's last client frame rate.
+  - Each game gets the largest limit of its desks, in the driver profile the driver applies to its full path (often
+    one of NVIDIA's game profiles), else in a profile "SplitPlay game <exe>" that SplitPlay creates. A lookup that
+    fails keeps the game in the profile it had; failed games are tried again after a minute. The previous
+    value is recorded in `nvidia-profiles.json` (see `host.nvidiaProfiles`) and comes back when the limit goes;
+    NVIDIA's predefined values are restored by deleting the setting. A limit the owner set for that game in NVIDIA
+    Control Panel (any value but 0) is left alone, and so is a global Max Frame Rate the owner set (SplitPlay then
+    sets nothing per game). A "SplitPlay game" profile that holds the owner's own limit is left to the owner.
+  - The driver reads its profiles when a game starts: a limit applies from the game's next start, and it holds for
+    that executable on the whole PC, the console included. Limits stay while SplitPlay is installed and go with
+    `host.nvidiaProfiles=false` or on uninstall. `GET /games` (web-api.md) lists the games; one can be excluded.
+    In the web UI: desk page → Games.
 - `steamIsolation` (default `true`; a request that leaves it out keeps the current value) lets the desk user's Steam
   run next to the console user's Steam (Steam isolation research, 2026-10-28). Only the desk user's hive is changed, never the
   console user's and never machine-wide: `HKU\<sid>\Environment\steam_master_ipc_name_override` = `SplitPlay_<id>`
@@ -82,7 +105,7 @@ Rules:
   the commit in `worker/upstream.lock`), because the worker runs as SYSTEM:
   - encoder and codec: `encoder`, `hevc_mode`, `av1_mode`, `qp`, `min_threads`, `sw_preset`, `sw_tune`, `nvenc_preset`,
     `nvenc_vbv_increase`, `nvenc_spatial_aq`, `nvenc_twopass`, `nvenc_h264_cavlc`, `nvenc_split_encode`,
-    `nvenc_realtime_hags`, `nvenc_latency_over_power`, `qsv_preset`, `qsv_coder`, `qsv_slow_hevc`, `amd_quality`,
+    `nvenc_realtime_hags`, `qsv_preset`, `qsv_coder`, `qsv_slow_hevc`, `amd_quality`,
     `amd_rc`, `amd_coder`, `amd_usage`, `amd_preanalysis`, `amd_vbaq`, `amd_enforce_hrd`;
   - rate control and frame rate: `max_bitrate`, `minimum_fps_target`, `fec_percentage`;
   - audio: `stream_audio`;
@@ -105,7 +128,9 @@ Rules:
   executable, private and domain profiles) and creates them again when the desk starts, or a worker restarts, and they
   are missing, disabled or different. Before a worker starts the ports must be free (see `lastError` in web-api.md).
 - `gpu`: `"auto"` or an adapter LUID string `"0x…"`.
-- `profile` may also carry `gpuLuid` and `cpuSet` (array of logical CPU indices), passed to the worker as in ipc.md.
+- `profile` may also carry `gpuLuid` and `cpuSet` (array of logical processor numbers 0–2047, `group * 64 + number`;
+  passed to the worker as in ipc.md). A `cpuSet` keeps the desk's processes on those processors whatever
+  `host.deskCores` says; numbers this PC does not have are dropped, and a set with none left counts as not set.
 - Desk port ranges may not overlap each other or contain `host.webPort`; `basePortStride` must be at least 27.
 - `profile.fps` 10–500, `codec` one of `h264`, `hevc`, `av1`; `gpuPriority` `normal`, `high`, `realtime`.
 - Stream settings the worker applies (ipc.md, *Profile object*); a running desk takes a change at once except
@@ -117,9 +142,37 @@ Rules:
   about 200 MB per desk at 4K with 16, so it is opt-in and not in the web UI); `pacingMbps` 1–100000, default 800 (Sunshine's fixed value; lower it when a
   Wi-Fi client loses frames on large frames, raise it on 2.5 GbE and faster). In the web UI: Дополнительно → FEC,
   Минимальный FPS, Скорость отправки.
-- `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz).
+- `profile.captureMode` (live): `slot` (default, Sunshine's loop: the newest frame at the stream's next frame slot,
+  half a stream interval later on average) or `arrival` (each frame as soon as DWM composes it, at most `fps` on
+  average; worker/README.md, *Capture on arrival*). The default stays `slot` until the lab measures `arrival`. In the
+  web UI: Дополнительно → Захват кадра.
+- `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz), 1–100. `0`
+  (default, «Частота композиции: Авто»): the service composes at least twice per frame of the fastest desk and never
+  slower than 250 Hz: 4 ms up to 125 fps, 3 ms for 126–166 fps (144, 165), 2 ms from 167 fps (240). The fastest desk is the highest
+  `profile.fps` or the highest frame rate a Moonlight client asked for since the service started. DWM reads the value
+  when a session logs on, so a change applies to desk sessions that log on afterwards. `GET /metrics` reports the
+  resolved rate as `host.composeHz`; each desk's measured rate is `captureFps`.
 - `host.keepAwake` (default `true`; left out = `true`): while a Moonlight client streams from any desk the service holds
   a system-required power request (`powercfg /requests` lists it), so Windows does not sleep on its own. Sleeping by
   hand still works: before sleep every worker is shut down and its desk waits (state `Recovering`, not a failure, the
   seat and session are kept); after resume each paused desk gets a new worker (NVENC and capture are recreated).
   In the web UI: Settings → Power.
+- `host.nvidiaProfiles` (default `true`; left out = `true`): the service manages the NVIDIA driver settings through
+  NvAPI (the workers leave them alone since worker patch 0020): the application profile "SplitPlay worker" with
+  "prefer maximum performance" for `splitplay-worker.exe` (kept while SplitPlay is installed), and, while the service
+  runs, the global "Vulkan/OpenGL present method: prefer layered on DXGI swapchain". Before its first change the
+  service records the previous value in `nvidia-profiles.json` in the data folder; it gives the global value back when it
+  stops and everything on uninstall, unless the owner changed the value since. `false` gives everything back at once
+  and leaves the driver alone. Replaces the per-desk `nvenc_latency_over_power`, which is no longer accepted (one
+  shared driver database cannot hold a value per desk).
+- `host.deskCores` (default `"off"`; left out = `"off"`): which processor cores the desk user's processes (Explorer,
+  Steam, games and everything they start) prefer. `"off"`: wherever Windows puts them. `"auto"`: on a CPU with
+  several L3 caches (Ryzen with two or more CCDs) the desks take the caches in turn in config order (stopped desks
+  too, so a desk keeps its CCD), the largest (3D V-Cache) first, round-robin when there are more desks than caches; on
+  an Intel hybrid CPU with one L3 every desk gets the P-cores; on any other CPU nothing changes. The console and
+  SYSTEM processes (DWM, worker, seat) are never restricted. The service gives the desk user's processes in the
+  session default CPU Sets (`SetProcessDefaultCpuSets`): soft, so a game that pins its own threads still can, and
+  nothing is left behind when lifted. CPU Sets are not inherited: the service looks for new processes every 2 s
+  (`Supervisor:CpuSweepMs`). A change applies to running desks within one sweep; back to `"off"` clears the sets.
+  Protected processes cannot be opened and are left alone. `GET /host/cpu` (web-api.md) shows the CPU and each
+  desk's processors. In the web UI: Settings → Processor → Cores for desks.

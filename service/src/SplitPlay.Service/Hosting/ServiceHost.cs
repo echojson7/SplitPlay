@@ -5,6 +5,8 @@ using Microsoft.Extensions.Logging.Console;
 using Microsoft.Extensions.Options;
 using SplitPlay.Core;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Games;
+using SplitPlay.Core.Nvidia;
 using SplitPlay.Service.Api;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Logging;
@@ -88,6 +90,13 @@ public static class ServiceHost
                 "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsDeskPlatform>(sp),
                 var other => throw new InvalidOperationException($"unsupported Supervisor:Platform '{other}' (expected windows or fake)"),
             });
+        builder.Services.AddSingleton<FakeCpuControl>();
+        builder.Services.AddSingleton<ICpuControl>(sp =>
+            sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch
+            {
+                "windows" when OperatingSystem.IsWindows() => ActivatorUtilities.CreateInstance<WindowsCpuControl>(sp),
+                _ => sp.GetRequiredService<FakeCpuControl>(),
+            });
         builder.Services.AddSingleton<FakeServiceControl>();
         builder.Services.AddSingleton<IServiceControl>(sp =>
             sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform switch
@@ -99,6 +108,18 @@ public static class ServiceHost
         // Before the supervisor so that TermService is on its way up when autostart desks begin.
         builder.Services.AddSingleton<RequiredServicesStarter>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<RequiredServicesStarter>());
+        builder.Services.AddSingleton<FakeDrs>();
+        builder.Services.AddSingleton<IDrsProvider>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? new NvApiDrs()
+                : sp.GetRequiredService<FakeDrs>());
+        builder.Services.AddSingleton(sp => new GameCatalog(GameCatalog.FileIn(sp.GetRequiredService<DataPaths>().Root)));
+        builder.Services.AddSingleton(sp => new NvidiaDriverSettings(sp.GetRequiredService<ConfigService>(), sp.GetRequiredService<DataPaths>(),
+            sp.GetRequiredService<IDrsProvider>(), sp.GetRequiredService<ILogger<NvidiaDriverSettings>>(),
+            sp.GetRequiredService<IDrsProvider>() is FakeDrs ? null : NvidiaProfiles.DefaultLegacyUndoFile(),
+            sp.GetRequiredService<GameCatalog>()));
+        // Before the supervisor, so that it stops after every worker (the global value is given back last).
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<NvidiaDriverSettings>());
         builder.Services.AddSingleton<DeskSupervisor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<DeskSupervisor>());
         builder.Services.AddSingleton<FakePowerRequest>();
@@ -139,6 +160,13 @@ public static class ServiceHost
                 : sp.GetRequiredService<FakeGpuResetSource>());
         builder.Services.AddSingleton<GpuUsageMonitor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<GpuUsageMonitor>());
+        builder.Services.AddSingleton<FakeProcessImages>();
+        builder.Services.AddSingleton<IProcessImages>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? new WindowsProcessImages()
+                : sp.GetRequiredService<FakeProcessImages>());
+        builder.Services.AddSingleton<GameWatcher>();
+        builder.Services.AddHostedService(sp => sp.GetRequiredService<GameWatcher>());
         builder.Services.AddSingleton<FakeHostNetworkStatus>();
         builder.Services.AddSingleton<IHostNetworkStatus>(sp =>
             OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"

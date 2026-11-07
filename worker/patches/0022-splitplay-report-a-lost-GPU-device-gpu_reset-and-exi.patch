@@ -31,18 +31,18 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
 Claude-Session: https://claude.ai/code/session_01J21Rm2jYdxMoAEwPF6QxKH
 
 diff --git a/src/platform/windows/display_base.cpp b/src/platform/windows/display_base.cpp
-index b28fbbc5c0f81a8bc70c2ba062747972302619ce..c5caa42554d31ee1c53c94df225bb989e984e19d 100644
+index d8a6947826c68e9dbcab146035b8ee9542cddb53..a4f89e857b19438423c4d095a235a0db53f6a00b 100644
 --- a/src/platform/windows/display_base.cpp
 +++ b/src/platform/windows/display_base.cpp
-@@ -43,6 +43,7 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
+@@ -44,6 +44,7 @@ typedef enum _D3DKMT_GPU_PREFERENCE_QUERY_STATE : DWORD {
  #include "src/display_device.h"
  #include "src/logging.h"
  #include "src/platform/common.h"
 +#include "src/splitplay/control_client.h"
+ #include "src/splitplay/live_stats.h"
+ #include "src/splitplay/profile.h"
  #include "src/video.h"
- 
- namespace platf {
-@@ -210,6 +211,13 @@ namespace platf::dxgi {
+@@ -218,6 +219,13 @@ namespace platf::dxgi {
    }
  
    capture_e display_base_t::capture(const push_captured_image_cb_t &push_captured_image_cb, const pull_free_image_cb_t &pull_free_image_cb, bool *cursor) {
@@ -56,7 +56,7 @@ index b28fbbc5c0f81a8bc70c2ba062747972302619ce..c5caa42554d31ee1c53c94df225bb989
      auto adjust_client_frame_rate = [&]() -> DXGI_RATIONAL {
        // Use exactly the requested rate if the client sent an X100 value
        if (client_frame_rate_strict.Numerator > 0) {
-@@ -326,8 +334,12 @@ namespace platf::dxgi {
+@@ -378,8 +386,12 @@ namespace platf::dxgi {
        }
  
        switch (status) {
@@ -70,7 +70,7 @@ index b28fbbc5c0f81a8bc70c2ba062747972302619ce..c5caa42554d31ee1c53c94df225bb989
          case platf::capture_e::interrupted:
            return status;
          case platf::capture_e::timeout:
-@@ -347,6 +359,7 @@ namespace platf::dxgi {
+@@ -399,6 +411,7 @@ namespace platf::dxgi {
  
        status = release_snapshot();
        if (status != platf::capture_e::ok) {
@@ -79,7 +79,7 @@ index b28fbbc5c0f81a8bc70c2ba062747972302619ce..c5caa42554d31ee1c53c94df225bb989
        }
      }
 diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
-index e818d8dad7a0cc703f9d640ca221e932d51ccea5..a49dc10fd56da95482690bfe6b4325b8bb589bb1 100644
+index 6b5e359d5e3b69a4e0896661d3378c258d533ba2..88f0da06b53d1871be5af62d25b921458bb65a68 100644
 --- a/src/splitplay/control_client.cpp
 +++ b/src/splitplay/control_client.cpp
 @@ -13,6 +13,7 @@
@@ -90,8 +90,8 @@ index e818d8dad7a0cc703f9d640ca221e932d51ccea5..a49dc10fd56da95482690bfe6b4325b8
  #include <memory>
  #include <mutex>
  #include <optional>
-@@ -60,6 +61,13 @@ namespace splitplay::control {
-     constexpr auto ready_port_timeout = 10s;
+@@ -63,6 +64,13 @@ namespace splitplay::control {
+     constexpr auto hdr_probe_interval = 5s;  ///< Time between two HDR probes of the session's displays.
      constexpr DWORD write_timeout_ms = 5000;
      constexpr int exit_code_pipe_lost = 3;  ///< Process exit code when the service goes away.
 +    constexpr int exit_code_gpu_lost = 5;  ///< Process exit code after `gpu_reset`: the GPU device was lost.
@@ -104,7 +104,7 @@ index e818d8dad7a0cc703f9d640ca221e932d51ccea5..a49dc10fd56da95482690bfe6b4325b8
  
      std::wstring to_wide(const std::string &utf8) {
        if (utf8.empty()) {
-@@ -282,6 +290,14 @@ namespace splitplay::control {
+@@ -314,6 +322,14 @@ namespace splitplay::control {
          send({{"type", "event"}, {"name", name}, {"data", std::move(data)}});
        }
  
@@ -119,7 +119,7 @@ index e818d8dad7a0cc703f9d640ca221e932d51ccea5..a49dc10fd56da95482690bfe6b4325b8
        void shutdown() {
          stopping = true;
          if (stop_event) {
-@@ -630,6 +646,21 @@ namespace splitplay::control {
+@@ -705,6 +721,21 @@ namespace splitplay::control {
      }
    }
  
@@ -141,7 +141,7 @@ index e818d8dad7a0cc703f9d640ca221e932d51ccea5..a49dc10fd56da95482690bfe6b4325b8
    void stop() {
      client.reset();
    }
-@@ -648,6 +679,9 @@ namespace splitplay::control {
+@@ -723,6 +754,9 @@ namespace splitplay::control {
    void request_mode(int, int, int, std::chrono::milliseconds) {
    }
  

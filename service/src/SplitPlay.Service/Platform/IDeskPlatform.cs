@@ -101,8 +101,11 @@ public interface IDeskPlatform
     /// <summary>Stops the <c>BluetoothUserService_*</c> instance running in <paramref name="sessionId"/>; returns what was stopped.</summary>
     IReadOnlyList<string> StopBluetoothUserService(int sessionId);
 
-    /// <summary>Writes a changed <c>host.composeIntervalMs</c> to <c>DWMFRAMEINTERVAL</c> (prepared hosts only).</summary>
-    void ApplyComposeInterval(int composeIntervalMs);
+    /// <summary>
+    /// Writes the composition interval to <c>DWMFRAMEINTERVAL</c> (prepared hosts only). False when nothing was written
+    /// because the host is not prepared.
+    /// </summary>
+    bool ApplyComposeInterval(int composeIntervalMs);
 
     /// <summary>The active console session id, or null if there is none.</summary>
     int? ConsoleSessionId();

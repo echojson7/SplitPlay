@@ -359,7 +359,11 @@ public sealed class FakeDeskPlatform : IDeskPlatform
         return [];
     }
 
-    public void ApplyComposeInterval(int composeIntervalMs) => _actions.Enqueue($"compose {composeIntervalMs}");
+    public bool ApplyComposeInterval(int composeIntervalMs)
+    {
+        _actions.Enqueue($"compose {composeIntervalMs}");
+        return true;
+    }
 
     public int? ConsoleSessionId() => ConsoleSession;
 

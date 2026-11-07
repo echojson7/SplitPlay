@@ -64,6 +64,12 @@ public sealed class DeskMetricsDto
 
     public double Clients { get; set; }
 
+    /// <summary>
+    /// Frames DWM composed per second in the desk session, as Desktop Duplication reports them: the real composition
+    /// rate (at most 1000 / <c>DWMFRAMEINTERVAL</c>, less when the game renders slower). Null without a stream.
+    /// </summary>
+    public double? CaptureFps { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
 }
@@ -100,6 +106,46 @@ public sealed record DeskStreamDto
 
     public DateTimeOffset? StartedAt { get; init; }
 }
+
+/// <summary>
+/// The HDR state of a desk session's display (<c>desk.hdr</c>), from the worker's <c>display_hdr</c> probe.
+/// <see cref="State"/> is <c>enabled</c> (Windows composes the display in HDR10, so a Moonlight client that asks for HDR
+/// gets HDR), <c>off</c> (the display supports HDR but it is switched off), <c>unsupported</c> or <c>unknown</c>; see
+/// <see cref="DeskHdrStates"/>. The other fields describe the display that decides the state (one in HDR, else one that
+/// supports it, else the first); null when not reported.
+/// </summary>
+public sealed record DeskHdrDto
+{
+    public string State { get; init; } = DeskHdrStates.Unknown;
+
+    /// <summary>The display's name as Windows shows it (an RDP session's display usually has none).</summary>
+    public string? Monitor { get; init; }
+
+    /// <summary>The GPU that renders the session.</summary>
+    public string? Adapter { get; init; }
+
+    public int? BitsPerColor { get; init; }
+
+    /// <summary>The display's peak luminance as DXGI reports it, nits.</summary>
+    public double? MaxNits { get; init; }
+
+    /// <summary>When the worker last reported a change.</summary>
+    public DateTimeOffset UpdatedAt { get; init; }
+}
+
+/// <summary>Values of <see cref="DeskHdrDto.State"/>.</summary>
+public static class DeskHdrStates
+{
+    public const string Enabled = "enabled";
+    public const string Off = "off";
+    public const string Unsupported = "unsupported";
+    public const string Unknown = "unknown";
+}
+
+/// <summary><c>desk.pinRequest</c>: a Moonlight client that shows a PIN and waits for it to be typed in.</summary>
+/// <param name="Address">Client IP address, null when unknown.</param>
+/// <param name="Since">When the client started pairing.</param>
+public sealed record DeskPinRequestDto(string? Address, DateTimeOffset Since);
 
 /// <summary>Desk object returned by the desk endpoints.</summary>
 public sealed class DeskDto
@@ -140,6 +186,9 @@ public sealed class DeskDto
     /// <summary>See <see cref="DeskConfig.SteamIsolation"/>; always set in responses.</summary>
     public bool SteamIsolation { get; set; } = true;
 
+    /// <summary>See <see cref="DeskConfig.GameFpsLimit"/>: null Auto, 0 off.</summary>
+    public int? GameFpsLimit { get; set; }
+
     /// <summary>See <see cref="DeskConfig.HideFromLogon"/>; the effective value, always set in responses.</summary>
     public bool HideFromLogon { get; set; }
 
@@ -150,6 +199,12 @@ public sealed class DeskDto
 
     /// <summary>The stream the desk is serving, null when no Moonlight client is connected (the earliest one if several are).</summary>
     public DeskStreamDto? Stream { get; set; }
+
+    /// <summary>The HDR state of the desk session's display; null while no worker has reported it.</summary>
+    public DeskHdrDto? Hdr { get; set; }
+
+    /// <summary>A Moonlight client waiting for its PIN on this desk, null when none is (docs/contracts/web-api.md).</summary>
+    public DeskPinRequestDto? PinRequest { get; set; }
 
     public string? LastError { get; set; }
 }
@@ -166,6 +221,46 @@ public sealed record HostUserDto(string Name, string? FullName, bool IsAdmin, bo
 /// responder on it (the firewall rule "mDNS (UDP-In)"). Null: unknown.
 /// </summary>
 public sealed record HostNetworkDto(IReadOnlyList<string> Addresses, string? Profile = null, bool? MdnsAllowed = null);
+
+/// <summary>
+/// <c>GET /host/cpu</c>: the CPU, how <c>host.deskCores</c> splits it (<see cref="Kind"/> is one of
+/// <see cref="Host.CpuKind"/>) and the processors each desk gets now. <see cref="Auto"/> is what <c>auto</c> would give
+/// each desk, so that the settings page can say what switching it on does.
+/// </summary>
+public sealed record HostCpuDto(
+    string? Name,
+    int Cores,
+    int Threads,
+    string Kind,
+    string Mode,
+    IReadOnlyList<CpuCacheGroupDto> Caches,
+    IReadOnlyList<DeskCpuDto> Desks,
+    IReadOnlyList<DeskCpuDto> Auto);
+
+/// <summary>
+/// One entry of <c>GET /games</c>: a game the service saw in a desk and what its FPS limit is. <see cref="Status"/>:
+/// <c>limited</c> (the driver holds <see cref="Limit"/>), <c>owner</c> (a limit set in NVIDIA Control Panel is left
+/// alone), <c>failed</c>, <c>pending</c> (not applied yet), <c>off</c> (its desks have the limit off), <c>excluded</c>
+/// (turned off for this game), <c>noDriver</c> (no NVIDIA driver), <c>disabled</c> (<c>host.nvidiaProfiles</c> off).
+/// </summary>
+/// <param name="Exe">The executable's file name, the game's id in <c>/games/{exe}</c>.</param>
+/// <param name="Limit">The limit SplitPlay wants for it; null when none.</param>
+/// <param name="Profile">The driver profile that holds the limit (NVIDIA's own game profile, or "SplitPlay game …").</param>
+public sealed record GameDto(string Exe, string? Path, IReadOnlyList<string> Desks, int? Limit, string Status, bool Excluded,
+    DateTimeOffset FirstSeen, DateTimeOffset LastSeen, string? Profile);
+
+/// <summary>Body of <c>PUT /games/{exe}</c>.</summary>
+public sealed class GameUpdateRequest
+{
+    /// <summary>True: no limit for this game; false: the desks' limit again.</summary>
+    public bool? Excluded { get; set; }
+}
+
+/// <summary>The processors that share one L3 cache (a CCD on Ryzen).</summary>
+public sealed record CpuCacheGroupDto(IReadOnlyList<int> Cpus, double L3Mb);
+
+/// <summary>The processors of one desk; null: every processor (not restricted).</summary>
+public sealed record DeskCpuDto(string Id, IReadOnlyList<int>? Cpus);
 
 /// <summary>
 /// One entry of <c>GET /host/services</c>: a Windows service SplitPlay depends on. <see cref="Status"/> is one of
@@ -258,7 +353,8 @@ public sealed record DeskMetricsEntryDto(
     double EncodeMsP99,
     double LossPct,
     double? RttMs,
-    double Clients)
+    double Clients,
+    double? CaptureFps)
 {
     /// <summary>The desk session's GPU load (busiest engine, all its processes), percent; null when not measured.</summary>
     public double? GpuPercent { get; init; }
@@ -272,7 +368,7 @@ public sealed record DeskMetricsEntryDto(
     public static DeskMetricsEntryDto From(string id, DeskMetricsDto m)
     {
         ArgumentNullException.ThrowIfNull(m);
-        return new(id, m.Fps, m.BitrateKbps, m.EncodeMsP50, m.EncodeMsP99, m.LossPct, m.RttMs, m.Clients);
+        return new(id, m.Fps, m.BitrateKbps, m.EncodeMsP50, m.EncodeMsP99, m.LossPct, m.RttMs, m.Clients, m.CaptureFps);
     }
 }
 

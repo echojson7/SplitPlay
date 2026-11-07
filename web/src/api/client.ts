@@ -6,10 +6,15 @@ import type {
   AuthSession,
   ClientPack,
   ClientPlatform,
+  CpuKind,
   Desk,
   DeskConfig,
+  DeskCpu,
   DeskProfile,
+  Game,
+  GameStatus,
   Health,
+  HostCpu,
   HostNetwork,
   HostService,
   HostSettings,
@@ -22,6 +27,7 @@ import type {
   PairedClient,
   PairRequest,
 } from './types'
+import { GAME_STATUSES } from './types'
 
 export const DEFAULT_API_BASE = '/api/v1'
 
@@ -300,6 +306,39 @@ export class ApiClient {
     }
   }
 
+  /** The CPU and how `host.deskCores` splits it; unknown or malformed fields become safe defaults. */
+  async hostCpu(): Promise<HostCpu> {
+    const raw = await this.request<Partial<HostCpu> | undefined>('GET', '/host/cpu')
+    const kinds: readonly CpuKind[] = ['uniform', 'hybrid', 'ccd', 'x3d']
+    const count = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0)
+    const desks = (v: unknown): DeskCpu[] =>
+      Array.isArray(v)
+        ? v
+            .filter((d): d is DeskCpu => typeof d?.id === 'string')
+            .map((d) => ({ id: d.id, cpus: Array.isArray(d.cpus) ? d.cpus.filter((c) => Number.isInteger(c) && c >= 0) : null }))
+        : []
+    return {
+      name: typeof raw?.name === 'string' && raw.name ? raw.name : null,
+      cores: count(raw?.cores),
+      threads: count(raw?.threads),
+      kind: kinds.includes(raw?.kind as CpuKind) ? (raw?.kind as CpuKind) : 'uniform',
+      mode: raw?.mode === 'auto' ? 'auto' : 'off',
+      desks: desks(raw?.desks),
+      auto: desks(raw?.auto),
+    }
+  }
+
+  /** The games seen in desks with their FPS limits; malformed entries are dropped. */
+  async listGames(): Promise<Game[]> {
+    const raw = await this.request<unknown>('GET', '/games')
+    return Array.isArray(raw) ? raw.map(toGame).filter((g): g is Game => g !== null) : []
+  }
+
+  /** Turns the FPS limit off (`excluded`) or on again for one game. */
+  async setGameExcluded(exe: string, excluded: boolean): Promise<Game | null> {
+    return toGame(await this.request<unknown>('PUT', `/games/${encodeURIComponent(exe)}`, { body: { excluded } }))
+  }
+
   /** The Windows services SplitPlay depends on, with their state. */
   async listServices(): Promise<HostService[]> {
     return unwrapList<HostService>(await this.request('GET', '/host/services'), 'services')
@@ -360,6 +399,23 @@ export function parseLiveEvent(data: string): LiveEvent | null {
   }
 }
 
+/** One game from the API, or null when it is malformed. */
+function toGame(raw: unknown): Game | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const g = raw as Partial<Game>
+  if (typeof g.exe !== 'string' || !g.exe) return null
+  return {
+    exe: g.exe,
+    path: typeof g.path === 'string' ? g.path : null,
+    desks: Array.isArray(g.desks) ? g.desks.filter((d): d is string => typeof d === 'string') : [],
+    limit: typeof g.limit === 'number' && Number.isFinite(g.limit) && g.limit > 0 ? g.limit : null,
+    status: GAME_STATUSES.includes(g.status as GameStatus) ? (g.status as GameStatus) : 'pending',
+    excluded: g.excluded === true,
+    firstSeen: typeof g.firstSeen === 'string' ? g.firstSeen : '',
+    lastSeen: typeof g.lastSeen === 'string' ? g.lastSeen : '',
+  }
+}
+
 /** Builds a desk config from an existing desk (for the edit form). */
 export function deskToConfig(desk: Desk): DeskConfig {
   const profile: DeskProfile = { ...desk.profile }
@@ -375,6 +431,7 @@ export function deskToConfig(desk: Desk): DeskConfig {
   // Settings the form does not show are sent back unchanged (PUT replaces the whole desk).
   if (desk.disableBluetoothUserService !== undefined) config.disableBluetoothUserService = desk.disableBluetoothUserService
   if (desk.workerSettings) config.workerSettings = { ...desk.workerSettings }
+  if (desk.gameFpsLimit !== undefined) config.gameFpsLimit = desk.gameFpsLimit
   return config
 }
 

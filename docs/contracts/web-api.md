@@ -85,19 +85,23 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 | POST | `/auth/login`, `/auth/logout`, `/auth/password` | login, logout, set or change the admin password |
 | GET, PUT | `/host` | read or replace the `host` object of config.md; validated and saved; a `webPort` change applies after a service restart; a `lanAccess` change toggles the firewall rule `SplitPlay Web UI` |
 | GET | `/host/users` | local accounts that can be a desk user: `[{"name","fullName","isAdmin","isConsoleUser","createdBySplitPlay"}]` (built-in accounts left out) |
+| GET | `/host/cpu` | the CPU and how `host.deskCores` splits it: `{"name":"AMD Ryzen 9 7950X3D 16-Core Processor","cores":16,"threads":32,"kind":"x3d","mode":"auto","caches":[{"cpus":[16,…,31],"l3Mb":96},{"cpus":[0,…,15],"l3Mb":32}],"desks":[{"id":"anna","cpus":[16,…,31]},{"id":"guest","cpus":[0,…,15]}],"auto":[…]}`. `kind`: `uniform` (nothing to split), `hybrid` (Intel P- and E-cores), `ccd` (several L3 caches), `x3d` (several, one larger). `caches`: the processors by L3 cache, larger first. `desks`: each desk's processors now (`cpus` null: every processor); `auto`: what `"auto"` would give each desk. Processor numbers as in config.md `profile.cpuSet` |
 | GET | `/host/network` | LAN addresses of the host for Moonlight and what may keep Moonlight from the desks: `{"addresses":["192.168.1.20"],"profile":"Private","mdnsAllowed":true}`. `addresses`: IPv4 addresses of interfaces that are up, without loopback and link-local (169.254/16), those of interfaces with a default gateway first; empty when none. A desk is added in Moonlight as `<address>:<basePort>`. `profile`: the Windows network profile (`Public`, `Private`, `Domain`) of the interfaces with a default gateway (of all interfaces when none has one; virtual switches of Hyper-V or WSL have none), the worst one when they differ; the desks' firewall rules cover private and domain networks only. `mdnsAllowed`: whether inbound mDNS (UDP 5353) reaches Windows' mDNS responder on that profile: the firewall is off for it, or an enabled rule such as the built-in "mDNS (UDP-In)" allows it and none blocks it. `null` when unknown. SplitPlay never changes the profile or the rule; the UI shows "Network · Public" and "mDNS · Off" in Settings only when there is a problem |
 | GET | `/host/services` | the Windows services SplitPlay depends on, see [Host services](#host-services) |
 | POST | `/host/services/{name}/start`, `/host/services/{name}/stop` | start or stop one of those services; 202 with its entry. `{name}` outside the list → 404 `not_found`; a service that cannot be started or stopped now (already running, disabled, not installed, a driver) → 409 `invalid_state`; the SCM refusing → 500 `internal` with its message |
 | GET | `/desks` | array of desks with live state |
 | POST | `/desks` | create a desk (body = desk config, see config.md, plus optional `password`: the Windows password of `user`, verified when the account exists, used for a new account otherwise) |
 | GET | `/desks/{id}` | one desk with live state |
-| PUT | `/desks/{id}` | replace desk config (only while stopped, except `profile`); optional `password` as for POST. A `profile.width/height` change on a running desk is sent to the seat as `set_mode` |
+| PUT | `/desks/{id}` | replace desk config (only while stopped, except `profile`, `gameFpsLimit` and `hideFromLogon`; `gameFpsLimit` left out keeps the current value); optional `password` as for POST. A `profile.width/height` change on a running desk is sent to the seat as `set_mode` |
 | DELETE | `/desks/{id}` | delete a stopped desk (`?deleteUser=true` also removes the Windows account; 409 `user_not_managed` for an account SplitPlay did not create) |
 | POST | `/desks/{id}/start`, `/desks/{id}/stop`, `/desks/{id}/restart` | lifecycle; return 202 with the desk. Starting a desk that is not `Stopped`/`Defined` gives 409 `invalid_state` (a `Faulted` desk must be stopped first); stop is accepted in every state and is a no-op on a stopped desk |
 | GET | `/desks/{id}/clients` | array of paired Moonlight clients `{"id","name","pairedAt"?}` (409 `child_unavailable` when the desk is not running) |
 | POST | `/desks/{id}/pair` | `{"pin":"1234","name":"Laptop"}` |
 | DELETE | `/desks/{id}/clients/{clientId}` | revoke a client |
 | GET | `/desks/{id}/client-pack`, `/desks/{id}/client-pack/{windows,linux}` | Moonlight settings recommended for the desk and its launch scripts, see [Client launch pack](#client-launch-pack) |
+| GET | `/games` | the games the service found in desks and their FPS limits (config.md `gameFpsLimit`), latest first: `[{"exe":"eldenring.exe","path":"D:\\Games\\ELDEN RING\\Game\\eldenring.exe","desks":["anna"],"limit":120,"status":"limited","excluded":false,"firstSeen":"…","lastSeen":"…","profile":"Elden Ring"}]`. `limit`: the limit SplitPlay wants (null: none). `status`: `limited` (the driver holds it, in `profile`), `owner` (a limit the owner set in NVIDIA Control Panel is left alone), `failed`, `pending` (not applied yet), `off` (its desks have the limit off), `excluded`, `noDriver` (no NVIDIA driver), `disabled` (`host.nvidiaProfiles` is off) |
+| PUT | `/games/{exe}` | `{"excluded":true}` turns the limit off for that game (`false`: on again); applied to the driver before the reply; 200 with the game, 404 for an unknown game |
+| DELETE | `/games/{exe}` | forget a game (its limit goes); 204, 404 for an unknown game. Found again, it comes back |
 | GET | `/metrics` | host-level metrics plus per-desk metrics |
 | GET | `/logs?component=service&desk=desk-1&tail=200` | array of `{"time","level","component","desk"?,"message"}` |
 | GET | `/config/export` | zip download (secrets excluded unless `?includeSecrets=true&password=...`) |
@@ -147,14 +151,16 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
   "resolutionPendingRestart": false,
   "steamIsolation": true,
   "hideFromLogon": true,
+  "gameFpsLimit": null,
   "state": "Stopped",
   "sessionId": null,
   "basePort": 48089,
   "autostart": true,
   "gpu": "auto",
   "profile": { "fps": 120, "width": 1920, "height": 1080, "bitrateKbps": 60000, "codec": "hevc" },
-  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": null, "clients": 0 },
+  "metrics": { "fps": 0, "bitrateKbps": 0, "encodeMsP50": 0, "encodeMsP99": 0, "lossPct": 0, "rttMs": null, "clients": 0, "captureFps": null },
   "stream": null,
+  "pinRequest": null,
   "lastError": null
 }
 ```
@@ -164,14 +170,23 @@ A streaming desk:
 ```json
 {
   "state": "Streaming",
-  "metrics": { "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4, "lossPct": 0, "rttMs": 4, "clients": 1 },
+  "metrics": { "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4, "lossPct": 0, "rttMs": 4, "clients": 1, "captureFps": 238.4 },
   "stream": {
     "client": "Living room PC", "clientId": "…", "address": "192.168.1.37",
     "width": 1920, "height": 1080, "fps": 120, "codec": "hevc", "bitrateKbps": 50000, "hdr": false,
     "startedAt": "2026-10-29T18:00:00+00:00"
-  }
+  },
+  "hdr": { "state": "unsupported", "monitor": null, "adapter": "NVIDIA GeForce RTX 5070", "bitsPerColor": 8, "maxNits": 270,
+           "updatedAt": "2026-11-06T18:00:00+00:00" }
 }
 ```
+
+`hdr` is the HDR state of the desk session's display as the worker measures it (`display_hdr` in ipc.md), `null` (or
+absent) while the desk's worker has not reported it and after it stops. `state`: `enabled` (Windows composes the
+display in HDR10, so a client that asks for HDR gets HDR), `off` (the display supports HDR, but it is switched off in
+Windows), `unsupported` (SDR only: what Microsoft's RDP display gives a seat that connects without RDP GFX) or
+`unknown`. `monitor`, `adapter`, `bitsPerColor` and `maxNits` describe that display, `null` when not reported. With
+`stream.hdr` true and `hdr.state` `off` or `unsupported` the stream is SDR (10-bit), and the UI says "SDR instead of HDR".
 
 `stream` is the Moonlight stream the desk serves, `null` when nobody is connected (with several, the earliest).
 `client` and `clientId` name the paired client (`clientId` as in `GET /desks/{id}/clients`), `null` when the worker does
@@ -180,10 +195,17 @@ client has connected the stream's control channel and changes on the worker's `c
 events and heartbeats (ipc.md), and is cleared when the worker stops or
 restarts. `state` follows it: `Ready` → `Streaming` while a stream runs, back to `Ready` when the last one ends.
 
+`pinRequest` is a Moonlight client waiting for its PIN on this desk, `null` otherwise:
+`{"address":"192.168.1.37","since":"2026-11-06T21:00:00+00:00"}` (the worker's heartbeat `pairing`, ipc.md). The UI
+shows one "Moonlight is waiting for a PIN" row per such desk with the PIN field, and the tray notifies the console
+user. It is cleared at once by a successful `POST /desks/{id}/pair` and when the worker stops or restarts. A worker
+before patch 0021 never reports one; the desk page's PIN row works with every worker.
+
 `metrics` are the worker's live numbers over the last second (definitions in ipc.md): `fps` and `bitrateKbps` actually
 sent, `encodeMsP50`/`encodeMsP99` host processing latency (capture to encoded frame), `lossPct` frames the client
-reported lost, `rttMs` round-trip time to the client (`null` until one is measured). All 0 (`rttMs` `null`) when
-nothing streams.
+reported lost, `rttMs` round-trip time to the client (`null` until one is measured), `captureFps` frames DWM composed
+per second in the desk session (the real composition rate, `null` without a stream). All 0 (`rttMs` and `captureFps`
+`null`) when nothing streams.
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.
@@ -247,11 +269,12 @@ The host cannot take V-Sync latency out of the client, only recommend settings t
                  { "code": "encoderBusy", "gpu": "NVIDIA GeForce RTX 4080", "percent": 96 }]
   },
   "desks": [{ "id": "desk-1", "fps": 119.8, "bitrateKbps": 38450, "encodeMsP50": 3.1, "encodeMsP99": 5.4,
-              "lossPct": 0, "rttMs": 4, "clients": 1, "gpuPercent": 34, "encoderPercent": 12, "vramMb": 2900 }]
+              "lossPct": 0, "rttMs": 4, "clients": 1, "captureFps": 238.4, "gpuPercent": 34, "encoderPercent": 12, "vramMb": 2900 }]
 }
 ```
 
-Values that are not measured yet are `null`. Software adapters (Microsoft Basic Render Driver) are not listed.
+`composeHz` is the composition rate the host is set to (`host.composeIntervalMs`, Auto resolved; config.md), each desk's
+`captureFps` the rate DWM actually composes at. Values that are not measured yet are `null`. Software adapters (Microsoft Basic Render Driver) are not listed.
 
 GPU numbers come from the performance counters Task Manager reads (`GPU Engine`, `GPU Process Memory`,
 `GPU Adapter Memory`), sampled once a second while someone reads metrics and not at all 30 s after the last read.

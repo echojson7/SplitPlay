@@ -94,6 +94,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 | GET | `/desks/{id}` | one desk with live state |
 | PUT | `/desks/{id}` | replace desk config (only while stopped, except `profile`, `gameFpsLimit` and `hideFromLogon`; `gameFpsLimit` left out keeps the current value); optional `password` as for POST. A `profile.width/height` change on a running desk is sent to the seat as `set_mode` |
 | DELETE | `/desks/{id}` | delete a stopped desk (`?deleteUser=true` also removes the Windows account; 409 `user_not_managed` for an account SplitPlay did not create) |
+| POST | `/desks/{id}/sas` | Ctrl+Alt+Del into the desk session over the seat's RDP connection; 204. 409 `child_unavailable` when the desk has no seat connection, 409 `child_error` when the seat could not send it |
 | POST | `/desks/{id}/start`, `/desks/{id}/stop`, `/desks/{id}/restart` | lifecycle; return 202 with the desk. Starting a desk that is not `Stopped`/`Defined` gives 409 `invalid_state` (a `Faulted` desk must be stopped first); stop is accepted in every state and is a no-op on a stopped desk |
 | GET | `/desks/{id}/clients` | array of paired Moonlight clients `{"id","name","pairedAt"?}` (409 `child_unavailable` when the desk is not running) |
 | POST | `/desks/{id}/pair` | `{"pin":"1234","name":"Laptop"}` |
@@ -211,7 +212,9 @@ before patch 0021 never reports one; the desk page's PIN row works with every wo
 sent, `encodeMsP50`/`encodeMsP99` host processing latency (capture to encoded frame), `lossPct` frames the client
 reported lost, `rttMs` round-trip time to the client (`null` until one is measured), `captureFps` frames DWM composed
 per second in the desk session (the real composition rate, `null` without a stream). All 0 (`rttMs` and `captureFps`
-`null`) when nothing streams. A worker with the loss telemetry (patches 0023, 0025) adds `packetLossPct` (video packets
+`null`) when nothing streams. `input` says where keyboard and mouse go now: `windows`, `rdp`, `rdp_mixed` (relative
+mouse motion on SendInput, the RDP server has no relative mouse PDUs) or `rdp_unavailable` (the seat cannot send input
+now, SendInput is used); it is left out until the worker reports it. A worker with the loss telemetry (patches 0023, 0025) adds `packetLossPct` (video packets
 lost on the way, before FEC repairs them), `burstLossPct` (the worst FEC block: lost per data packet), `fecRecovered`
 and `fecFailed` (blocks repaired and not), `fecPercent` (FEC share sent now) and `encoderKbps` (the encoder's bitrate,
 `null` when it cannot change it live); an older worker leaves them `null`.

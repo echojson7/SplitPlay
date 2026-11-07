@@ -492,6 +492,9 @@ internal sealed class DeskRuntime
                     // null (or anything but a number): no stream, so nothing captures.
                     dto.CaptureFps = number;
                     break;
+                case "input" when value.ValueKind == JsonValueKind.String:
+                    dto.Input = value.GetString();
+                    break;
                 case "packet_loss_pct":
                     dto.PacketLossPct = number;
                     break;
@@ -561,6 +564,7 @@ internal sealed class DeskRuntime
         DpbFrames = p.DpbFrames ?? ProfileConfig.DefaultDpbFrames,
         PacingMbps = p.PacingMbps ?? ProfileConfig.DefaultPacingMbps,
         CaptureMode = p.CaptureMode ?? ProfileConfig.DefaultCaptureMode,
+        Input = p.Input ?? ProfileConfig.DefaultInput,
         BitrateCapKbps = adaptive?.BitrateCapKbps is int cap ? Math.Clamp(cap / Math.Max(1, streams), 1, MaxBitrateCapKbps) : 0,
         GpuPriority = p.GpuPriority,
         GpuLuid = p.GpuLuid,

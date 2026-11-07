@@ -311,6 +311,9 @@ public sealed record IpcProfile
     /// <summary><c>capture_mode</c>: <c>slot</c> or <c>arrival</c>.</summary>
     public string? CaptureMode { get; init; }
 
+    /// <summary><c>input</c>: <c>windows</c> (SendInput) or <c>rdp</c> (the seat's RDP connection).</summary>
+    public string? Input { get; init; }
+
     public string? GpuPriority { get; init; }
 
     public string? GpuLuid { get; init; }

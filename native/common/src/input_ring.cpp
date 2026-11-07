@@ -20,6 +20,24 @@ void init_ring(SpInputRing* ring, uint32_t flags) noexcept {
   std::atomic_thread_fence(std::memory_order_release);
 }
 
+uint64_t reattach_ring(SpInputRing* ring, uint32_t flags) noexcept {
+  const bool valid = ring->magic == SP_INPUT_RING_MAGIC && ring->version == SP_INPUT_RING_VERSION &&
+                     ring->capacity == SP_INPUT_RING_CAPACITY;
+  if (!valid) {
+    init_ring(ring, flags);
+    return 0;
+  }
+  const uint64_t write_index = shm::load_acquire(ring->write_index);
+  const uint64_t read_index = shm::load_acquire(ring->read_index);
+  shm::store_release(ring->read_index, write_index);
+  set_flags(ring, flags);
+  return write_index - read_index;
+}
+
+void set_flags(SpInputRing* ring, uint32_t flags) noexcept { shm::store_release(ring->flags, flags); }
+
+uint32_t get_flags(SpInputRing* ring) noexcept { return shm::load_acquire(ring->flags); }
+
 bool validate_ring(const SpInputRing* ring, size_t mapped_size, std::string* error) {
   auto fail = [&](std::string msg) {
     if (error) *error = std::move(msg);

@@ -49,7 +49,8 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0020` NVIDIA settings outside | no NvAPI driver settings at start-up, at stream start or at exit: the SplitPlay service owns them (one writer for every desk, with its own record of the previous values); `--restore-nvprefs-undo` stays for what workers before this patch left behind. See *NVIDIA driver settings* below |
 | `0021` PIN request | a Moonlight client that waits for its PIN (`getservercert` parked until `pair`) is reported in every heartbeat as `pairing: {address, since}`, the newest one when several wait, `null` otherwise; the mark goes when `pair` hands the PIN over, when the pairing session ends or fails, and after 5 minutes (Sunshine never notices a client that gave up) |
 | `0022` lost GPU device | when DXGI capture fails or asks for a re-init and the D3D device reports `GetDeviceRemovedReason()` (driver reset/TDR, hang, driver update), the worker logs it, sends `event gpu_reset {reason, where}` and exits with code 5; the service starts a new worker in the same session. Standalone it only logs. See *Graphics driver reset* below |
-| `0023` loss telemetry | the client's per-frame FEC reports (`SS_FRAME_FEC_STATUS`, control type `0x5502`, which upstream drops) are counted per stream; heartbeats gain `packet_loss_pct`, `burst_loss_pct`, `fec_recovered`, `fec_failed` and `fec_percent`, the stream object `fec_feedback`. Number `0024` is reserved for another stage 4 PR. See *Loss telemetry and live bitrate* below |
+| `0023` loss telemetry | the client's per-frame FEC reports (`SS_FRAME_FEC_STATUS`, control type `0x5502`, which upstream drops) are counted per stream; heartbeats gain `packet_loss_pct`, `burst_loss_pct`, `fec_recovered`, `fec_failed` and `fec_percent`, the stream object `fec_feedback`. See *Loss telemetry and live bitrate* below |
+| `0024` RDP input | the Profile's `input` (live): `windows` keeps SendInput, `rdp` writes keyboard and mouse into the seat's input ring (`input_ring.h`), and the seat sends them into the session as RDP input PDUs (no injection flag, UAC and Ctrl+Alt+Del work); relative motion stays on SendInput unless the RDP server takes relative mouse PDUs; any event the ring cannot take goes to SendInput; heartbeats gain `input` and `input_fallbacks`. See *RDP input* below |
 | `0025` live bitrate | the Profile's `bitrate_cap_kbps` (live): native NVENC follows it with `NvEncReconfigureEncoder` (CBR bitrate and VBV, no IDR); heartbeats gain `encoder_kbps`. See *Loss telemetry and live bitrate* below |
 
 Patch numbers 0018–0024 are reserved per Stage 4 PR (docs/ARCHITECTURE.md §10); `export-patches.sh` numbers files in queue order, so rename them back after an export.
@@ -318,6 +319,29 @@ Heartbeat `metrics.capture_fps` counts the frames DWM composed per second: the s
 skipped). It is the session's real composition rate in both modes, at most 1000 / `DWMFRAMEINTERVAL` and less when the
 desktop changes less often, and `null` while no stream runs.
 
+### RDP input (patch 0024)
+
+The Profile's `input` (string, live, `null` = `windows`) chooses where keyboard and mouse input goes:
+
+- `windows`: upstream's SendInput inside the session (the default until lab E tries `rdp` with games).
+- `rdp`: the input thread writes each event into the desk's input ring (`Global\SplitPlay.InputRing.<desk>`, the MIT
+  contract `input_ring.h`) and signals `Global\SplitPlay.InputReady.<desk>`; the seat sends it into the session over
+  its loopback RDP connection. Keys go as scancodes (upstream's VK to scancode map, `MapVirtualKey` for the rest,
+  Pause as E1 1D 45, Print Screen as E0 37), text as Unicode key events, absolute motion in desktop pixels, buttons and
+  wheels at the position the seat last sent. Relative motion goes over RDP only when the ring's
+  `SP_INPUT_RING_REL_MOUSE` is set (the server takes relative mouse PDUs); otherwise it stays on SendInput, so games
+  reading raw input keep their deltas, and clicks and wheel follow it to SendInput while the pointer moves that way.
+  X buttons and the horizontal wheel need `SP_INPUT_RING_XBUTTONS` and `SP_INPUT_RING_HWHEEL`.
+
+Every event the ring cannot take goes to SendInput as before: no seat ring yet, the seat's connection is not logged on
+(`SP_INPUT_RING_READY` clear), the seat's process is gone, or the ring is full (`input_fallbacks`). Leaving `rdp`
+queues `SP_IN_RELEASE_ALL`. Touch, pen and gamepads are unchanged.
+
+The input thread is the ring's only producer and makes no system call besides `SetEvent`. The heartbeat thread opens
+the ring (every 2 s until it works; the mapping then stays open, and a restarted seat reattaches to the same section),
+watches the seat's process and reports the metric `input`: `windows`, `rdp`, `rdp_mixed` (relative motion on SendInput)
+or `rdp_unavailable`. A path change is logged.
+
 ### mDNS (patch 0017)
 
 Each desk is its own Moonlight host on the same PC: its own `uniqueid`, certificate and base port. Upstream registered
@@ -449,7 +473,7 @@ Capture stays DXGI Desktop Duplication and gamepads stay on ViGEmBus with DualSh
 
 ## Not done yet
 
-- Frame tracing and the input ring (the contract headers are already on the include path); the profile's
-  `gpu_priority`, `gpu_luid` and `cpu_set`.
+- Frame tracing (the contract header is already on the include path); the profile's `gpu_priority`, `gpu_luid` and
+  `cpu_set`.
 - mDNS with several desks is not yet tested on hardware (lab B): each desk now publishes its own instance (patch
   0017); adding `HOST:port` by hand always works.

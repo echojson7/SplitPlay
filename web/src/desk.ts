@@ -184,6 +184,23 @@ export function hdrLabel(hdr: DeskHdr | null | undefined): string | null {
   }
 }
 
+/**
+ * The "Input" row of a desk set to RDP input: where keyboard and mouse go now (the worker's `input` metric).
+ * Null for Windows input (nothing to tell) and while the worker has not reported yet.
+ */
+export function inputLabel(input: string | null | undefined): string | null {
+  switch (input) {
+    case 'rdp':
+      return t('live.inputRdp')
+    case 'rdp_mixed':
+      return t('live.inputRdpMixed')
+    case 'rdp_unavailable':
+      return t('live.inputRdpUnavailable')
+    default:
+      return null
+  }
+}
+
 /** The desk list's second line while streaming: "Laptop · 120 FPS · 8 ms". */
 export function streamLine(stream: DeskStream, metrics: Partial<DeskMetrics>): string {
   const parts = [deviceName(stream), t('unit.fps', { value: fmtNumber(metrics.fps ?? 0) })]

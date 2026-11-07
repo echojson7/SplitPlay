@@ -71,6 +71,14 @@ public sealed class DeskMetricsDto
     public double? CaptureFps { get; set; }
 
     /// <summary>
+    /// Where the desk's keyboard and mouse go now (worker metric <c>input</c>): <c>windows</c>, <c>rdp</c>,
+    /// <c>rdp_mixed</c> (relative motion stays on SendInput: the RDP server has no relative mouse PDUs) or
+    /// <c>rdp_unavailable</c> (the seat cannot send input now, SendInput is used). Null from an older worker.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Input { get; set; }
+
+    /// <summary>
     /// Video packets lost on the way, percent of the packets sent, from the client's FEC reports (lost or not, before
     /// FEC repairs them). Null from a worker that does not measure it.
     /// </summary>

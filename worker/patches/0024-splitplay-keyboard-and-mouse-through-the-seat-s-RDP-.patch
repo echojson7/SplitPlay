@@ -1,0 +1,693 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 22:47:30 +0000
+Subject: [PATCH] splitplay: keyboard and mouse through the seat's RDP
+ connection (input)
+
+New profile field input (docs/contracts/ipc.md), live: "windows" (default,
+upstream's SendInput) or "rdp". With "rdp" the worker writes keyboard and
+mouse events into the desk's input ring (Global\SplitPlay.InputRing.<desk>,
+the MIT contract splitplay/input_ring.h) instead of calling SendInput, and
+the seat sends them into the session as RDP input PDUs over its loopback
+connection. The session then sees a real remote keyboard and mouse: no
+"injected" flag, UAC prompts and Ctrl+Alt+Del work.
+
+- Keys go as scancodes (upstream's VK -> scancode map, MapVirtualKey for
+  the rest; Pause as E1 1D 45, Print Screen as E0 37), text as Unicode
+  key events, absolute motion in desktop pixels, buttons and wheels with
+  the real cursor position (RDP pointer PDUs carry one).
+- Relative motion goes over RDP only when the server accepts relative
+  mouse PDUs (ring flag SP_INPUT_RING_REL_MOUSE); otherwise it stays on
+  SendInput so raw input keeps its deltas.
+- Whenever the ring is not usable the event goes to SendInput as before:
+  no seat yet, the seat's connection is down (SP_INPUT_RING_READY clear),
+  the seat process died, or the ring is full. Input never stops.
+- Leaving "rdp" releases whatever is held over RDP (SP_IN_RELEASE_ALL).
+- Touch, pen and gamepads are unchanged.
+
+The input thread (input_pool) is the ring's only producer and makes no
+system call besides SetEvent; the heartbeat thread opens the ring (every
+2 s until it works), watches the seat's process and reports the path as
+the metric input: windows, rdp, rdp_mixed (relative motion on SendInput)
+or rdp_unavailable, plus input_fallbacks (events that met a full ring).
+
+diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
+index a2f01cd9b200ea4cc0783c974c799891567ffa05..9eeccf6dda37e9d9b5520542dfa7b099c4e936d2 100644
+--- a/cmake/compile_definitions/common.cmake
++++ b/cmake/compile_definitions/common.cmake
+@@ -187,6 +187,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/splitplay/pairing.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/profile.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/profile.h"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/rdp_input.cpp"
++        "${CMAKE_SOURCE_DIR}/src/splitplay/rdp_input.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/scheduling.cpp"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/scheduling.h"
+         "${CMAKE_SOURCE_DIR}/src/splitplay/self_test.cpp"
+diff --git a/src/platform/windows/input.cpp b/src/platform/windows/input.cpp
+index 0d723985ce846abf8f2f8b1b6dbc2e242da67a99..96cc137a145857c0676161512af113554cf4fc91 100644
+--- a/src/platform/windows/input.cpp
++++ b/src/platform/windows/input.cpp
+@@ -32,6 +32,7 @@
+ #include "src/logging.h"
+ #include "src/platform/common.h"
+ #include "src/splitplay/doorbell.h"
++#include "src/splitplay/rdp_input.h"
+ 
+ namespace platf {
+   using namespace std::literals;
+@@ -594,6 +595,11 @@ namespace platf {
+ 
+     // Note: x and y already include the display offset (offset_x/offset_y) from client_to_touchport(),
+     // so we must not add offset_x/offset_y again here to avoid double-offsetting on multi-monitor setups.
++    // SplitPlay: x and y are desktop pixels (touch_port is the virtual screen), which is what RDP wants
++    if (splitplay::rdp_input::try_mouse_abs(static_cast<int>(std::lround(x)), static_cast<int>(std::lround(y)))) {
++      return;
++    }
++
+     auto scaled_x = std::lround(x * ((float) target_touch_port.width / (float) touch_port.width));
+     auto scaled_y = std::lround(y * ((float) target_touch_port.height / (float) touch_port.height));
+ 
+@@ -604,6 +610,10 @@ namespace platf {
+   }
+ 
+   void move_mouse(input_t &input, int deltaX, int deltaY) {
++    if (splitplay::rdp_input::try_mouse_rel(deltaX, deltaY)) {
++      return;
++    }
++
+     INPUT i {};
+ 
+     i.type = INPUT_MOUSE;
+@@ -631,6 +641,10 @@ namespace platf {
+   }
+ 
+   void button_mouse(input_t &input, int button, bool release) {
++    if (splitplay::rdp_input::try_button(button, release)) {
++      return;
++    }
++
+     INPUT i {};
+ 
+     i.type = INPUT_MOUSE;
+@@ -654,6 +668,10 @@ namespace platf {
+   }
+ 
+   void scroll(input_t &input, int distance) {
++    if (splitplay::rdp_input::try_wheel(distance, false)) {
++      return;
++    }
++
+     INPUT i {};
+ 
+     i.type = INPUT_MOUSE;
+@@ -666,6 +684,10 @@ namespace platf {
+   }
+ 
+   void hscroll(input_t &input, int distance) {
++    if (splitplay::rdp_input::try_wheel(distance, true)) {
++      return;
++    }
++
+     INPUT i {};
+ 
+     i.type = INPUT_MOUSE;
+@@ -725,6 +747,28 @@ namespace platf {
+         break;
+     }
+ 
++    // SplitPlay: through the seat's RDP connection as a scancode (input: "rdp"); SendInput when that is not possible
++    if (splitplay::rdp_input::sink() == splitplay::rdp_input::sink_e::rdp) {
++      std::uint16_t scancode = ki.wScan;
++      bool extended = (ki.dwFlags & KEYEVENTF_EXTENDEDKEY) != 0;
++      bool e1 = false;
++      if (modcode == VK_PAUSE) {
++        scancode = 0x45;  // E1 1D 45
++        extended = false;
++        e1 = true;
++      } else if (modcode == VK_SNAPSHOT) {
++        scancode = 0x37;  // E0 37 (without E0 it is the keypad's *)
++        extended = true;
++      } else if (scancode == 0) {
++        const UINT vsc = MapVirtualKeyW(modcode, MAPVK_VK_TO_VSC_EX);
++        scancode = static_cast<std::uint16_t>(vsc & 0xFF);
++        extended = extended || (vsc >> 8) == 0xE0;
++      }
++      if (splitplay::rdp_input::try_key(scancode, extended, e1, release)) {
++        return;
++      }
++    }
++
+     if (release) {
+       ki.dwFlags |= KEYEVENTF_KEYUP;
+     }
+@@ -1228,6 +1272,10 @@ namespace platf {
+       return;
+     }
+ 
++    if (splitplay::rdp_input::try_unicode(wide.data(), chars)) {
++      return;
++    }
++
+     // Send all key down events
+     for (int i = 0; i < chars; i++) {
+       INPUT input {};
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index 88f0da06b53d1871be5af62d25b921458bb65a68..b7282f149831bb4bbbfaaea213fb153bdbdba2ff 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -35,6 +35,7 @@
+ #include "options.h"
+ #include "pairing.h"
+ #include "profile.h"
++#include "rdp_input.h"
+ #include "src/config.h"
+ #include "src/entry_handler.h"
+ #include "src/logging.h"
+@@ -111,6 +112,9 @@ namespace splitplay::control {
+     /// The one string field the worker applies: `slot` (default) or `arrival`, live.
+     constexpr const char *capture_mode_field = "capture_mode";
+ 
++    /// Keyboard and mouse sink: `windows` (default, SendInput) or `rdp` (the seat's RDP connection), live.
++    constexpr const char *input_field = "input";
++
+     /**
+      * @brief Apply the stream settings of a Profile object, all or nothing.
+      *
+@@ -151,6 +155,20 @@ namespace splitplay::control {
+         }
+       }
+ 
++      std::optional<std::optional<splitplay::rdp_input::sink_e>> input_sink;  // outer: field present
++      if (const auto it = profile.find(input_field); it != profile.end()) {
++        if (it->is_null()) {
++          input_sink.emplace(std::nullopt);
++        } else if (it->is_string() && it->get<std::string>() == "windows") {
++          input_sink.emplace(splitplay::rdp_input::sink_e::windows);
++        } else if (it->is_string() && it->get<std::string>() == "rdp") {
++          input_sink.emplace(splitplay::rdp_input::sink_e::rdp);
++        } else {
++          error = std::string {input_field} + " must be \"windows\" or \"rdp\"";
++          return std::nullopt;
++        }
++      }
++
+       json applied = json::array();
+       json next_stream = json::array();
+       json not_applied = json::array();
+@@ -181,8 +199,18 @@ namespace splitplay::control {
+                    **capture_mode == splitplay::profile::capture_mode_e::arrival ? "arrival" :
+                                                                                    "slot";
+       }
++      if (input_sink) {
++        splitplay::rdp_input::set_sink(*input_sink);
++        applied.push_back(input_field);
++        summary += ' ';
++        summary += input_field;
++        summary += '=';
++        summary += !*input_sink                                               ? "default" :
++                   **input_sink == splitplay::rdp_input::sink_e::rdp ? "rdp" :
++                                                                       "windows";
++      }
+       for (const auto &[key, value] : profile.items()) {
+-        const bool known = key == capture_mode_field || std::any_of(std::begin(profile_fields), std::end(profile_fields), [&key](const profile_field_t &field) {
++        const bool known = key == capture_mode_field || key == input_field || std::any_of(std::begin(profile_fields), std::end(profile_fields), [&key](const profile_field_t &field) {
+           return key == field.name;
+         });
+         if (!known) {
+@@ -446,6 +474,8 @@ namespace splitplay::control {
+             },
+             [&](json metrics, json sessions) {
+               const bool streaming = !sessions.empty();
++              metrics["input"] = splitplay::rdp_input::poll();
++              metrics["input_fallbacks"] = splitplay::rdp_input::ring_full_fallbacks();
+               send({
+                 {"type", "heartbeat"},
+                 {"seq", ++seq},
+diff --git a/src/splitplay/rdp_input.cpp b/src/splitplay/rdp_input.cpp
+new file mode 100644
+index 0000000000000000000000000000000000000000..1740ebd9aaa408a8a86eb65222b4d5e3d143fbe4
+--- /dev/null
++++ b/src/splitplay/rdp_input.cpp
+@@ -0,0 +1,358 @@
++/**
++ * @file src/splitplay/rdp_input.cpp
++ * @brief Keyboard and mouse through the seat's RDP connection (see rdp_input.h).
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++// standard includes
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++#include <iterator>
++#include <mutex>
++#include <string>
++
++// SplitPlay contract headers (MIT, copied unmodified from native/include/splitplay by worker/scripts/fetch.sh)
++#include <splitplay/input_ring.h>
++
++// local includes
++#include "options.h"
++#include "rdp_input.h"
++#include "src/globals.h"
++#include "src/logging.h"
++
++// platform includes
++#include <windows.h>
++
++using namespace std::literals;
++
++namespace splitplay::rdp_input {
++  namespace {
++    static_assert(sizeof(SpInputEvent) == 32, "SpInputEvent layout");
++    static_assert((SP_INPUT_RING_CAPACITY & (SP_INPUT_RING_CAPACITY - 1)) == 0, "capacity is a power of two");
++
++    template<class T>
++    std::atomic_ref<T> shared(volatile T &field) {
++      // The ring lives in shared memory; its fields are volatile in the C header and accessed atomically here.
++      return std::atomic_ref<T>(const_cast<T &>(field));
++    }
++
++    std::atomic<sink_e> configured {sink_e::windows};
++    std::atomic<std::uint64_t> full_fallbacks {0};
++
++    // Published by poll() (ready_event first, then ring_view with release), never withdrawn: the mapping stays open
++    // for the worker's lifetime, and a restarted seat reattaches to the same section (input_ring.h).
++    std::atomic<HANDLE> ready_event {nullptr};
++    std::atomic<SpInputRing *> ring_view {nullptr};
++    std::atomic<bool> consumer_alive {false};
++
++    // Input thread only (the ring's single producer).
++    std::uint64_t write_index = 0;
++    bool producer_started = false;
++    std::uint32_t seq = 1;
++    /// The pointer was last moved through SendInput (relative motion without relative mouse PDUs). Clicks and wheel
++    /// then stay on SendInput too: an RDP pointer PDU carries a position, and one read now would be stale by the time
++    /// the PDU arrives, pulling back the motion SendInput delivered meanwhile.
++    bool motion_on_sendinput = false;
++
++    // poll() only, under poll_mutex.
++    std::mutex poll_mutex;
++    HANDLE mapping = nullptr;
++    std::chrono::steady_clock::time_point next_open_attempt {};
++    std::string open_error;
++    DWORD watched_pid = 0;
++    HANDLE watched_process = nullptr;
++    std::string last_status;
++
++    /**
++     * @brief The ring when the sink is RDP and the seat can deliver; otherwise nullptr (use SendInput).
++     */
++    SpInputRing *usable(bool any_sink = false) {
++      if (!any_sink && configured.load(std::memory_order_relaxed) != sink_e::rdp) {
++        return nullptr;
++      }
++      SpInputRing *ring = ring_view.load(std::memory_order_acquire);
++      if (!ring || !consumer_alive.load(std::memory_order_relaxed)) {
++        return nullptr;
++      }
++      if ((shared(ring->flags).load(std::memory_order_acquire) & SP_INPUT_RING_READY) == 0) {
++        return nullptr;
++      }
++      return ring;
++    }
++
++    std::uint64_t free_slots(SpInputRing *ring) {
++      if (!producer_started) {
++        write_index = shared(ring->write_index).load(std::memory_order_acquire);
++        producer_started = true;
++      }
++      const std::uint64_t read_index = shared(ring->read_index).load(std::memory_order_acquire);
++      if (read_index > write_index) {
++        // The seat reinitialised a ring it did not recognise (input_ring.h): follow its indices.
++        write_index = shared(ring->write_index).load(std::memory_order_acquire);
++      }
++      const std::uint64_t used = write_index - read_index;
++      return used >= SP_INPUT_RING_CAPACITY ? 0 : SP_INPUT_RING_CAPACITY - used;
++    }
++
++    /**
++     * @brief Publish one event; false (counted in `dropped`) when the ring is full.
++     */
++    bool push(SpInputRing *ring, std::uint32_t type, std::int32_t a, std::int32_t b = 0, std::int32_t x = 0, std::int32_t y = 0) {
++      const std::uint32_t s = seq++;  // dropped events consume a sequence number too, so the seat sees the gap
++      if (free_slots(ring) == 0) {
++        shared(ring->dropped).fetch_add(1, std::memory_order_relaxed);
++        full_fallbacks.fetch_add(1, std::memory_order_relaxed);
++        return false;
++      }
++      LARGE_INTEGER qpc;
++      QueryPerformanceCounter(&qpc);
++      SpInputEvent &slot = ring->events[write_index & (SP_INPUT_RING_CAPACITY - 1)];
++      slot.qpc = static_cast<std::uint64_t>(qpc.QuadPart);
++      slot.type = type;
++      slot.a = a;
++      slot.b = b;
++      slot.seq = s;
++      slot.x = x;
++      slot.y = y;
++      ++write_index;
++      shared(ring->write_index).store(write_index, std::memory_order_release);
++      return true;
++    }
++
++    void signal() {
++      if (HANDLE event = ready_event.load(std::memory_order_acquire)) {
++        SetEvent(event);
++      }
++    }
++
++    /**
++     * @brief Button or wheel through the ring, at the position the seat last sent (no SP_IN_FLAG_POS: every motion
++     * that reached the session went through the ring too, so the seat's position is the newest one).
++     * @param needed Ring flag the server must have announced for this event, or 0.
++     */
++    bool push_pointer(std::uint32_t type, std::int32_t a, std::uint32_t flags, std::uint32_t needed = 0) {
++      SpInputRing *ring = usable();
++      if (!ring || motion_on_sendinput) {
++        return false;
++      }
++      if (needed && (shared(ring->flags).load(std::memory_order_acquire) & needed) == 0) {
++        return false;
++      }
++      if (!push(ring, type, a, static_cast<std::int32_t>(flags))) {
++        return false;
++      }
++      signal();
++      return true;
++    }
++
++    /**
++     * @brief Open the seat's ring (poll_mutex held). Retried every 2 s until it works.
++     */
++    void try_open() {
++      const auto now = std::chrono::steady_clock::now();
++      if (ring_view.load(std::memory_order_relaxed) || now < next_open_attempt) {
++        return;
++      }
++      next_open_attempt = now + 2s;
++      const std::string &desk = options().desk;
++      if (desk.empty()) {
++        return;
++      }
++      const std::wstring section = L"Global\\SplitPlay.InputRing." + std::wstring(desk.begin(), desk.end());
++      const std::wstring event = L"Global\\SplitPlay.InputReady." + std::wstring(desk.begin(), desk.end());
++      std::string error;
++      HANDLE m = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, section.c_str());
++      void *view = m ? MapViewOfFile(m, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(SpInputRing)) : nullptr;
++      HANDLE e = view ? OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, event.c_str()) : nullptr;
++      if (!m) {
++        error = "no input ring (error " + std::to_string(GetLastError()) + ")";
++      } else if (!view) {
++        error = "cannot map the input ring (error " + std::to_string(GetLastError()) + ")";
++      } else if (!e) {
++        error = "no InputReady event (error " + std::to_string(GetLastError()) + ")";
++      } else {
++        auto *ring = static_cast<SpInputRing *>(view);
++        if (ring->magic != SP_INPUT_RING_MAGIC || ring->version != SP_INPUT_RING_VERSION || ring->capacity != SP_INPUT_RING_CAPACITY) {
++          error = "the input ring has an unknown layout (version " + std::to_string(ring->version) + ")";
++        } else {
++          shared(ring->producer_pid).store(GetCurrentProcessId(), std::memory_order_relaxed);
++          mapping = m;
++          ready_event.store(e, std::memory_order_release);
++          ring_view.store(ring, std::memory_order_release);
++          open_error.clear();
++          BOOST_LOG(info) << "SplitPlay: input ring of desk "sv << desk << " opened (seat pid "sv << ring->consumer_pid << ')';
++          return;
++        }
++      }
++      if (e) {
++        CloseHandle(e);
++      }
++      if (view) {
++        UnmapViewOfFile(view);
++      }
++      if (m) {
++        CloseHandle(m);
++      }
++      if (error != open_error) {
++        BOOST_LOG(warning) << "SplitPlay: RDP input is not available yet: "sv << error << "; keyboard and mouse use SendInput"sv;
++        open_error = error;
++      }
++    }
++
++    /**
++     * @brief Is the process that created the ring (the seat) still running? (poll_mutex held)
++     */
++    bool seat_alive(SpInputRing *ring) {
++      const DWORD pid = shared(ring->consumer_pid).load(std::memory_order_relaxed);
++      if (pid != watched_pid) {
++        if (watched_process) {
++          CloseHandle(watched_process);
++        }
++        watched_process = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr;
++        watched_pid = pid;
++      }
++      return watched_process && WaitForSingleObject(watched_process, 0) == WAIT_TIMEOUT;
++    }
++  }  // namespace
++
++  void set_sink(std::optional<sink_e> value) {
++    const sink_e next = value.value_or(sink_e::windows);
++    const sink_e before = configured.exchange(next);
++    if (before == next) {
++      return;
++    }
++    BOOST_LOG(info) << "SplitPlay: keyboard and mouse input: "sv << (next == sink_e::rdp ? "RDP (through the seat)"sv : "SendInput"sv);
++    if (before == sink_e::rdp) {
++      // Whatever is held over RDP is released there; the input thread is the ring's only producer.
++      input_pool.push([]() {
++        if (SpInputRing *ring = usable(true); ring && push(ring, SP_IN_RELEASE_ALL, 0)) {
++          signal();
++        }
++      });
++    }
++    poll();
++  }
++
++  sink_e sink() {
++    return configured.load(std::memory_order_relaxed);
++  }
++
++  std::string poll() {
++    std::lock_guard lg {poll_mutex};
++    std::string status = "windows";
++    if (configured.load(std::memory_order_relaxed) == sink_e::rdp) {
++      try_open();
++      SpInputRing *ring = ring_view.load(std::memory_order_acquire);
++      const bool alive = ring && seat_alive(ring);
++      consumer_alive.store(alive, std::memory_order_relaxed);
++      const std::uint32_t flags = ring ? shared(ring->flags).load(std::memory_order_acquire) : 0;
++      if (!alive || (flags & SP_INPUT_RING_READY) == 0) {
++        status = "rdp_unavailable";
++      } else {
++        status = (flags & SP_INPUT_RING_REL_MOUSE) ? "rdp" : "rdp_mixed";
++      }
++    }
++    if (status != last_status) {
++      if (!last_status.empty() || status != "windows") {
++        BOOST_LOG(info) << "SplitPlay: input path: "sv << status
++                        << (status == "rdp_mixed"sv ? " (the RDP server has no relative mouse PDUs: relative motion uses SendInput)"sv :
++                            status == "rdp_unavailable"sv ? " (the seat cannot send input now: SendInput)"sv : ""sv);
++      }
++      last_status = status;
++    }
++    return status;
++  }
++
++  std::uint64_t ring_full_fallbacks() {
++    return full_fallbacks.load(std::memory_order_relaxed);
++  }
++
++  bool try_key(std::uint16_t scancode, bool extended, bool e1, bool release) {
++    SpInputRing *ring = usable();
++    if (!ring || scancode == 0 || scancode > 0xFF) {
++      return false;
++    }
++    std::uint32_t flags = (release ? SP_IN_FLAG_UP : 0) | (extended ? SP_IN_FLAG_EXTENDED : 0) | (e1 ? SP_IN_FLAG_E1 : 0);
++    if (!push(ring, SP_IN_KEY, scancode, static_cast<std::int32_t>(flags))) {
++      return false;
++    }
++    signal();
++    return true;
++  }
++
++  bool try_unicode(const wchar_t *text, int count) {
++    SpInputRing *ring = usable();
++    if (!ring || count <= 0) {
++      return false;
++    }
++    // UTF-16 -> code points; unpaired surrogates are dropped.
++    std::uint32_t points[256];
++    int n = 0;
++    for (int i = 0; i < count && n < static_cast<int>(std::size(points)); ++i) {
++      const std::uint32_t u = static_cast<std::uint16_t>(text[i]);
++      if (u >= 0xD800 && u <= 0xDBFF && i + 1 < count) {
++        const std::uint32_t low = static_cast<std::uint16_t>(text[i + 1]);
++        if (low >= 0xDC00 && low <= 0xDFFF) {
++          points[n++] = 0x10000 + ((u - 0xD800) << 10) + (low - 0xDC00);
++          ++i;
++        }
++        continue;
++      }
++      if (u >= 0xD800 && u <= 0xDFFF) {
++        continue;
++      }
++      points[n++] = u;
++    }
++    if (n == 0) {
++      return true;
++    }
++    if (free_slots(ring) < static_cast<std::uint64_t>(2 * n)) {
++      full_fallbacks.fetch_add(1, std::memory_order_relaxed);
++      return false;  // all or nothing: SendInput types the whole text
++    }
++    for (int i = 0; i < n; ++i) {
++      push(ring, SP_IN_UNICODE, static_cast<std::int32_t>(points[i]), 0);
++    }
++    for (int i = 0; i < n; ++i) {
++      push(ring, SP_IN_UNICODE, static_cast<std::int32_t>(points[i]), SP_IN_FLAG_UP);
++    }
++    signal();
++    return true;
++  }
++
++  bool try_mouse_abs(int x, int y) {
++    SpInputRing *ring = usable();
++    if (!ring || !push(ring, SP_IN_MOUSE_ABS, x < 0 ? 0 : x, y < 0 ? 0 : y)) {
++      motion_on_sendinput = true;
++      return false;
++    }
++    motion_on_sendinput = false;
++    signal();
++    return true;
++  }
++
++  bool try_mouse_rel(int dx, int dy) {
++    SpInputRing *ring = usable();
++    if (!ring || (shared(ring->flags).load(std::memory_order_acquire) & SP_INPUT_RING_REL_MOUSE) == 0 || !push(ring, SP_IN_MOUSE_REL, dx, dy)) {
++      // No relative mouse PDUs (raw input keeps its deltas through SendInput), or the ring is not usable
++      motion_on_sendinput = true;
++      return false;
++    }
++    motion_on_sendinput = false;
++    signal();
++    return true;
++  }
++
++  bool try_button(int button, bool release) {
++    // Sunshine: 1 left, 2 middle, 3 right, 4 X1, 5 X2; input_ring.h: 1 left, 2 right, 3 middle, 4 X1, 5 X2.
++    const int ring_button = button == 2 ? 3 : button == 3 ? 2 : button;
++    if (ring_button < 1 || ring_button > 5) {
++      return false;
++    }
++    return push_pointer(SP_IN_BUTTON, ring_button, release ? SP_IN_FLAG_UP : 0, ring_button >= 4 ? SP_INPUT_RING_XBUTTONS : 0);
++  }
++
++  bool try_wheel(int delta, bool horizontal) {
++    return push_pointer(horizontal ? SP_IN_HWHEEL : SP_IN_WHEEL, delta, 0, horizontal ? SP_INPUT_RING_HWHEEL : 0);
++  }
++}  // namespace splitplay::rdp_input
+diff --git a/src/splitplay/rdp_input.h b/src/splitplay/rdp_input.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..b30829f2e8d310925206fa98fb42574c9caea4d9
+--- /dev/null
++++ b/src/splitplay/rdp_input.h
+@@ -0,0 +1,97 @@
++/**
++ * @file src/splitplay/rdp_input.h
++ * @brief Keyboard and mouse through the seat's RDP connection (the Profile's `input`, docs/contracts/ipc.md).
++ *
++ * With `input: "rdp"` the worker writes keyboard and mouse events into the desk's input ring
++ * (`Global\SplitPlay.InputRing.<desk>`, the MIT contract splitplay/input_ring.h) instead of calling SendInput. The
++ * seat sends them into the session as RDP input PDUs over its loopback connection: the session sees a real remote
++ * keyboard and mouse (no "injected" flag), UAC prompts and Ctrl+Alt+Del work.
++ *
++ * - Relative motion goes over RDP only when the server accepts relative mouse PDUs (the ring's
++ *   SP_INPUT_RING_REL_MOUSE); otherwise it stays on SendInput, and so do clicks and wheel while the pointer moves that
++ *   way (an RDP pointer PDU carries a position, which would pull the cursor back). X buttons and the horizontal wheel
++ *   go over RDP only when the server announced them (SP_INPUT_RING_XBUTTONS, SP_INPUT_RING_HWHEEL).
++ * - Whenever the ring is not usable (no seat, the seat's connection is down, the seat died, the ring is full) the
++ *   event goes to SendInput as before, so input never stops.
++ * - Touch, pen and gamepads are unchanged.
++ *
++ * Threads: every `try_*` function runs on the input thread (`input_pool`), the ring's only producer. poll() runs on
++ * the heartbeat thread: it opens the ring and checks that the seat is alive, so the input thread makes no system
++ * call besides SetEvent.
++ */
++// SPDX-License-Identifier: GPL-3.0-only
++#pragma once
++
++// standard includes
++#include <cstdint>
++#include <optional>
++#include <string>
++
++namespace splitplay::rdp_input {
++  /// Where keyboard and mouse input goes.
++  enum class sink_e {
++    windows,  ///< SendInput, upstream (default).
++    rdp,  ///< The seat's RDP connection, through the input ring.
++  };
++
++  /**
++   * @brief Set the sink; std::nullopt: sink_e::windows. Live. Leaving `rdp` releases what is held over RDP.
++   * @param value New sink or std::nullopt.
++   */
++  void set_sink(std::optional<sink_e> value);
++
++  /**
++   * @return The configured sink.
++   */
++  sink_e sink();
++
++  /**
++   * @brief Heartbeat thread, about once a second: open the ring, check the seat. Cheap when nothing changed.
++   * @return The metric `input`: `windows`, `rdp` (all keyboard and mouse input over RDP), `rdp_mixed` (relative
++   * motion stays on SendInput: the server has no relative mouse PDUs) or `rdp_unavailable` (the seat's ring is not
++   * usable, everything goes to SendInput).
++   */
++  std::string poll();
++
++  /**
++   * @return Events that fell back to SendInput because the ring was full.
++   */
++  std::uint64_t ring_full_fallbacks();
++
++  // Input thread. Each returns true when the event went into the ring; false: the caller uses SendInput.
++
++  /**
++   * @param scancode Set-1 scancode (without prefix).
++   * @param extended E0 prefix.
++   * @param e1 E1 prefix (Pause).
++   * @param release Key up.
++   */
++  bool try_key(std::uint16_t scancode, bool extended, bool e1, bool release);
++
++  /**
++   * @brief Text as UTF-16, all key-downs then all key-ups (upstream's order).
++   * @param text UTF-16 code units.
++   * @param count Number of code units.
++   */
++  bool try_unicode(const wchar_t *text, int count);
++
++  /**
++   * @param x Horizontal position in desktop pixels (0 = left edge of the session's desktop).
++   * @param y Vertical position.
++   */
++  bool try_mouse_abs(int x, int y);
++
++  bool try_mouse_rel(int dx, int dy);
++
++  /**
++   * @param button Sunshine's numbering: 1 left, 2 middle, 3 right, 4 X1, 5 X2.
++   * @param release Button up.
++   */
++  bool try_button(int button, bool release);
++
++  /**
++   * @param delta Wheel delta, 120 per notch.
++   * @param horizontal Horizontal wheel (positive = right).
++   */
++  bool try_wheel(int delta, bool horizontal);
++}  // namespace splitplay::rdp_input

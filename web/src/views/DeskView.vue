@@ -27,6 +27,7 @@ import {
   resolutionKey,
   streamSummary,
   hdrLabel,
+  inputLabel,
 } from '../desk'
 import { fmtBitrate, fmtDateTime, fmtNumber, t } from '../i18n'
 import { store } from '../store'
@@ -50,6 +51,7 @@ const error = computed(() => (desk.value ? deskError(desk.value) : null))
 // ---- now: the connected device and live numbers (desk events and the 2 s metrics push)
 const stream = computed(() => (desk.value ? liveStream(desk.value) : null))
 const hdr = computed(() => (running.value ? hdrLabel(desk.value?.hdr) : null))
+const input = computed(() => (running.value ? inputLabel(desk.value?.metrics?.input) : null))
 const live = computed(() => {
   const m = desk.value?.metrics
   if (!m) return null
@@ -128,6 +130,18 @@ async function lifecycle(action: 'start' | 'stop' | 'restart'): Promise<void> {
   try {
     const fn = { start: api.startDesk, stop: api.stopDesk, restart: api.restartDesk }[action]
     store.upsertDesk(await fn.call(api, props.id))
+  } catch (e) {
+    toast(errorText(e), 'error')
+  } finally {
+    busy.value = false
+  }
+}
+
+async function sendSas(): Promise<void> {
+  busy.value = true
+  try {
+    await api.sendSas(props.id)
+    toast(t('desk.sasSent'))
   } catch (e) {
     toast(errorText(e), 'error')
   } finally {
@@ -354,6 +368,18 @@ async function remove(): Promise<void> {
               v-if="running && !progress"
               type="button"
               class="btn-icon"
+              data-action="sas"
+              :title="t('desk.sas')"
+              :aria-label="t('desk.sas')"
+              :disabled="busy"
+              @click="sendSas"
+            >
+              <AppIcon name="keyboard" :size="16" />
+            </button>
+            <button
+              v-if="running && !progress"
+              type="button"
+              class="btn-icon"
               :title="t('desk.restart')"
               :aria-label="t('desk.restart')"
               :disabled="busy"
@@ -426,6 +452,11 @@ async function remove(): Promise<void> {
           <AppIcon name="chip" :size="16" />
           <div class="text"><span class="title">{{ t('live.gpu') }}</span></div>
           <div class="ctl val" data-live-gpu>{{ gpu }}</div>
+        </div>
+        <div v-if="input" class="srow compact" data-live-input-row>
+          <AppIcon name="keyboard" :size="16" />
+          <div class="text"><span class="title">{{ t('live.input') }}</span></div>
+          <div class="ctl val" data-live-input>{{ input }}</div>
         </div>
         <div v-if="hdr" class="srow compact" data-live-hdr-row>
           <AppIcon name="monitor" :size="16" />

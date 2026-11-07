@@ -170,6 +170,15 @@ public sealed class ProfileConfig
     /// <summary>The values of <see cref="CaptureMode"/>.</summary>
     public static readonly IReadOnlyList<string> CaptureModes = ["slot", "arrival"];
 
+    /// <summary>
+    /// <see cref="Input"/> the service sends when it is not set: <c>windows</c> (SendInput in the session) until the
+    /// lab tries RDP input with games on real hardware (stage4-plan, lab E).
+    /// </summary>
+    public const string DefaultInput = "windows";
+
+    /// <summary>The values of <see cref="Input"/>.</summary>
+    public static readonly IReadOnlyList<string> Inputs = ["windows", "rdp"];
+
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? Fps { get; set; }
 
@@ -204,6 +213,14 @@ public sealed class ProfileConfig
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? CaptureMode { get; set; }
+
+    /// <summary>
+    /// Where the desk's keyboard and mouse input goes: <c>windows</c>, SendInput inside the session, or <c>rdp</c>,
+    /// the seat's RDP connection (a real remote keyboard and mouse: no injection flag, UAC prompts and Ctrl+Alt+Del
+    /// work). Relative mouse motion stays on SendInput when the RDP server has no relative mouse PDUs. Applied live.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Input { get; set; }
 
     /// <summary>
     /// "Адаптивный поток" (default on; null means on): the service tunes FEC (5–50 %) to the packet loss the client

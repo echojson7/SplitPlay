@@ -14,6 +14,15 @@ namespace splitplay::input {
 // Consumer (seat) side: zero the ring and write magic/version/capacity/flags.
 void init_ring(SpInputRing* ring, uint32_t flags) noexcept;
 
+// Consumer side, for a section that already existed (the seat restarted while a worker still maps it): keeps
+// write_index so the producer's cached index stays valid, drops what is queued (read_index = write_index), rewrites
+// magic/version/capacity/flags. Returns the number of events dropped.
+uint64_t reattach_ring(SpInputRing* ring, uint32_t flags) noexcept;
+
+// Consumer side: publishes new SpInputRing::flags (SP_INPUT_RING_*); the producer reads them before every event.
+void set_flags(SpInputRing* ring, uint32_t flags) noexcept;
+uint32_t get_flags(SpInputRing* ring) noexcept;
+
 // Checks magic, version and capacity. `mapped_size` is the size of the mapping that holds the ring.
 bool validate_ring(const SpInputRing* ring, size_t mapped_size, std::string* error);
 

@@ -51,6 +51,8 @@ class SeatApp {
   void on_welcome(ipc::json& welcome);
   // Handles one connector state change on the main thread. Returns an exit code to stop with, or -1.
   int on_state(const StateEvent& event);
+  // Publishes SP_INPUT_RING_READY (and SP_INPUT_RING_REL_MOUSE when the server takes relative motion) or clears both.
+  void publish_input_flags(bool ready);
 
   SeatOptions options_;
   std::unique_ptr<IRdpConnector> connector_;

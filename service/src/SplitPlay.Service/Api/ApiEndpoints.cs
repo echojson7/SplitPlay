@@ -428,6 +428,11 @@ public static partial class ApiEndpoints
         api.MapPost("/desks/{id}/stop", (string id, DeskSupervisor s) => Results.Json(s.Stop(id), Ctx.DeskDto, statusCode: StatusCodes.Status202Accepted));
         api.MapPost("/desks/{id}/restart", async (string id, DeskSupervisor s) =>
             Results.Json(await s.RestartAsync(id).ConfigureAwait(false), Ctx.DeskDto, statusCode: StatusCodes.Status202Accepted));
+        api.MapPost("/desks/{id}/sas", async (string id, DeskSupervisor s) =>
+        {
+            await s.SendSasAsync(id).ConfigureAwait(false);
+            return Results.NoContent();
+        });
 
         // ---- pairing (forwarded to the worker over the pipe)
         api.MapGet("/desks/{id}/clients", async (string id, DeskSupervisor s) =>

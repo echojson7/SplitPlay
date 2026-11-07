@@ -11,6 +11,7 @@
 #include <freerdp/event.h>
 #include <freerdp/freerdp.h>
 #include <freerdp/gdi/gdi.h>
+#include <freerdp/input.h>
 #include <freerdp/settings.h>
 #include <winpr/wlog.h>
 
@@ -28,6 +29,17 @@ namespace splitplay::seat {
 namespace {
 
 using namespace std::chrono_literals;
+
+// rdp_input.hpp spells out MS-RDPBCGR's flag values; they must be FreeRDP's.
+static_assert(rdp::kKbdExtended == KBD_FLAGS_EXTENDED && rdp::kKbdExtended1 == KBD_FLAGS_EXTENDED1);
+static_assert(rdp::kKbdDown == KBD_FLAGS_DOWN && rdp::kKbdRelease == KBD_FLAGS_RELEASE);
+static_assert(rdp::kPtrHWheel == PTR_FLAGS_HWHEEL && rdp::kPtrWheel == PTR_FLAGS_WHEEL);
+static_assert(rdp::kPtrWheelNegative == PTR_FLAGS_WHEEL_NEGATIVE && rdp::kPtrWheelMask == WheelRotationMask);
+static_assert(rdp::kPtrMove == PTR_FLAGS_MOVE && rdp::kPtrDown == PTR_FLAGS_DOWN);
+static_assert(rdp::kPtrButton1 == PTR_FLAGS_BUTTON1 && rdp::kPtrButton2 == PTR_FLAGS_BUTTON2 &&
+              rdp::kPtrButton3 == PTR_FLAGS_BUTTON3);
+static_assert(rdp::kPtrXDown == PTR_XFLAGS_DOWN && rdp::kPtrXButton1 == PTR_XFLAGS_BUTTON1 &&
+              rdp::kPtrXButton2 == PTR_XFLAGS_BUTTON2);
 
 // rdpClientContext must be the first member (FreeRDP casts between them).
 struct SeatContext {
@@ -56,7 +68,11 @@ BOOL cb_desktop_resize(rdpContext* context) {
 }
 
 BOOL cb_play_sound(rdpContext*, const PLAY_SOUND_UPDATE*) { return TRUE; }
-BOOL cb_keyboard_indicators(rdpContext*, UINT16) { return TRUE; }
+// The server reports the session's lock-key LEDs; the CI session test uses them to see that keys arrive.
+BOOL cb_keyboard_indicators(rdpContext* context, UINT16 leds) {
+  if (auto* self = self_of(context)) self->on_keyboard_indicators(leds);
+  return TRUE;
+}
 BOOL cb_keyboard_ime(rdpContext*, UINT16, UINT32, UINT32) { return TRUE; }
 
 BOOL cb_post_connect(freerdp* instance) {
@@ -450,6 +466,7 @@ std::string FreeRdpConnector::run_session(bool* reached_logon) {
     std::lock_guard lock(mutex_);
     connection_open_ = true;
   }
+  open_input();
   const auto connected_at = std::chrono::steady_clock::now();
   auto last_poll = connected_at - 1s;
   bool logged_on = false;
@@ -499,6 +516,7 @@ std::string FreeRdpConnector::run_session(bool* reached_logon) {
     }
   }
   (void)instance;
+  close_input();
   {
     std::lock_guard lock(mutex_);
     connection_open_ = false;
@@ -638,19 +656,117 @@ void FreeRdpConnector::disconnect() {
   }
 }
 
+void FreeRdpConnector::open_input() {
+  std::lock_guard lock(context_mutex_);
+  if (!context_) return;
+  const rdpSettings* s = context_->settings;
+  // The client's copy of the server's input capability set (freerdp_connect returns after the capability exchange).
+  rdp::ServerInputCaps caps;
+  caps.relative_mouse = freerdp_settings_get_bool(s, FreeRDP_HasRelativeMouseEvent);
+  caps.horizontal_wheel = freerdp_settings_get_bool(s, FreeRDP_HasHorizontalWheel);
+  caps.extended_mouse = freerdp_settings_get_bool(s, FreeRDP_HasExtendedMouseEvent);
+  caps.unicode = freerdp_settings_get_bool(s, FreeRDP_UnicodeInput);
+  mapper_.reset(caps);
+  input_open_ = true;
+  relative_mouse_ = caps.relative_mouse;
+  input_caps_ = (caps.relative_mouse ? SP_INPUT_RING_REL_MOUSE : 0u) | (caps.extended_mouse ? SP_INPUT_RING_XBUTTONS : 0u) |
+                (caps.horizontal_wheel ? SP_INPUT_RING_HWHEEL : 0u);
+  log_info("RDP: input open (relative mouse {}, horizontal wheel {}, X buttons {}, unicode {}, fast-path {})",
+           caps.relative_mouse ? "yes" : "no", caps.horizontal_wheel ? "yes" : "no",
+           caps.extended_mouse ? "yes" : "no", caps.unicode ? "yes" : "no",
+           freerdp_settings_get_bool(s, FreeRDP_FastPathInput) ? "yes" : "no");
+}
+
+void FreeRdpConnector::close_input() {
+  std::lock_guard lock(context_mutex_);
+  input_open_ = false;
+}
+
+bool FreeRdpConnector::send_ops() {
+  rdpInput* in = context_->input;
+  bool ok = true;
+  for (const rdp::Op& op : ops_) {
+    BOOL sent = FALSE;
+    switch (op.kind) {
+      case rdp::Op::Kind::keyboard:
+        sent = freerdp_input_send_keyboard_event(in, op.flags, static_cast<UINT8>(op.code));
+        break;
+      case rdp::Op::Kind::unicode:
+        sent = freerdp_input_send_unicode_keyboard_event(in, op.flags, op.code);
+        break;
+      case rdp::Op::Kind::pause:
+        sent = freerdp_input_send_keyboard_pause_event(in);
+        break;
+      case rdp::Op::Kind::mouse:
+        sent = freerdp_input_send_mouse_event(in, op.flags, static_cast<UINT16>(op.x), static_cast<UINT16>(op.y));
+        break;
+      case rdp::Op::Kind::xmouse:
+        sent = freerdp_input_send_extended_mouse_event(in, op.flags, static_cast<UINT16>(op.x),
+                                                       static_cast<UINT16>(op.y));
+        break;
+      case rdp::Op::Kind::relmouse:
+        sent = freerdp_input_send_rel_mouse_event(in, op.flags, static_cast<INT16>(op.x), static_cast<INT16>(op.y));
+        break;
+    }
+    ok = ok && sent;
+  }
+  return ok;
+}
+
 bool FreeRdpConnector::inject(const SpInputEvent& event) {
-  // Stage 3 keeps the input ring consumer as is: input reaches the desk through the worker, not through RDP.
-  static std::atomic<uint64_t> injected{0};
-  const uint64_t n = ++injected;
-  if (n <= 16 || n % 1000 == 0)
-    log_debug("RDP: input #{} {} a={} b={} seq={} (not injected)", n, input::input_type_name(event.type), event.a,
-              event.b, event.seq);
+  std::unique_lock lock(context_mutex_);
+  // While the server reactivates the connection (a legacy-graphics resize does) FreeRDP drops input silently; wait
+  // for it (events queue up in the ring meanwhile) instead of losing a key-up.
+  for (int i = 0; i < 100 && context_ && input_open_ && !freerdp_is_active_state(context_); ++i) {
+    lock.unlock();
+    Sleep(10);
+    lock.lock();
+  }
+  if (!context_ || !input_open_ || !freerdp_is_active_state(context_)) {
+    const uint64_t n = ++input_not_connected_;
+    if (n == 1 || n % 1000 == 0) log_warn("RDP: {} input event(s) arrived without a connection", n);
+    return false;
+  }
+  ops_.clear();
+  if (!mapper_.map(event, ops_)) {
+    const uint64_t n = ++input_unsupported_;
+    if (n <= 8 || n % 1000 == 0)
+      log_warn("RDP: input {} a={} b={} cannot be sent on this connection ({} so far)",
+               input::input_type_name(event.type), event.a, event.b, n);
+    return false;
+  }
+  if (ops_.empty()) {
+    ++input_sent_;  // handled, nothing to send (e.g. release-all with nothing held)
+    return true;
+  }
+  if (!send_ops()) {
+    const uint64_t n = ++input_failed_;
+    if (n <= 8 || n % 1000 == 0) log_warn("RDP: sending input {} failed ({} so far)", input::input_type_name(event.type), n);
+    return false;
+  }
+  ++input_sent_;
   return true;
 }
 
 bool FreeRdpConnector::send_sas(std::string* error) {
-  if (error) *error = "send_sas is not supported by the FreeRDP connector yet";
-  return false;
+  std::lock_guard lock(context_mutex_);
+  if (!context_ || !input_open_) {
+    if (error) *error = "no RDP connection is up";
+    return false;
+  }
+  ops_.clear();
+  mapper_.sas(ops_);
+  if (!send_ops()) {
+    if (error) *error = "sending Ctrl+Alt+Del over RDP failed";
+    return false;
+  }
+  log_info("RDP: sent Ctrl+Alt+Del");
+  return true;
+}
+
+InputStats FreeRdpConnector::input_stats() const {
+  return {input_sent_.load(), input_unsupported_.load(), input_not_connected_.load(), input_failed_.load(),
+          keyboard_leds_.load()};
 }
 
 }  // namespace splitplay::seat

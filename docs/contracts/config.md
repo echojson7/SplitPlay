@@ -42,6 +42,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
         "dpbFrames": 16,
         "pacingMbps": 800,
         "captureMode": "arrival",
+        "input": "rdp",
         "adaptiveStream": true,
         "gpuPriority": "high"
       }
@@ -147,6 +148,11 @@ Rules:
   half a stream interval later on average) or `arrival` (each frame as soon as DWM composes it, at most `fps` on
   average; worker/README.md, *Capture on arrival*). The default stays `slot` until the lab measures `arrival`. In the
   web UI: Дополнительно → Захват кадра.
+- `profile.input` (live): `windows` (default, SendInput inside the session) or `rdp` (keyboard and mouse go through the
+  seat's RDP connection as a real remote keyboard and mouse: no injection flag, UAC prompts and Ctrl+Alt+Del work;
+  relative mouse motion stays on SendInput when the RDP server has no relative mouse PDUs; ipc.md, *RDP input*). The
+  default stays `windows` until the lab tries `rdp` with games (lab E). In the web UI: Дополнительно → Клавиатура и
+  мышь; the desk page then shows a «Ввод» row with the path in use (`metrics.input`, web-api.md).
 - `profile.adaptiveStream` (default `true`, «Адаптивный поток»; worker patches 0023 and 0025): while a client streams
   the service reads the packet loss the client reports on every heartbeat and
   - sets FEC between 5 and 50 %: the worst FEC block of the last 15 s plus a quarter and two points, rounded up to

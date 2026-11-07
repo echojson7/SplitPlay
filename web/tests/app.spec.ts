@@ -69,6 +69,11 @@ describe('app smoke', () => {
     expect(w.find('[data-live-gpu]').text()).toMatch(/^\d+ % · кодер \d+ % · \d+,\d ГБ$/)
     // The desk display's HDR state, as the worker measured it: an RDP display is SDR only.
     expect(w.find('[data-live-hdr]').text()).toBe('Недоступен')
+    // Windows input (the default) needs no row; Ctrl+Alt+Del goes over the seat's RDP connection.
+    expect(w.find('[data-live-input-row]').exists()).toBe(false)
+    await w.find('[data-action="sas"]').trigger('click')
+    await settle()
+    expect(document.body.textContent).toContain('Ctrl+Alt+Del отправлено')
     expect(w.find('[data-address]').text()).toBe('192.168.1.20:48089')
     expect(w.find('details.more').attributes('open')).toBeUndefined()
 

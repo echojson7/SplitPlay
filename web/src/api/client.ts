@@ -244,6 +244,11 @@ export class ApiClient {
     return this.request('POST', `/desks/${encodeURIComponent(id)}/restart`)
   }
 
+  /** Ctrl+Alt+Del into the desk session (over the seat's RDP connection). */
+  async sendSas(id: string): Promise<void> {
+    await this.request('POST', `/desks/${encodeURIComponent(id)}/sas`)
+  }
+
   async listClients(id: string): Promise<PairedClient[]> {
     return unwrapList<PairedClient>(await this.request('GET', `/desks/${encodeURIComponent(id)}/clients`), 'clients')
   }

@@ -7,11 +7,13 @@ import {
   CAPTURE_MODES,
   CODECS,
   GPU_PRIORITIES,
+  INPUT_SINKS,
   type CaptureMode,
   type Desk,
   type DeskConfig,
   type GpuInfo,
   type GpuPriority,
+  type InputSink,
 } from '../api/types'
 import { hasErrors, validateDeskConfig, type DeskConfigErrors } from '../api/validate'
 import { t } from '../i18n'
@@ -42,6 +44,7 @@ const form = reactive({
   pacingMbps: d.profile.pacingMbps === undefined ? '' : String(d.profile.pacingMbps),
   gpuPriority: (d.profile.gpuPriority ?? '') as GpuPriority | '',
   captureMode: (d.profile.captureMode ?? '') as CaptureMode | '',
+  input: (d.profile.input ?? 'windows') as InputSink,
   // Stored as the worker's `gamepad` setting (keys are case-insensitive); the service defaults it to ds4.
   gamepad: gamepadSetting(d.workerSettings),
   workerSettings: Object.entries(d.workerSettings ?? {})
@@ -93,6 +96,9 @@ function toConfig(): DeskConfig {
   else delete profile.gpuPriority
   if (form.captureMode) profile.captureMode = form.captureMode
   else delete profile.captureMode
+  // The default (windows) is left out unless the desk already had an explicit value.
+  if (form.input !== 'windows' || props.desk.profile.input !== undefined) profile.input = form.input
+  else delete profile.input
   // On is the default: left out unless the desk already had an explicit value.
   if (props.desk.profile.adaptiveStream !== undefined || !form.adaptive) profile.adaptiveStream = form.adaptive
   else delete profile.adaptiveStream
@@ -183,6 +189,12 @@ const gpuOptions = computed(() => {
         <label for="adv-gamepad">{{ t('adv.gamepad') }}</label>
         <select id="adv-gamepad" v-model="form.gamepad" name="gamepad" :disabled="running">
           <option v-for="o in gamepadOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="adv-input">{{ t('adv.input') }}</label>
+        <select id="adv-input" v-model="form.input" name="input">
+          <option v-for="i in INPUT_SINKS" :key="i" :value="i">{{ t(`adv.input.${i}`) }}</option>
         </select>
       </div>
       <div class="field">

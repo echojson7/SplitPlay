@@ -63,6 +63,7 @@ public sealed class DeskSupervisor : IHostedService
 
     // Power state: _sleep completes when the PC goes to sleep, _wake when it is awake (again).
     private readonly RequiredServicesStarter _requiredServices;
+    private readonly NvidiaDriverSettings _nvidia;
     private Task _startup = Task.CompletedTask;
     private readonly object _powerGate = new();
     private readonly object _composeGate = new();
@@ -73,8 +74,9 @@ public sealed class DeskSupervisor : IHostedService
 
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
-        PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage, ICpuControl cpu)
+        PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage, ICpuControl cpu, NvidiaDriverSettings nvidia)
     {
+        _nvidia = nvidia;
         ArgumentNullException.ThrowIfNull(power);
         _cpu = cpu;
         power.Changed += OnPowerChange;
@@ -511,6 +513,32 @@ public sealed class DeskSupervisor : IHostedService
         return new MetricsDto(host, desks);
     }
 
+    /// <summary>
+    /// For the game FPS limits: every configured desk with its session (null when it has none, or runs on the console)
+    /// and the frame rate its first Moonlight client asked for (null without a client).
+    /// </summary>
+    public IReadOnlyList<GameDeskView> GameDesks()
+    {
+        var console = _platform.ConsoleSessionId();
+        var list = new List<GameDeskView>();
+        foreach (var desk in _config.Snapshot().Desks)
+        {
+            if (!_desks.TryGetValue(desk.Id, out var rt))
+            {
+                continue;
+            }
+
+            lock (rt.Gate)
+            {
+                var session = rt.SessionId is int s && s > 0 && s != console && !rt.Machine.State.IsIdle() ? s : (int?)null;
+                var fps = rt.Streams.Count > 0 && rt.Streams[0].FpsRequested > 0 ? rt.Streams[0].FpsRequested : (int?)null;
+                list.Add(new GameDeskView(desk.Id, session, fps));
+            }
+        }
+
+        return list;
+    }
+
     /// <summary>The DXGI adapter list with live load, encoder and VRAM use filled in where the counters have them.</summary>
     private IReadOnlyList<GpuDto> GpusWithUsage(GpuUsageSnapshot? usage)
     {
@@ -868,6 +896,19 @@ public sealed class DeskSupervisor : IHostedService
         _logger.LogInformation("Desk {Desk}: Ctrl+Alt+Del sent", rt.Id);
     }
 
+    /// <summary>
+    /// The worker took a PIN (<c>pair</c> succeeded): the desk stops asking for one at once instead of on the next
+    /// heartbeat, and the UI and the tray drop the request.
+    /// </summary>
+    public void PinDelivered(string id)
+    {
+        var rt = Find(id);
+        if (rt.ClearPinRequest(_time.GetUtcNow()))
+        {
+            Publish(rt);
+        }
+    }
+
     /// <summary>Sends a request to the desk's connected child and returns its result.</summary>
     public async Task<ResultMessage> RequestAsync(string id, Func<long, IpcMessage> build)
     {
@@ -1128,6 +1169,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
                 rt.Hdr = null;
+                rt.PinRequest = null;
                 if (rt.Machine.State == DeskState.Stopping)
                 {
                     rt.Machine.Fire(DeskTrigger.Stopped);
@@ -1302,6 +1344,10 @@ public sealed class DeskSupervisor : IHostedService
             return PausedForSleep;
         }
 
+        // The driver settings the worker relies on (patch 0020: workers no longer set them): checked again before every
+        // start, so that a driver update or a reset in NVIDIA Control Panel is repaired. Failures are only logged.
+        await Task.Run(() => _nvidia.EnsureApplied($"desk {rt.Id}"), stop).ConfigureAwait(false);
+
         if (await PrepareNetworkAsync(rt, config, stop).ConfigureAwait(false) is { } busy)
         {
             return busy;
@@ -1403,6 +1449,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
                 rt.Hdr = null;
+                rt.PinRequest = null;
             }
         }
     }

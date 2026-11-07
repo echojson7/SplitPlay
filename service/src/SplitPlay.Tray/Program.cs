@@ -5,7 +5,8 @@ using SplitPlay.Core;
 namespace SplitPlay.Tray;
 
 /// <summary>
-/// Tray app: an icon with "Open dashboard" and "Quit", and a window hosting WebView2 on the service's web UI.
+/// Tray app: an icon whose menu opens the dashboard, starts and stops desks and quits; a notification when a Moonlight
+/// client waits for its PIN; and a window hosting WebView2 on the service's web UI.
 /// <c>SplitPlay.Tray.exe [--url URL] [--autostart|--minimized] [--smoke-test RESULT_FILE]</c>.
 /// Started by hand (Start menu, installer) it opens the dashboard; with <c>--autostart</c> (the HKLM Run entry) it
 /// stays an icon, and exits at once in a remote (RDP) session such as a desk. One instance per user session: a second

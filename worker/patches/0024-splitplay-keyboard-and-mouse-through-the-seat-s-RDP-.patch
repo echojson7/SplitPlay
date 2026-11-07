@@ -32,11 +32,11 @@ the metric input: windows, rdp, rdp_mixed (relative motion on SendInput)
 or rdp_unavailable, plus input_fallbacks (events that met a full ring).
 
 diff --git a/cmake/compile_definitions/common.cmake b/cmake/compile_definitions/common.cmake
-index f810622e6744db791281cbfbb767211559d201c0..2b8d6dc4cd9b10115f3b0c0332edea1cc02f1b2d 100644
+index a2f01cd9b200ea4cc0783c974c799891567ffa05..9eeccf6dda37e9d9b5520542dfa7b099c4e936d2 100644
 --- a/cmake/compile_definitions/common.cmake
 +++ b/cmake/compile_definitions/common.cmake
-@@ -185,6 +185,8 @@ set(SUNSHINE_TARGET_FILES
-         "${CMAKE_SOURCE_DIR}/src/splitplay/options.h"
+@@ -187,6 +187,8 @@ set(SUNSHINE_TARGET_FILES
+         "${CMAKE_SOURCE_DIR}/src/splitplay/pairing.h"
          "${CMAKE_SOURCE_DIR}/src/splitplay/profile.cpp"
          "${CMAKE_SOURCE_DIR}/src/splitplay/profile.h"
 +        "${CMAKE_SOURCE_DIR}/src/splitplay/rdp_input.cpp"
@@ -153,18 +153,18 @@ index 0d723985ce846abf8f2f8b1b6dbc2e242da67a99..96cc137a145857c0676161512af11355
      for (int i = 0; i < chars; i++) {
        INPUT input {};
 diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
-index aaa6c3a215c9fec03f6b9b7c01b1a14070858827..474c0c1ae2c8cddc59b35d99fdf73e0c87c2f115 100644
+index 6b5e359d5e3b69a4e0896661d3378c258d533ba2..5c06507e72a865519e0d26abc4c7fdcc51943af7 100644
 --- a/src/splitplay/control_client.cpp
 +++ b/src/splitplay/control_client.cpp
-@@ -33,6 +33,7 @@
- #include "live_stats.h"
+@@ -34,6 +34,7 @@
  #include "options.h"
+ #include "pairing.h"
  #include "profile.h"
 +#include "rdp_input.h"
  #include "src/config.h"
  #include "src/entry_handler.h"
  #include "src/logging.h"
-@@ -102,6 +103,9 @@ namespace splitplay::control {
+@@ -103,6 +104,9 @@ namespace splitplay::control {
      /// The one string field the worker applies: `slot` (default) or `arrival`, live.
      constexpr const char *capture_mode_field = "capture_mode";
  
@@ -174,7 +174,7 @@ index aaa6c3a215c9fec03f6b9b7c01b1a14070858827..474c0c1ae2c8cddc59b35d99fdf73e0c
      /**
       * @brief Apply the stream settings of a Profile object, all or nothing.
       *
-@@ -142,6 +146,20 @@ namespace splitplay::control {
+@@ -143,6 +147,20 @@ namespace splitplay::control {
          }
        }
  
@@ -195,7 +195,7 @@ index aaa6c3a215c9fec03f6b9b7c01b1a14070858827..474c0c1ae2c8cddc59b35d99fdf73e0c
        json applied = json::array();
        json next_stream = json::array();
        json not_applied = json::array();
-@@ -172,8 +190,18 @@ namespace splitplay::control {
+@@ -173,8 +191,18 @@ namespace splitplay::control {
                     **capture_mode == splitplay::profile::capture_mode_e::arrival ? "arrival" :
                                                                                     "slot";
        }
@@ -215,7 +215,7 @@ index aaa6c3a215c9fec03f6b9b7c01b1a14070858827..474c0c1ae2c8cddc59b35d99fdf73e0c
            return key == field.name;
          });
          if (!known) {
-@@ -429,6 +457,8 @@ namespace splitplay::control {
+@@ -430,6 +458,8 @@ namespace splitplay::control {
              },
              [&](json metrics, json sessions) {
                const bool streaming = !sessions.empty();

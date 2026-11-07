@@ -68,6 +68,11 @@ export interface DeskConfig {
    * SplitPlay created); a request that leaves it out keeps the current one.
    */
   hideFromLogon?: boolean
+  /**
+   * NVIDIA frame rate limit for the games seen in this desk: null or absent Auto (the Moonlight client's fps), 0 off,
+   * otherwise FPS. A desk update that leaves it out keeps the current value.
+   */
+  gameFpsLimit?: number | null
   /** Extra Sunshine settings passed to the worker verbatim. */
   workerSettings?: Record<string, string>
   /**
@@ -211,6 +216,13 @@ export interface DeskHdr {
   updatedAt?: string
 }
 
+/** A Moonlight client that shows a PIN and waits for it (`desk.pinRequest`). */
+export interface DeskPinRequest {
+  /** Client IP address; null when unknown. */
+  address: string | null
+  since: string
+}
+
 /** Desk object as returned by GET /desks and GET /desks/{id}. */
 export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   basePort: number
@@ -227,6 +239,8 @@ export interface Desk extends Omit<DeskConfig, 'basePort' | 'password'> {
   stream?: DeskStream | null
   /** The display's HDR state; null (or absent from older services) while no worker has reported it. */
   hdr?: DeskHdr | null
+  /** A Moonlight client waiting for its PIN; null (or absent from older services) when none is. */
+  pinRequest?: DeskPinRequest | null
   lastError: string | null
 }
 
@@ -321,6 +335,8 @@ export interface HostSettings {
   logLevel: string
   /** Keep the PC from sleeping while a client streams (default true; older services leave it out). */
   keepAwake?: boolean
+  /** The service manages the NVIDIA driver settings (default true; older services leave it out). */
+  nvidiaProfiles?: boolean
   /** Which processor cores desk processes may use (default `off`; older services leave it out). */
   deskCores?: DeskCoresMode
 }
@@ -346,6 +362,25 @@ export interface HostCpu {
   mode: DeskCoresMode
   desks: DeskCpu[]
   auto: DeskCpu[]
+}
+
+export const GAME_STATUSES = ['limited', 'owner', 'failed', 'pending', 'off', 'excluded', 'noDriver', 'disabled'] as const
+export type GameStatus = (typeof GAME_STATUSES)[number]
+
+/** GET /games: a game the service saw in a desk and its FPS limit. */
+export interface Game {
+  /** The executable's file name; the id in /games/{exe}. */
+  exe: string
+  path: string | null
+  /** Desks it was seen in. */
+  desks: string[]
+  /** The limit SplitPlay wants for it; null: none. */
+  limit: number | null
+  status: GameStatus
+  /** The owner turned the limit off for this game. */
+  excluded: boolean
+  firstSeen: string
+  lastSeen: string
 }
 
 /** Events pushed over GET /ws. */

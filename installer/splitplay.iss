@@ -805,7 +805,9 @@ begin
   if FindFirst(DataDir + '\*', F) then
   try
     repeat
-      if (F.Name <> '.') and (F.Name <> '..') and (CompareText(F.Name, 'desks') <> 0) then
+      { desks: what the next desk cleanup needs; nvidia-profiles.json: the NVIDIA values still to give back. }
+      if (F.Name <> '.') and (F.Name <> '..') and (CompareText(F.Name, 'desks') <> 0)
+        and (CompareText(F.Name, 'nvidia-profiles.json') <> 0) then
       begin
         if (F.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
           DelTree(DataDir + '\' + F.Name, True, True, True)
@@ -905,14 +907,16 @@ begin
     end;
     { With the desks stopped: undo what each desk changed (its Steam values in the desk user's hive, its sign-in screen
       entry and firewall rules) and, when asked, delete the accounts SplitPlay created. Accounts SplitPlay did not
-      create are never deleted. }
+      create are never deleted. It also puts the NVIDIA driver settings back (the "SplitPlay worker" profile, and the
+      global value recorded by the service or left in an older worker's undo file); nothing without an NVIDIA driver. }
     Params := 'cleanup';
     if DeleteDeskAccounts then
       Params := Params + ' --delete-accounts';
     Code := RunHiddenWithTimeout(ExpandConstant('{app}\service\SplitPlay.Service.exe'), Params, 180, 'SplitPlay.Service');
     if Code <> 0 then
     begin
-      { The desk records (logon-hidden.json, the Steam state) are what a later cleanup needs: they are never purged now. }
+      { The desk records (logon-hidden.json, the Steam state) and nvidia-profiles.json are what a later cleanup needs:
+        they are never purged now. }
       CleanupFailed := True;
       Log(Format('Desk cleanup failed or timed out (code %d); keeping %s\desks', [Code, DataDir]));
       if not UninstallSilent then
@@ -924,9 +928,6 @@ begin
       UninstallRebootRequired := True;
     { After the service is gone, so that no worker holds a ViGEm pad any more. }
     UninstallViGEmBus;
-    { With every worker stopped: put the NVIDIA driver settings back (the global value a killed worker left recorded in
-      its undo file, and the workers' "SplitPlay worker" application profile). Nothing happens without an NVIDIA driver. }
-    RunHidden(ExpandConstant('{app}\worker\splitplay-worker.exe'), '--desk-dir "' + ExpandConstant('{tmp}\worker') + '" --restore-nvprefs-undo');
     RunHidden(SysTool('netsh.exe'), 'advfirewall firewall delete rule name="' + FirewallRuleWeb + '"');
     { netsh cannot delete by wildcard. }
     RunHidden(SysTool('WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command ' +

@@ -150,6 +150,11 @@ public static class DeskHdrStates
     public const string Unknown = "unknown";
 }
 
+/// <summary><c>desk.pinRequest</c>: a Moonlight client that shows a PIN and waits for it to be typed in.</summary>
+/// <param name="Address">Client IP address, null when unknown.</param>
+/// <param name="Since">When the client started pairing.</param>
+public sealed record DeskPinRequestDto(string? Address, DateTimeOffset Since);
+
 /// <summary>Desk object returned by the desk endpoints.</summary>
 public sealed class DeskDto
 {
@@ -189,6 +194,9 @@ public sealed class DeskDto
     /// <summary>See <see cref="DeskConfig.SteamIsolation"/>; always set in responses.</summary>
     public bool SteamIsolation { get; set; } = true;
 
+    /// <summary>See <see cref="DeskConfig.GameFpsLimit"/>: null Auto, 0 off.</summary>
+    public int? GameFpsLimit { get; set; }
+
     /// <summary>See <see cref="DeskConfig.HideFromLogon"/>; the effective value, always set in responses.</summary>
     public bool HideFromLogon { get; set; }
 
@@ -202,6 +210,9 @@ public sealed class DeskDto
 
     /// <summary>The HDR state of the desk session's display; null while no worker has reported it.</summary>
     public DeskHdrDto? Hdr { get; set; }
+
+    /// <summary>A Moonlight client waiting for its PIN on this desk, null when none is (docs/contracts/web-api.md).</summary>
+    public DeskPinRequestDto? PinRequest { get; set; }
 
     public string? LastError { get; set; }
 }
@@ -233,6 +244,25 @@ public sealed record HostCpuDto(
     IReadOnlyList<CpuCacheGroupDto> Caches,
     IReadOnlyList<DeskCpuDto> Desks,
     IReadOnlyList<DeskCpuDto> Auto);
+
+/// <summary>
+/// One entry of <c>GET /games</c>: a game the service saw in a desk and what its FPS limit is. <see cref="Status"/>:
+/// <c>limited</c> (the driver holds <see cref="Limit"/>), <c>owner</c> (a limit set in NVIDIA Control Panel is left
+/// alone), <c>failed</c>, <c>pending</c> (not applied yet), <c>off</c> (its desks have the limit off), <c>excluded</c>
+/// (turned off for this game), <c>noDriver</c> (no NVIDIA driver), <c>disabled</c> (<c>host.nvidiaProfiles</c> off).
+/// </summary>
+/// <param name="Exe">The executable's file name, the game's id in <c>/games/{exe}</c>.</param>
+/// <param name="Limit">The limit SplitPlay wants for it; null when none.</param>
+/// <param name="Profile">The driver profile that holds the limit (NVIDIA's own game profile, or "SplitPlay game …").</param>
+public sealed record GameDto(string Exe, string? Path, IReadOnlyList<string> Desks, int? Limit, string Status, bool Excluded,
+    DateTimeOffset FirstSeen, DateTimeOffset LastSeen, string? Profile);
+
+/// <summary>Body of <c>PUT /games/{exe}</c>.</summary>
+public sealed class GameUpdateRequest
+{
+    /// <summary>True: no limit for this game; false: the desks' limit again.</summary>
+    public bool? Excluded { get; set; }
+}
 
 /// <summary>The processors that share one L3 cache (a CCD on Ryzen).</summary>
 public sealed record CpuCacheGroupDto(IReadOnlyList<int> Cpus, double L3Mb);

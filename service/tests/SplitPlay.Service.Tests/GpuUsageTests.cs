@@ -147,6 +147,22 @@ public sealed class GpuUsageTests
     }
 
     [Fact]
+    public void Processes_carry_their_render_load_and_vram_but_not_their_video_engines()
+    {
+        const double Mb = 1024 * 1024;
+        var sample = new GpuRawSample(
+            [Engine(10, 0, "3D", 40), Engine(10, 1, "Copy", 5), Engine(20, 5, "VideoEncode", 30), Engine(20, 6, "VideoDecode", 10),
+             Engine(30, 0, "3D", 99)],
+            [new(10, Luid, 512 * Mb), new(20, Luid, 100 * Mb)],
+            [new(Luid, 1024 * Mb)]);
+        var snapshot = GpuUsageMath.Aggregate(sample, pid => pid == 30 ? null : 7);
+
+        Assert.Equal(2, snapshot.Processes.Count);
+        Assert.Equal(new GpuProcessUsage(10, 7, 40, 512), snapshot.Processes[0]);
+        Assert.Equal(new GpuProcessUsage(20, 7, 0, 100), snapshot.Processes[1]);
+    }
+
+    [Fact]
     public async Task Metrics_carry_gpu_encoder_and_vram_per_adapter_and_per_desk()
     {
         await using var svc = await TestService.StartAsync();

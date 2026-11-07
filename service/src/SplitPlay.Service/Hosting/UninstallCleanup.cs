@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 using Microsoft.Extensions.Options;
 using SplitPlay.Core.Configuration;
+using SplitPlay.Core.Nvidia;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Platform;
 using SplitPlay.Service.Supervision;
@@ -11,6 +12,8 @@ namespace SplitPlay.Service.Hosting;
 /// What the uninstaller undoes per desk, after the service is gone (<c>SplitPlay.Service.exe cleanup</c>): each desk's
 /// Steam isolation values, its sign-in screen entry and its firewall rules; with <c>deleteAccounts</c> also the Windows
 /// accounts SplitPlay created, their profiles and stored passwords. Accounts SplitPlay did not create are never deleted.
+/// Host-wide it gives back the NVIDIA driver settings (<see cref="NvidiaProfiles"/>: the "SplitPlay worker" profile and
+/// any global value still recorded, also one an older worker left in its undo file).
 /// Stored passwords otherwise stay with the data folder (a reinstall over kept data needs them). Every step is best
 /// effort and reported.
 /// </summary>
@@ -22,7 +25,8 @@ public static class UninstallCleanup
     /// <summary>What was done and what failed, one line each.</summary>
     public sealed record Report(IReadOnlyList<string> Done, IReadOnlyList<string> Failed);
 
-    public static Report Run(IDeskPlatform platform, DataPaths paths, SplitPlayConfig config, bool deleteAccounts, ILogger logger)
+    public static Report Run(IDeskPlatform platform, DataPaths paths, SplitPlayConfig config, bool deleteAccounts, ILogger logger,
+        NvidiaProfiles? nvidia = null)
     {
         ArgumentNullException.ThrowIfNull(platform);
         ArgumentNullException.ThrowIfNull(paths);
@@ -99,6 +103,38 @@ public static class UninstallCleanup
         foreach (var user in accounts.Order(StringComparer.OrdinalIgnoreCase))
         {
             Try($"account {user} deleted", () => platform.DeleteManagedAccount(user));
+        }
+
+        if (nvidia is not null)
+        {
+            try
+            {
+                var result = nvidia.Apply([]);
+                foreach (var line in result.Changes.Concat(result.Notes))
+                {
+                    logger.LogInformation("NVIDIA driver settings: {Line}", line);
+                }
+
+                // A failed step keeps its record in nvidia-profiles.json, which the installer then keeps for a later cleanup.
+                if (result.Failed > 0)
+                {
+                    failed.Add($"NVIDIA driver settings: {string.Join("; ", result.Notes.Where(n => n.Contains(" failed: ", StringComparison.Ordinal)))}");
+                }
+                else if (!result.Driver && result.Held)
+                {
+                    // The record is all a reinstall with the driver back has to give the values back.
+                    failed.Add("NVIDIA driver settings: no NVIDIA driver now, but SplitPlay's changes are still on record (nvidia-profiles.json kept)");
+                }
+                else
+                {
+                    done.Add(result.Driver ? "NVIDIA driver settings restored" : "NVIDIA driver settings: no NVIDIA driver, nothing to restore");
+                }
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                failed.Add($"NVIDIA driver settings: {ex.Message}");
+                logger.LogWarning("NVIDIA driver settings could not be restored: {Message}", ex.Message);
+            }
         }
 
         return new Report(done, failed);
@@ -193,7 +229,8 @@ public static class UninstallCleanup
 
         var platform = new WindowsDeskPlatform(paths, new ConfigService(paths, loaded), Options.Create(new SupervisorOptions()),
             Options.Create(new FirewallOptions()), loggers.CreateLogger<WindowsDeskPlatform>());
-        var report = Run(platform, paths, loaded.Config, deleteAccounts, logger);
+        var nvidia = new NvidiaProfiles(new NvApiDrs(), NvidiaProfiles.StateFileIn(paths.Root), NvidiaProfiles.DefaultLegacyUndoFile());
+        var report = Run(platform, paths, loaded.Config, deleteAccounts, logger, nvidia);
         Console.WriteLine($"cleanup: {report.Done.Count} done, {report.Failed.Count} failed");
         foreach (var line in report.Failed)
         {

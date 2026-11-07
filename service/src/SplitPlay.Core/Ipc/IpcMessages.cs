@@ -63,6 +63,12 @@ public static class IpcProtocol
 
         /// <summary>Seat: the RDP connection is back, <c>data: {session}</c>.</summary>
         public const string SessionRestored = "session_restored";
+
+        /// <summary>
+        /// Worker: its GPU device was lost (driver reset, hang or removal), <c>data: {reason, where}</c>; the worker
+        /// exits with <see cref="ExitCodes.GpuReset"/> right after. The service restarts every desk's worker.
+        /// </summary>
+        public const string GpuReset = "gpu_reset";
     }
 
     /// <summary>Exit codes shared by the children (ipc.md "Child command lines").</summary>
@@ -74,6 +80,9 @@ public static class IpcProtocol
 
         /// <summary>Seat: gave up reconnecting the RDP session.</summary>
         public const int SeatGaveUp = 4;
+
+        /// <summary>Worker: its GPU device was lost (after <see cref="Events.GpuReset"/>).</summary>
+        public const int GpuReset = 5;
     }
 }
 

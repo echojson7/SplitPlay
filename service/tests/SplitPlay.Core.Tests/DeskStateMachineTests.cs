@@ -311,4 +311,93 @@ public sealed class DeskStateMachineTests
         Assert.Equal(DeskState.Stopping, paused.Fire(DeskTrigger.Stop).To);
         Assert.False(paused.Paused);
     }
+
+    [Fact]
+    public void Gpu_reset_restarts_after_the_fixed_delay_without_counting_a_failure()
+    {
+        var m = NewMachine();
+        BringUp(m);
+        m.Fire(DeskTrigger.ClientConnected);
+
+        m.Fire(DeskTrigger.GpuReset, "the graphics driver was reset");
+        Assert.Equal(DeskState.Recovering, m.State);
+        Assert.Equal(0, m.ConsecutiveFailures);
+        Assert.Equal(0, m.FailuresInWindow);
+        Assert.Equal(_time.GetUtcNow() + RecoveryPolicy.Default.GpuResetDelay, m.RetryAt);
+        Assert.Equal("the graphics driver was reset", m.LastError);
+
+        _time.Advance(RecoveryPolicy.Default.GpuResetDelay);
+        m.Fire(DeskTrigger.RetryDue);
+        Assert.Equal(DeskState.Connecting, m.State);
+    }
+
+    [Fact]
+    public void A_driver_that_keeps_resetting_counts_as_failures_and_faults_the_desk()
+    {
+        var m = NewMachine();
+        BringUp(m);
+        for (var i = 0; i < RecoveryPolicy.Default.MaxGpuResetsInWindow; i++)
+        {
+            m.Fire(DeskTrigger.GpuReset);
+            Assert.Equal(0, m.FailuresInWindow);
+            _time.Advance(RecoveryPolicy.Default.GpuResetDelay);
+            m.Fire(DeskTrigger.RetryDue);
+            m.Fire(DeskTrigger.SessionReady);
+            m.Fire(DeskTrigger.DisplayReady);
+            m.Fire(DeskTrigger.WorkerReady);
+        }
+
+        // One more inside the window is an ordinary failure, with the ordinary backoff.
+        m.Fire(DeskTrigger.GpuReset);
+        Assert.Equal(DeskState.Recovering, m.State);
+        Assert.Equal(1, m.FailuresInWindow);
+        Assert.Equal(_time.GetUtcNow() + RecoveryPolicy.Default.InitialBackoff, m.RetryAt);
+
+        // Outside the window the budget is back.
+        _time.Advance(RecoveryPolicy.Default.FailureWindow + TimeSpan.FromSeconds(1));
+        m.Fire(DeskTrigger.RetryDue);
+        m.Fire(DeskTrigger.SessionReady);
+        m.Fire(DeskTrigger.DisplayReady);
+        m.Fire(DeskTrigger.WorkerReady);
+        m.Fire(DeskTrigger.GpuReset);
+        Assert.Equal(0, m.FailuresInWindow);
+    }
+
+    [Fact]
+    public void A_reset_reported_after_the_worker_died_of_it_takes_that_failure_back()
+    {
+        var m = NewMachine();
+        BringUp(m);
+        m.Fire(DeskTrigger.Fail, "worker exited with code 3");
+        Assert.Equal(1, m.ConsecutiveFailures);
+
+        _time.Advance(TimeSpan.FromSeconds(5));
+        Assert.True(m.TryFire(DeskTrigger.GpuReset, out var t, "the graphics driver was reset"));
+        Assert.Equal(DeskState.Recovering, t.From);
+        Assert.Equal(DeskState.Recovering, t.To);
+        Assert.Equal(0, m.ConsecutiveFailures);
+        Assert.Equal(0, m.FailuresInWindow);
+        Assert.Equal(_time.GetUtcNow() + RecoveryPolicy.Default.GpuResetDelay, m.RetryAt);
+
+        // Nothing left to take back: a second report changes nothing.
+        Assert.False(m.CanFire(DeskTrigger.GpuReset));
+    }
+
+    [Fact]
+    public void An_old_failure_or_a_paused_desk_is_not_put_down_to_a_reset()
+    {
+        var m = NewMachine();
+        BringUp(m);
+        m.Fire(DeskTrigger.Fail);
+        _time.Advance(RecoveryPolicy.Default.GpuResetForgiveWindow + TimeSpan.FromSeconds(1));
+        Assert.False(m.CanFire(DeskTrigger.GpuReset));
+
+        var paused = NewMachine();
+        BringUp(paused);
+        paused.Fire(DeskTrigger.Pause);
+        Assert.False(paused.CanFire(DeskTrigger.GpuReset));
+
+        var stopped = NewMachine();
+        Assert.False(stopped.CanFire(DeskTrigger.GpuReset));
+    }
 }

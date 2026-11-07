@@ -153,6 +153,11 @@ public static class ServiceHost
             OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
                 ? ActivatorUtilities.CreateInstance<PdhGpuCounterSource>(sp)
                 : sp.GetRequiredService<FakeGpuCounterSource>());
+        builder.Services.AddSingleton<FakeGpuResetSource>();
+        builder.Services.AddSingleton<IGpuResetSource>(sp =>
+            OperatingSystem.IsWindows() && sp.GetRequiredService<IOptions<SupervisorOptions>>().Value.EffectivePlatform == "windows"
+                ? ActivatorUtilities.CreateInstance<WindowsGpuResetSource>(sp)
+                : sp.GetRequiredService<FakeGpuResetSource>());
         builder.Services.AddSingleton<GpuUsageMonitor>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<GpuUsageMonitor>());
         builder.Services.AddSingleton<FakeProcessImages>();

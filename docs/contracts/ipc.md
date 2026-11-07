@@ -34,7 +34,7 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
   `splitplay-worker.exe --desk-dir <dir> --self-test <seconds>` (not with `--pipe`) checks capture, input and audio in
   the session, then tries to switch HDR on and back off (`hdr` in the result), and writes `<desk-dir>\self-test.json`. The full settings list is in worker/README.md. The seat runs as SYSTEM in session 0.
 - Exit codes: 0 after `shutdown`, 2 invalid command line, 3 handshake failed or pipe lost, 4 (seat) gave up reconnecting
-  the RDP session; anything else is a crash.
+  the RDP session, 5 (worker) its GPU device was lost (after `gpu_reset`); anything else is a crash.
 
 ## Lifecycle
 
@@ -60,6 +60,7 @@ splitplay-seat.exe       --pipe \\.\pipe\splitplay\seat-<id> --desk <id>
 {"type":"event","name":"display_hdr","data":{"state":"unsupported","displays":[{"name":"\\\\.\\DISPLAY1","monitor":"","adapter":"NVIDIA GeForce RTX 5070","hdr_supported":false,"hdr_enabled":false,"limited_by_policy":false,"color_mode":"sdr","bits_per_color":8,"dxgi_hdr":false,"max_nits":270.0}]}}
 {"type":"event","name":"session_lost","data":{"reason":"..."}}
 {"type":"event","name":"session_restored","data":{"session":3}}
+{"type":"event","name":"gpu_reset","data":{"reason":"0x887A0007","where":"capture"}}
 ```
 
 Events by role:
@@ -83,6 +84,13 @@ Events by role:
   and `query_error` carries the Win32 error of a failed display query. The service shows it as `desk.hdr` (web-api.md)
   and forgets it when the worker stops. A client that asks for HDR on a display that is not in HDR gets SDR in 10 bits
   (upstream behaviour; the worker logs a warning).
+- worker `gpu_reset`: the worker's D3D device was lost (the graphics driver was reset, hung or was updated);
+  `reason` is the device's `GetDeviceRemovedReason()`, `where` what noticed it. The worker exits with code 5 right
+  after. Windows' own record of a reset (System log, provider `Display`, event 4101) has the same effect: the service
+  restarts the worker of every running desk after 3 s (`Supervisor:GpuResetDelayMs`) and keeps the seats, so the
+  desks' sessions, games and windows stay. Signals within 20 s are one reset. A restart for a reset does not use up
+  the desk's failure budget, up to 3 resets in 10 minutes; a failure in the 20 s after a reset (or up to 20 s before
+  Windows reports it; one per desk and reset) is put down to it.
 - seat `session_lost`: the RDP connection dropped; the seat is reconnecting. The service keeps the worker running.
 - seat `session_restored`: reconnected. If the session id changed, the service restarts the worker in the new session.
 

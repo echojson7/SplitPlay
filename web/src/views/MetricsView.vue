@@ -1,6 +1,7 @@
 <!-- SPDX-License-Identifier: MIT -->
 <script setup lang="ts">
 import { computed } from 'vue'
+import HostWarnings from '../components/HostWarnings.vue'
 import { useLive } from '../composables'
 import { fmtGb, fmtPercent } from '../desk'
 import { fmtBitrate, fmtNumber, t } from '../i18n'
@@ -24,6 +25,7 @@ function deskName(id: string): string {
 
 <template>
   <div class="metrics">
+    <HostWarnings />
     <p v-if="!host" class="muted">{{ t('metrics.noData') }}</p>
     <template v-else>
       <div class="rows">

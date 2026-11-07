@@ -41,6 +41,7 @@ internal sealed class DeskWatcher : IDisposable
     private IReadOnlyList<TrayDesk>? _last;
     private int _failures;
     private int _polls;
+    private readonly HashSet<string> _notified = new(StringComparer.Ordinal);
     private volatile bool _disposed;
 
     /// <param name="baseUrl">The web UI's address (the API is under <c>api/v1/</c>).</param>
@@ -208,16 +209,33 @@ internal sealed class DeskWatcher : IDisposable
         }
     }
 
-    private void PublishWarnings(IReadOnlyList<TrayWarning> warnings)
+    private void PublishWarnings(IReadOnlyList<TrayWarning> warnings, bool read = true)
     {
         _post(() =>
         {
-            if (_disposed || Warnings.SequenceEqual(warnings))
+            if (_disposed)
             {
                 return;
             }
 
-            var fresh = warnings.Where(w => !Warnings.Contains(w)).ToList();
+            if (Warnings.SequenceEqual(warnings))
+            {
+                if (read)
+                {
+                    _notified.IntersectWith(warnings.Select(w => w.Code));
+                }
+
+                return;
+            }
+
+            // Notified once per code while the tray runs: a service restart or a changed detail is not news.
+            var fresh = warnings.Where(w => _notified.Add(w.Code)).ToList();
+            if (read)
+            {
+                // A problem that went away notifies again when it comes back; an outage (nothing read) forgets nothing.
+                _notified.IntersectWith(warnings.Select(w => w.Code));
+            }
+
             Warnings = warnings;
             WarningsChanged?.Invoke(fresh);
         });
@@ -229,7 +247,7 @@ internal sealed class DeskWatcher : IDisposable
         if (force || ++_failures >= FailuresBeforeEmpty)
         {
             Publish([]);
-            PublishWarnings([]);
+            PublishWarnings([], read: false);
             _polls = 0;
         }
     }

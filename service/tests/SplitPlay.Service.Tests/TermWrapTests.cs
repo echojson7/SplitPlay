@@ -68,6 +68,22 @@ public sealed class TermWrapTests
     }
 
     [Fact]
+    public async Task The_reason_for_the_reboot_stays_until_the_reboot()
+    {
+        var (svc, monitor) = await StartAsync();
+        await using var owned = svc;
+        svc.Platform.TermWrap = new TermWrapHealth(TermWrapState.RebootRequired, Repaired: true);
+        await monitor.CheckAsync();
+        svc.Platform.TermWrap = new TermWrapHealth(TermWrapState.RebootRequired); // the next check: nothing left to repair
+        await monitor.CheckAsync();
+        Assert.True(Assert.Single(await HostWarningsAsync(svc)).Repaired);
+
+        svc.Platform.TermWrap = new TermWrapHealth(TermWrapState.Ok);
+        await monitor.CheckAsync();
+        Assert.Empty(await HostWarningsAsync(svc));
+    }
+
+    [Fact]
     public async Task An_unsupported_termsrv_names_its_version_and_the_line_goes_once_fixed()
     {
         var (svc, monitor) = await StartAsync();
@@ -91,6 +107,7 @@ public sealed class TermWrapTests
     [Theory]
     [InlineData(TermWrapState.Ok, null)]
     [InlineData(TermWrapState.NotManaged, null)]
+    [InlineData(TermWrapState.Unknown, null)]
     [InlineData(TermWrapState.RebootRequired, HostWarningCodes.TermWrapReboot)]
     [InlineData(TermWrapState.Unsupported, HostWarningCodes.TermWrapUnsupported)]
     [InlineData(TermWrapState.Missing, HostWarningCodes.TermWrapMissing)]

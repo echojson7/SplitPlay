@@ -70,7 +70,12 @@ public sealed record HostStatus(
 /// <param name="Changes">The <c>ServiceDll</c> values written back.</param>
 /// <param name="MissingFiles">Wrapper DLLs the recorded values point at that no longer exist.</param>
 /// <param name="RebootRequired">A <c>ServiceDll</c> changed while its service was running and no reboot happened since.</param>
-public sealed record TermWrapRepair(bool Managed, IReadOnlyList<string> Changes, IReadOnlyList<string> MissingFiles, bool RebootRequired);
+/// <param name="PendingServices">With <paramref name="RebootRequired"/>: the services whose new DLL is not loaded yet.</param>
+public sealed record TermWrapRepair(bool Managed, IReadOnlyList<string> Changes, IReadOnlyList<string> MissingFiles, bool RebootRequired,
+    IReadOnlyList<string> PendingServices);
+
+/// <summary>A TermWrap <c>ServiceDll</c> could not be written back (<see cref="HostTuner.RepairTermWrap"/>).</summary>
+public sealed class ServiceDllWriteException(string message, Exception inner) : Exception(message, inner);
 
 /// <summary>Result of prepare or revert.</summary>
 public sealed record HostTuningResult(IReadOnlyList<string> Changes, bool RebootRequired, IReadOnlyList<string> Notes);
@@ -446,7 +451,7 @@ public sealed class HostTuner
             : [];
         if (records.Count == 0)
         {
-            return new TermWrapRepair(Managed: false, [], [], RebootRequired: false);
+            return new TermWrapRepair(Managed: false, [], [], RebootRequired: false, []);
         }
 
         var changes = new List<string>();
@@ -468,7 +473,15 @@ public sealed class HostTuner
                 continue;
             }
 
-            _registry.Set(record.Key, record.Name, desired);
+            try
+            {
+                _registry.Set(record.Key, record.Name, desired);
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException)
+            {
+                throw new ServiceDllWriteException($"cannot write {record.Id}: {ex.Message}", ex);
+            }
+
             changes.Add($"{record.Id}: {current?.ToString() ?? "(missing)"} -> {desired}");
             serviceDllChanged.Add(record.Key == TermServiceParametersKey ? TermService : UmRdpService);
         }
@@ -479,7 +492,25 @@ public sealed class HostTuner
             SaveState(state!);
         }
 
-        return new TermWrapRepair(Managed: true, changes, missing, IsRebootRequired(state!));
+        var reboot = IsRebootRequired(state!);
+        return new TermWrapRepair(Managed: true, changes, missing, reboot, reboot ? [.. state!.PendingServices.DefaultIfEmpty(TermService)] : []);
+    }
+
+    /// <summary>
+    /// Drops the "reboot required" marker once the running services are seen to have their wrappers loaded (the
+    /// authoritative signal; the marker's process start time comparison fails when the clock at boot is off).
+    /// </summary>
+    public void ClearRebootRequired()
+    {
+        var state = LoadState();
+        if (state?.RebootRequiredSince is null)
+        {
+            return;
+        }
+
+        state.RebootRequiredSince = null;
+        state.PendingServices = [];
+        SaveState(state);
     }
 
     // ------------------------------------------------------------------ compose interval

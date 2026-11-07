@@ -157,7 +157,7 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
     /// <summary>The monitor and desk starts may check at the same time; both may write the state file.</summary>
     private static readonly object TermWrapGate = new();
 
-    public TermWrapHealth CheckTermWrap()
+    public TermWrapHealth CheckTermWrap(bool runProbe = true)
     {
         lock (TermWrapGate)
         {
@@ -166,12 +166,13 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
             var guard = new TermWrapGuard(tuner, services, new WindowsTermsrvInspector(), TermWrapGuard.CacheFileIn(_paths.Root));
             try
             {
-                return guard.Check(TermWrapDirectory());
+                return guard.Check(TermWrapDirectory(), runProbe);
             }
             catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or IOException or UnauthorizedAccessException)
             {
+                // Not a reason to block desks: the next check tries again.
                 _logger.LogWarning("TermWrap check failed: {Message}", ex.Message);
-                return new TermWrapHealth(TermWrapState.RepairFailed, Detail: ex.Message);
+                return new TermWrapHealth(TermWrapState.Unknown, Detail: ex.Message);
             }
         }
     }
@@ -180,7 +181,7 @@ public sealed class WindowsDeskPlatform : IDeskPlatform
     {
         // Before the status: a ServiceDll that Windows Update reset is written back here, so the status then says
         // "reboot required" instead of "run setup again".
-        if (CheckTermWrap().Problem is { } termWrap)
+        if (CheckTermWrap(runProbe: false).Problem is { } termWrap)
         {
             throw new DeskProvisioningException(termWrap);
         }

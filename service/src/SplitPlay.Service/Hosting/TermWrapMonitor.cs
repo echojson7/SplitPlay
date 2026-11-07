@@ -51,8 +51,14 @@ public sealed class TermWrapMonitor : BackgroundService
     {
         var health = await Task.Run(() => _platform.CheckTermWrap());
         var previous = _current;
+        if (health.State == TermWrapState.RebootRequired && previous is { State: TermWrapState.RebootRequired, Repaired: true })
+        {
+            // Still waiting for the reboot after the repair: keep saying why (the next check finds nothing to repair).
+            health = health with { Repaired = true };
+        }
+
         _current = health;
-        if (health.Repaired)
+        if (health.Repaired && previous?.Repaired != true)
         {
             _logger.LogWarning("TermWrap: TermService's ServiceDll had been reset (Windows Update) and was written back; {State}", health.State);
         }

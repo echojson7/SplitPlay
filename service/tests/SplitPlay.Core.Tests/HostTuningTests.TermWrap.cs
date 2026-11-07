@@ -244,7 +244,58 @@ public sealed partial class HostTuningTests
         Assert.Equal(TermWrapState.Ok, Check().State);
     }
 
+    [Fact]
+    public void A_boot_clock_behind_does_not_keep_asking_for_a_reboot_once_TermWrap_is_loaded()
+    {
+        PrepareAndReboot();
+        FeatureUpdate();
+        Assert.Equal(TermWrapState.RebootRequired, Check().State);
+
+        // Rebooted, but the clock at boot was hours behind: the process start time is "before" the repair.
+        _services.StartTimes["TermService"] = _time.GetUtcNow() - TimeSpan.FromHours(3);
+        _inspector.Loaded = true;
+
+        Assert.Equal(TermWrapState.Ok, Check().State);
+        Assert.False(Tuner().Status(Options()).RebootRequired);
+    }
+
+    [Fact]
+    public void A_desk_start_never_runs_the_probe()
+    {
+        PrepareAndReboot();
+        var health = Guard().Check(TermWrapDir, runProbe: false);
+        Assert.Equal(TermWrapState.Ok, health.State);
+        Assert.Equal(0, _inspector.ProbeRuns);
+
+        _inspector.Probe = () => new TermWrapProbeRun(0, ["DefPolicyPatch not found", "probe: done"]);
+        Check(); // the periodic check
+        Assert.Equal(TermWrapState.Unsupported, Guard().Check(TermWrapDir, runProbe: false).State);
+        Assert.Equal(1, _inspector.ProbeRuns);
+    }
+
+    [Fact]
+    public void A_ServiceDll_that_cannot_be_written_is_reported()
+    {
+        PrepareAndReboot();
+        FeatureUpdate();
+        _registry.FailWrites = true;
+        var health = Check();
+        Assert.Equal(TermWrapState.RepairFailed, health.State);
+        Assert.Contains("TermService.ServiceDll", health.Detail, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void A_state_file_that_cannot_be_read_blocks_nothing()
+    {
+        PrepareAndReboot();
+        File.WriteAllText(StateFile, "{ corrupt");
+        var health = Check();
+        Assert.Equal(TermWrapState.Unknown, health.State);
+        Assert.Null(health.Problem);
+    }
+
     [Theory]
+    [InlineData(3, new[] { "abort()" }, TermWrapVerdict.Unknown)]
     [InlineData(0, new[] { "probe: done" }, TermWrapVerdict.Supported)]
     [InlineData(0, new[] { "SingleUserPatch not found", "NonRDPPatch not found", "probe: done" }, TermWrapVerdict.Supported)]
     [InlineData(0, new[] { "DefPolicyPatch: Unknown reg2", "probe: done" }, TermWrapVerdict.Unsupported)]

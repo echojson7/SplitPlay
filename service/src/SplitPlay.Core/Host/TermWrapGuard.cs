@@ -60,6 +60,9 @@ public enum TermWrapState
 
     /// <summary>The <c>ServiceDll</c> could not be written back.</summary>
     RepairFailed,
+
+    /// <summary>The check itself failed (state file busy, a service query refused): nothing is claimed, desks may start.</summary>
+    Unknown,
 }
 
 /// <summary>Result of <see cref="TermWrapGuard.Check"/>.</summary>
@@ -147,7 +150,7 @@ public sealed class TermWrapGuard
             return (TermWrapVerdict.Unknown, run is null ? "probe not started" : string.Join("; ", run.Lines));
         }
 
-        if (run.ExitCode == ProbeCrashed)
+        if (run.ExitCode == ProbeCrashed && run.Lines.Contains("probe: crashed"))
         {
             // TermWrap would crash TermService the same way.
             return (TermWrapVerdict.Unsupported, "TermWrap's patch search crashed on this termsrv.dll");
@@ -166,16 +169,25 @@ public sealed class TermWrapGuard
     }
 
     /// <param name="termWrapDirectory">The installed <c>{app}\termwrap</c> (where the probe is).</param>
-    public TermWrapHealth Check(string termWrapDirectory)
+    /// <param name="runProbe">
+    /// False on a desk start: only a cached verdict is used, so that a slow or failing probe never delays desks (the
+    /// service's periodic check runs it).
+    /// </param>
+    public TermWrapHealth Check(string termWrapDirectory, bool runProbe = true)
     {
         TermWrapRepair repair;
         try
         {
             repair = _tuner.RepairTermWrap();
         }
-        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException or HostTuningException)
+        catch (ServiceDllWriteException ex)
         {
             return new TermWrapHealth(TermWrapState.RepairFailed, Detail: ex.Message);
+        }
+        catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or System.Security.SecurityException or HostTuningException)
+        {
+            // Reading or saving the state failed (busy, corrupt): the host status reports a corrupt file on its own.
+            return new TermWrapHealth(TermWrapState.Unknown, Detail: ex.Message);
         }
 
         if (!repair.Managed)
@@ -190,7 +202,7 @@ public sealed class TermWrapGuard
             return new TermWrapHealth(TermWrapState.Missing, repaired, version, string.Join(", ", repair.MissingFiles));
         }
 
-        var (verdict, detail) = Verdict(termWrapDirectory, version);
+        var (verdict, detail) = Verdict(termWrapDirectory, version, runProbe);
         if (verdict == TermWrapVerdict.Unsupported)
         {
             return new TermWrapHealth(TermWrapState.Unsupported, repaired, version, detail);
@@ -198,7 +210,16 @@ public sealed class TermWrapGuard
 
         if (repair.RebootRequired)
         {
-            return new TermWrapHealth(TermWrapState.RebootRequired, repaired, version, detail);
+            // The marker compares process start times with the wall clock; the loaded modules are what counts. A
+            // value written back by this very check is never loaded yet.
+            if (!repaired && repair.PendingServices.All(WrapperLoaded))
+            {
+                _tuner.ClearRebootRequired();
+            }
+            else
+            {
+                return new TermWrapHealth(TermWrapState.RebootRequired, repaired, version, detail);
+            }
         }
 
         // ServiceDll is right and no change is pending, yet the running TermService may still have termsrv.dll itself
@@ -211,8 +232,13 @@ public sealed class TermWrapGuard
         return new TermWrapHealth(TermWrapState.Ok, repaired, version, detail);
     }
 
+    /// <summary>A pending service is running with its wrapper loaded (a stopped one loads it on start).</summary>
+    private bool WrapperLoaded(string service) =>
+        !_services.IsRunning(service)
+        || _inspector.IsModuleLoaded(service, service == HostTuner.UmRdpService ? HostTuner.UmWrapDll : HostTuner.TermWrapDll) == true;
+
     /// <summary>The probe's verdict for this termsrv.dll and probe build, from the cache or a new run.</summary>
-    private (TermWrapVerdict Verdict, string? Detail) Verdict(string termWrapDirectory, string? version)
+    private (TermWrapVerdict Verdict, string? Detail) Verdict(string termWrapDirectory, string? version, bool runProbe)
     {
         var probe = Path.Combine(termWrapDirectory, ProbeExe);
         var probeStamp = _inspector.FileStamp(probe);
@@ -226,6 +252,11 @@ public sealed class TermWrapGuard
         if (cache is not null && cache.Key == key && cache.Verdict != TermWrapVerdict.Unknown)
         {
             return (cache.Verdict, cache.Detail);
+        }
+
+        if (!runProbe)
+        {
+            return (TermWrapVerdict.Unknown, "probe not run yet for this termsrv.dll");
         }
 
         var (verdict, detail) = Classify(_inspector.RunProbe(probe, ProbeTimeout));

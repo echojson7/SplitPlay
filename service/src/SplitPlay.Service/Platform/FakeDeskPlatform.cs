@@ -377,7 +377,7 @@ public sealed class FakeDeskPlatform : IDeskPlatform
 
     public int TermWrapChecks => Volatile.Read(ref _termWrapChecks);
 
-    public SplitPlay.Core.Host.TermWrapHealth CheckTermWrap()
+    public SplitPlay.Core.Host.TermWrapHealth CheckTermWrap(bool runProbe = true)
     {
         Interlocked.Increment(ref _termWrapChecks);
         return TermWrap;

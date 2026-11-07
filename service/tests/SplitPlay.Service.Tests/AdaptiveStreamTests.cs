@@ -57,6 +57,7 @@ public sealed class AdaptiveStreamTests
         await using var svc = await StartAsync(packetLossPct: 8);
         await svc.CreateDeskAsync("desk-1");
         await svc.PostDeskActionAsync("desk-1", "start");
+        await svc.WaitForAsync("desk-1", d => d.State is DeskState.Ready or DeskState.Streaming, what: "the worker up");
 
         var welcome = svc.Launcher.Received.Select(m => m.Message).OfType<WelcomeMessage>().First(w => w.Rdp is null);
         Assert.Equal((20, 0), (welcome.Profile!.FecPercent, welcome.Profile.BitrateCapKbps));

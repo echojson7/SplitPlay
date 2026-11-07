@@ -9,6 +9,7 @@ using SplitPlay.Core.Host;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Lifecycle;
 using SplitPlay.Core.Steam;
+using SplitPlay.Core.Streaming;
 using SplitPlay.Service.Api;
 using SplitPlay.Service.Configuration;
 using SplitPlay.Service.Hosting;
@@ -88,6 +89,9 @@ public sealed class DeskSupervisor : IHostedService
     private TaskCompletionSource _sleep = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private TaskCompletionSource _wake = Completed();
 
+    /// <summary>The desks' shares of their network adapters ("Адаптивный поток").</summary>
+    private readonly NetworkBudget _budget = new();
+
     public DeskSupervisor(ConfigService config, DataPaths paths, IChildLauncher launcher, IOptions<SupervisorOptions> options,
         TimeProvider time, ILogger<DeskSupervisor> logger, ILoggerFactory loggerFactory, GpuInventory gpus, IDeskPlatform platform,
         PowerEvents power, RequiredServicesStarter requiredServices, GpuUsageMonitor gpuUsage, ICpuControl cpu, NvidiaDriverSettings nvidia,
@@ -114,6 +118,7 @@ public sealed class DeskSupervisor : IHostedService
         _logger = logger;
         _startedAt = time.GetUtcNow();
         _lastCpuAt = _startedAt;
+        FindLink = new NetworkLinks(time).Find;
         _lastCpu = Process.GetCurrentProcess().TotalProcessorTime;
 
         foreach (var desk in config.Snapshot().Desks)
@@ -121,6 +126,9 @@ public sealed class DeskSupervisor : IHostedService
             AddRuntime(desk);
         }
     }
+
+    /// <summary>The network adapter a client address is reached through (replaced by tests).</summary>
+    internal Func<string?, NetworkLink?> FindLink { get; set; }
 
     /// <summary>Raised (synchronously, possibly under a desk lock) whenever a desk's state or config changes.</summary>
     public event Action<DeskDto>? DeskChanged;
@@ -734,11 +742,23 @@ public sealed class DeskSupervisor : IHostedService
                 rt.Config = saved;
                 rt.HasPassword = _platform.HasPassword(id);
                 connection = rt.Connection;
+                if (connection is not null)
+                {
+                    // The adaptation keeps what it learned; turned off, the desk's own values apply at once.
+                    if (!saved.Profile.AdaptiveStreamEnabled)
+                    {
+                        rt.Adaptive = null;
+                    }
+                    else if (rt.Adaptive is { } adaptive)
+                    {
+                        rt.Adaptive = adaptive with { FecPercent = saved.Profile.FecPercent ?? rt.Adaptation.FecPercent };
+                    }
+                }
             }
 
             if (connection is not null)
             {
-                _ = PushProfileAsync(id, connection, saved.Profile);
+                _ = PushProfileAsync(rt, connection, adaptive: false);
             }
 
             // A new resolution for a running desk: resize the RDP session if the seat can, else it applies at the next start.
@@ -1167,6 +1187,7 @@ public sealed class DeskSupervisor : IHostedService
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
                 rt.Hdr = null;
+                rt.ResetAdaptation(null);
                 rt.PinRequest = null;
                 if (rt.Machine.State == DeskState.Stopping)
                 {
@@ -1387,10 +1408,12 @@ public sealed class DeskSupervisor : IHostedService
                 _logger.LogWarning("Desk {Desk}: the worker reports session {Reported}, expected {Expected}", rt.Id, reported, expected);
             }
 
-            await worker.Connection.SendAsync(new WelcomeMessage { Profile = DeskRuntime.ToIpcProfile(config.Profile) }, stop).ConfigureAwait(false);
+            var welcomeProfile = DeskRuntime.ToIpcProfile(config.Profile);
+            await worker.Connection.SendAsync(new WelcomeMessage { Profile = welcomeProfile }, stop).ConfigureAwait(false);
             lock (rt.Gate)
             {
                 rt.Connection = worker.Connection;
+                rt.ResetAdaptation(welcomeProfile);
             }
 
             worker.Run((m, ct) => HandleWorkerMessageAsync(rt, worker, m, ct), TimeSpan.FromMilliseconds(o.ReadyTimeoutMs));
@@ -1464,8 +1487,11 @@ public sealed class DeskSupervisor : IHostedService
                 rt.Metrics = new DeskMetricsDto();
                 rt.ClearStreams();
                 rt.Hdr = null;
+                rt.ResetAdaptation(null);
                 rt.PinRequest = null;
             }
+
+            _budget.Remove(rt.Id);
         }
     }
 
@@ -2254,12 +2280,20 @@ public sealed class DeskSupervisor : IHostedService
         switch (message)
         {
             case HeartbeatMessage heartbeat:
-                if (rt.ApplyHeartbeat(worker.Connection, heartbeat, _time.GetUtcNow()) == WorkerUpdate.Publish)
+            {
+                var update = rt.ApplyHeartbeat(worker.Connection, heartbeat, _time.GetUtcNow());
+                if (update == WorkerUpdate.Ignored)
+                {
+                    break;
+                }
+
+                if (Adapt(rt, worker.Connection) || update == WorkerUpdate.Publish)
                 {
                     Publish(rt);
                 }
 
                 break;
+            }
 
             case ReadyMessage:
                 worker.MarkReady();
@@ -2432,11 +2466,127 @@ public sealed class DeskSupervisor : IHostedService
             ? v.ValueKind == System.Text.Json.JsonValueKind.String ? v.GetString() : v.ToString()
             : null;
 
-    private async Task PushProfileAsync(string id, IpcConnection connection, ProfileConfig profile)
+    /// <summary>
+    /// "Адаптивный поток" after a heartbeat: feeds it to the desk's <see cref="StreamAdaptation"/>, applies the desk's
+    /// share of its network adapter and sends the worker a new FEC share or bitrate cap when they changed. True when
+    /// what <c>desk.adaptive</c> shows changed.
+    /// </summary>
+    private bool Adapt(DeskRuntime rt, IpcConnection connection)
+    {
+        AdaptiveSample sample;
+        string? address;
+        bool enabled;
+        lock (rt.Gate)
+        {
+            if (!rt.IsCurrent(connection))
+            {
+                return false;
+            }
+
+            enabled = rt.Config.Profile.AdaptiveStreamEnabled;
+            sample = rt.ToAdaptiveSample();
+            address = rt.Streams.FirstOrDefault()?.Address;
+            var streams = string.Join(',', rt.Streams.Select(s => s.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? s.Address));
+            if (streams != rt.AdaptedStreams)
+            {
+                rt.AdaptedStreams = streams;
+                rt.Adaptation.StreamsChanged();
+            }
+
+            if (enabled)
+            {
+                rt.Adaptation.Update(sample, adaptFec: rt.Config.Profile.FecPercent is null);
+            }
+        }
+
+        // The adapter lookup reads the system's adapter list (cached), so it runs outside the desk's gate. A share is
+        // only worth anything when the encoder can follow a cap.
+        int? share = null;
+        if (enabled && sample.Clients > 0 && sample.EncoderKbps is not null && FindLink(address) is { } link)
+        {
+            _budget.Set(rt.Id, link.Id, link.BitsPerSecond, sample.RequestedKbps);
+            share = _budget.ShareKbps(rt.Id);
+        }
+        else
+        {
+            _budget.Remove(rt.Id);
+        }
+
+        var push = false;
+        bool changed;
+        lock (rt.Gate)
+        {
+            if (!rt.IsCurrent(connection))
+            {
+                // The worker went away meanwhile: its stop already dropped the budget entry that was just set.
+                _budget.Remove(rt.Id);
+                return false;
+            }
+
+            var profile = rt.Config.Profile;
+            AdaptiveState? next = null;
+            if (profile.AdaptiveStreamEnabled)
+            {
+                next = rt.Adaptation.State(share);
+                next = next with { FecPercent = profile.FecPercent ?? next.FecPercent };
+            }
+
+            changed = next != rt.Adaptive;
+            if (changed && next is not null && (rt.Adaptive is null || next.Limit != rt.Adaptive.Limit || next.BitrateCapKbps != rt.Adaptive.BitrateCapKbps))
+            {
+                _logger.LogInformation("Desk {Desk}: adaptive stream FEC {Fec} %, bitrate cap {Cap} ({Limit}); packet loss {Loss} %, {Wire} kbit/s",
+                    rt.Id, next.FecPercent, next.BitrateCapKbps?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "none",
+                    next.Limit, sample.PacketLossPct, sample.WireKbps);
+            }
+
+            rt.Adaptive = next;
+            var wanted = rt.WantedProfile();
+            push = rt.SentStreamSettings != (wanted.FecPercent, wanted.BitrateCapKbps);
+        }
+
+        if (push)
+        {
+            _ = PushProfileAsync(rt, connection, adaptive: true);
+        }
+
+        return changed;
+    }
+
+    /// <summary>
+    /// Sends the worker the profile it should have now (<see cref="DeskRuntime.WantedProfile"/>). Pushes of one desk
+    /// are serialised and each reads the wanted state only when its turn comes, so a configuration change and an
+    /// adaptation step can never arrive in the wrong order.
+    /// </summary>
+    private async Task PushProfileAsync(DeskRuntime rt, IpcConnection connection, bool adaptive)
+    {
+        await rt.PushGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            IpcProfile profile;
+            lock (rt.Gate)
+            {
+                if (!rt.IsCurrent(connection))
+                {
+                    return;
+                }
+
+                profile = rt.WantedProfile();
+                rt.SentStreamSettings = (profile.FecPercent, profile.BitrateCapKbps);
+            }
+
+            await SendProfileAsync(rt.Id, connection, profile, adaptive).ConfigureAwait(false);
+        }
+        finally
+        {
+            rt.PushGate.Release();
+        }
+    }
+
+    private async Task SendProfileAsync(string id, IpcConnection connection, IpcProfile profile, bool adaptive)
     {
         try
         {
-            var result = await connection.RequestAsync(rid => new SetProfileMessage { Id = rid, Profile = DeskRuntime.ToIpcProfile(profile) },
+            var result = await connection.RequestAsync(rid => new SetProfileMessage { Id = rid, Profile = profile },
                 TimeSpan.FromMilliseconds(_options.Value.RequestTimeoutMs)).ConfigureAwait(false);
             if (!result.Ok)
             {
@@ -2445,7 +2595,8 @@ public sealed class DeskSupervisor : IHostedService
             else if (result.Data is { } applied)
             {
                 // The worker lists what applies now, what from the next stream and what it does not apply (ipc.md).
-                _logger.LogInformation("Desk {Desk}: new profile applied {Result}", id, applied.GetRawText());
+                // The adaptation's pushes (as often as once a second while it raises the bitrate) are logged above.
+                _logger.Log(adaptive ? LogLevel.Debug : LogLevel.Information, "Desk {Desk}: new profile applied {Result}", id, applied.GetRawText());
             }
         }
         catch (Exception ex)

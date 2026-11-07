@@ -302,6 +302,12 @@ public sealed record IpcProfile
 
     public int? PacingMbps { get; init; }
 
+    /// <summary>
+    /// <c>bitrate_cap_kbps</c>: the most video traffic one stream may send, FEC included; 0 lifts the cap. Set by the
+    /// stream adaptation, never by the desk configuration.
+    /// </summary>
+    public int? BitrateCapKbps { get; init; }
+
     /// <summary><c>capture_mode</c>: <c>slot</c> or <c>arrival</c>.</summary>
     public string? CaptureMode { get; init; }
 

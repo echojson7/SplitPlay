@@ -35,6 +35,7 @@ const form = reactive({
   bluetooth: d.disableBluetoothUserService ?? true,
   steam: d.steamIsolation ?? true,
   hideFromLogon: d.hideFromLogon ?? d.userManaged !== false,
+  adaptive: d.profile.adaptiveStream !== false,
   basePort: String(d.basePort),
   fecPercent: d.profile.fecPercent === undefined ? '' : String(d.profile.fecPercent),
   minFps: d.profile.minFps === undefined ? '' : String(d.profile.minFps),
@@ -92,6 +93,9 @@ function toConfig(): DeskConfig {
   else delete profile.gpuPriority
   if (form.captureMode) profile.captureMode = form.captureMode
   else delete profile.captureMode
+  // On is the default: left out unless the desk already had an explicit value.
+  if (props.desk.profile.adaptiveStream !== undefined || !form.adaptive) profile.adaptiveStream = form.adaptive
+  else delete profile.adaptiveStream
   const config: DeskConfig = { ...base, profile }
   // Sent only when changed: an account SplitPlay did not create is hidden only on the owner's explicit request.
   if (form.hideFromLogon !== (props.desk.hideFromLogon ?? props.desk.userManaged !== false))
@@ -231,7 +235,13 @@ const gpuOptions = computed(() => {
       </div>
       <div class="field">
         <label for="adv-fec">{{ t('adv.fec') }}</label>
-        <input id="adv-fec" v-model="form.fecPercent" name="fecPercent" inputmode="numeric" :placeholder="t('adv.default')" />
+        <input
+          id="adv-fec"
+          v-model="form.fecPercent"
+          name="fecPercent"
+          inputmode="numeric"
+          :placeholder="form.adaptive ? t('adv.auto') : t('adv.default')"
+        />
         <span v-if="err('fecPercent')" class="err">{{ err('fecPercent') }}</span>
       </div>
       <div class="field">
@@ -261,6 +271,10 @@ const gpuOptions = computed(() => {
     </div>
 
     <div class="toggles">
+      <label class="switch">
+        <input v-model="form.adaptive" type="checkbox" name="adaptiveStream" />
+        {{ t('adv.adaptive') }}
+      </label>
       <label class="switch">
         <input v-model="form.autostart" type="checkbox" name="autostart" :disabled="running" />
         {{ t('adv.autostart') }}

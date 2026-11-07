@@ -365,11 +365,20 @@ export class MockBackend {
           gpuPercent: Math.round(34 + 6 * phase),
           encoderPercent: Math.round(11 + 2 * jitter),
           vramMb: 2900 + Math.round(120 * phase),
+          packetLossPct: jitter > 0.6 ? Math.round((jitter - 0.6) * 100) / 100 : 0,
+          burstLossPct: jitter > 0.6 ? Math.round((jitter - 0.6) * 300) / 10 : 0,
+          fecRecovered: jitter > 0.6 ? 2 : 0,
+          fecFailed: 0,
+          fecPercent: p.adaptiveStream === false ? (p.fecPercent ?? 20) : (p.fecPercent ?? 10),
+          encoderKbps: Math.round(p.bitrateKbps * 0.9),
         }
+        e.desk.adaptive = p.adaptiveStream === false ? null : { fecPercent: p.fecPercent ?? 10, bitrateCapKbps: null, limit: 'none' }
       } else if (e.desk.state === 'Ready') {
         e.desk.metrics = { ...IDLE_METRICS, gpuPercent: 2, encoderPercent: 0, vramMb: 640 }
+        e.desk.adaptive = p.adaptiveStream === false ? null : { fecPercent: p.fecPercent ?? 20, bitrateCapKbps: null, limit: 'none' }
       } else {
         e.desk.metrics = { ...IDLE_METRICS }
+        e.desk.adaptive = null
       }
     }
   }

@@ -40,6 +40,9 @@ namespace SplitPlay.Core.Json;
 [JsonSerializable(typeof(WsDeskEvent))]
 [JsonSerializable(typeof(WsMetricsEvent))]
 [JsonSerializable(typeof(ClientPackDto))]
+[JsonSerializable(typeof(GameDto))]
+[JsonSerializable(typeof(List<GameDto>))]
+[JsonSerializable(typeof(GameUpdateRequest))]
 public sealed partial class SplitPlayJsonContext : JsonSerializerContext;
 
 /// <summary>Source-generated metadata for the control pipe (snake_case, nulls omitted).</summary>

@@ -15,6 +15,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
     "composeIntervalMs": 0,
     "logLevel": "info",
     "keepAwake": true,
+    "nvidiaProfiles": true,
     "deskCores": "off"
   },
   "desks": [
@@ -28,6 +29,7 @@ Secrets are never stored here (see ARCHITECTURE.md §6).
       "gpu": "auto",
       "disableBluetoothUserService": true,
       "steamIsolation": true,
+      "gameFpsLimit": 60,
       "workerSettings": { "min_log_level": "warning" },
       "profile": {
         "fps": 120,
@@ -65,6 +67,25 @@ Rules:
   recorded in `desks\<id>\logon-hidden.json` and comes back when the setting goes off, the user changes, the desk is
   deleted or SplitPlay is uninstalled (a value someone changed since is left alone). A request that leaves it out
   keeps the current value unless the user changes.
+- `gameFpsLimit` (optional; a request that leaves it out keeps the current value): the NVIDIA driver's frame rate
+  limit ("Max Frame Rate", `FRL_FPS`) for the games the service finds in this desk. Left out or `null`: Auto, the
+  frame rate the desk's last Moonlight client asked for (the desk's `profile.fps` before any client connected); `0`:
+  off; `10`–`1000`: that many FPS. Changes apply while the desk runs. How it works:
+  - While a desk runs with the limit on, the service reads the GPU load per process every 5 s (the counters behind
+    `/metrics`). A process in the desk's session that renders at 10 % or more in 3 reads within a minute is a game unless it lives in
+    `%WINDIR%`, is SplitPlay's, or is a known non-game (launchers, browsers, chat, overlays, players). Games are kept
+    in `games.json` in the data folder, with the desks they ran in and each desk's last client frame rate.
+  - Each game gets the largest limit of its desks, in the driver profile the driver applies to its full path (often
+    one of NVIDIA's game profiles), else in a profile "SplitPlay game <exe>" that SplitPlay creates. A lookup that
+    fails keeps the game in the profile it had; failed games are tried again after a minute. The previous
+    value is recorded in `nvidia-profiles.json` (see `host.nvidiaProfiles`) and comes back when the limit goes;
+    NVIDIA's predefined values are restored by deleting the setting. A limit the owner set for that game in NVIDIA
+    Control Panel (any value but 0) is left alone, and so is a global Max Frame Rate the owner set (SplitPlay then
+    sets nothing per game). A "SplitPlay game" profile that holds the owner's own limit is left to the owner.
+  - The driver reads its profiles when a game starts: a limit applies from the game's next start, and it holds for
+    that executable on the whole PC, the console included. Limits stay while SplitPlay is installed and go with
+    `host.nvidiaProfiles=false` or on uninstall. `GET /games` (web-api.md) lists the games; one can be excluded.
+    In the web UI: desk page → Games.
 - `steamIsolation` (default `true`; a request that leaves it out keeps the current value) lets the desk user's Steam
   run next to the console user's Steam (Steam isolation research, 2026-10-28). Only the desk user's hive is changed, never the
   console user's and never machine-wide: `HKU\<sid>\Environment\steam_master_ipc_name_override` = `SplitPlay_<id>`
@@ -85,7 +106,7 @@ Rules:
   the commit in `worker/upstream.lock`), because the worker runs as SYSTEM:
   - encoder and codec: `encoder`, `hevc_mode`, `av1_mode`, `qp`, `min_threads`, `sw_preset`, `sw_tune`, `nvenc_preset`,
     `nvenc_vbv_increase`, `nvenc_spatial_aq`, `nvenc_twopass`, `nvenc_h264_cavlc`, `nvenc_split_encode`,
-    `nvenc_realtime_hags`, `nvenc_latency_over_power`, `qsv_preset`, `qsv_coder`, `qsv_slow_hevc`, `amd_quality`,
+    `nvenc_realtime_hags`, `qsv_preset`, `qsv_coder`, `qsv_slow_hevc`, `amd_quality`,
     `amd_rc`, `amd_coder`, `amd_usage`, `amd_preanalysis`, `amd_vbaq`, `amd_enforce_hrd`;
   - rate control and frame rate: `max_bitrate`, `minimum_fps_target`, `fec_percentage`;
   - audio: `stream_audio`;
@@ -150,6 +171,14 @@ Rules:
   hand still works: before sleep every worker is shut down and its desk waits (state `Recovering`, not a failure, the
   seat and session are kept); after resume each paused desk gets a new worker (NVENC and capture are recreated).
   In the web UI: Settings → Power.
+- `host.nvidiaProfiles` (default `true`; left out = `true`): the service manages the NVIDIA driver settings through
+  NvAPI (the workers leave them alone since worker patch 0020): the application profile "SplitPlay worker" with
+  "prefer maximum performance" for `splitplay-worker.exe` (kept while SplitPlay is installed), and, while the service
+  runs, the global "Vulkan/OpenGL present method: prefer layered on DXGI swapchain". Before its first change the
+  service records the previous value in `nvidia-profiles.json` in the data folder; it gives the global value back when it
+  stops and everything on uninstall, unless the owner changed the value since. `false` gives everything back at once
+  and leaves the driver alone. Replaces the per-desk `nvenc_latency_over_power`, which is no longer accepted (one
+  shared driver database cannot hold a value per desk).
 - `host.deskCores` (default `"off"`; left out = `"off"`): which processor cores the desk user's processes (Explorer,
   Steam, games and everything they start) prefer. `"off"`: wherever Windows puts them. `"auto"`: on a CPU with
   several L3 caches (Ryzen with two or more CCDs) the desks take the caches in turn in config order (stopped desks

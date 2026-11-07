@@ -76,6 +76,12 @@ public sealed record FakeChildOptions
     /// <summary>Worker: send <c>display_hdr</c> with this state (one display on "Fake GPU") right after ready.</summary>
     public string? DisplayHdr { get; init; }
 
+    /// <summary>
+    /// Worker: a Moonlight client waits for its PIN from the start: heartbeats carry <c>pairing</c> until a <c>pair</c>
+    /// arrives (patch 0021).
+    /// </summary>
+    public bool SimulatePinRequest { get; init; }
+
     /// <summary>Worker: send <c>mode_requested</c> with this mode right after ready.</summary>
     public (int Width, int Height, int Fps)? RequestMode { get; init; }
 
@@ -302,6 +308,8 @@ public static class FakeChild
                 }
 
                 case PairMessage pair:
+                    // As the worker: the PIN is handed over, so nobody waits for one any more.
+                    stream.AnswerPin();
                     await connection.ReplyAsync(pair.Id, ok: true, cancellationToken: ct).ConfigureAwait(false);
                     break;
 
@@ -386,6 +394,9 @@ public static class FakeChild
 
         private const int RequestedKbps = 50_000;
 
+        /// <summary>When the simulated client started waiting for its PIN; null when none waits.</summary>
+        private DateTimeOffset? _pinSince = options.SimulatePinRequest ? DateTimeOffset.UtcNow : null;
+
         private readonly record struct Live(double Fps, int BitrateKbps, double EncodeMsP50, double EncodeMsP99, double LossPct, int? RttMs);
 
         /// <summary>The stream settings of a welcome or set_profile (absent: unchanged, as in the worker).</summary>
@@ -463,6 +474,15 @@ public static class FakeChild
             }
         }
 
+        /// <summary>A <c>pair</c> arrived: the waiting client got its PIN.</summary>
+        public void AnswerPin()
+        {
+            lock (_gate)
+            {
+                _pinSince = null;
+            }
+        }
+
         public async Task SendHeartbeatAsync(IpcConnection connection, long seq, CancellationToken ct)
         {
             await _order.WaitAsync(ct).ConfigureAwait(false);
@@ -493,6 +513,7 @@ public static class FakeChild
                             w.WriteStartArray();
                             w.WriteEndArray();
                         }),
+                        Pairing = Pairing(),
                     };
                 }
 
@@ -508,8 +529,28 @@ public static class FakeChild
                         WriteSession(w, live);
                         w.WriteEndArray();
                     }),
+                    Pairing = Pairing(),
                 };
             }
+        }
+
+        /// <summary>The heartbeat's <c>pairing</c>: <c>{address, since}</c> while the simulated client waits, JSON null otherwise.</summary>
+        private JsonElement Pairing()
+        {
+            var since = _pinSince;
+            return ToElement(w =>
+            {
+                if (since is not { } s)
+                {
+                    w.WriteNullValue();
+                    return;
+                }
+
+                w.WriteStartObject();
+                w.WriteString("address", "192.168.1.42");
+                w.WriteString("since", s.ToString("yyyy-MM-dd'T'HH:mm:ss'Z'", CultureInfo.InvariantCulture));
+                w.WriteEndObject();
+            });
         }
 
         /// <summary>The <c>client_connected</c>/<c>client_disconnected</c> data.</summary>

@@ -48,6 +48,13 @@ public sealed class HostConfig
     public bool KeepAwake { get; set; } = true;
 
     /// <summary>
+    /// Let the service manage the NVIDIA driver settings (default true): "prefer maximum performance" for the workers
+    /// and, while the service runs, the global Vulkan/OpenGL present method "prefer layered on DXGI swapchain". False
+    /// gives back what SplitPlay set and leaves the driver alone. See <see cref="Nvidia.NvidiaProfiles"/>.
+    /// </summary>
+    public bool NvidiaProfiles { get; set; } = true;
+
+    /// <summary>
     /// Which processor cores desk processes may use: <c>"off"</c> (default) or <c>"auto"</c> (one CCD per desk on a CPU
     /// with several L3 caches, the P-cores on an Intel hybrid CPU). See <see cref="Host.DeskCorePlanner"/>.
     /// </summary>
@@ -111,6 +118,15 @@ public sealed class DeskConfig
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public bool? HideFromLogon { get; set; }
+
+    /// <summary>
+    /// The NVIDIA driver's frame rate limit for the games the service sees in this desk (<see cref="Games.GameLimits"/>):
+    /// null (default) Auto, the frame rate of the Moonlight client; 0 off; otherwise frames per second
+    /// (<see cref="Games.GameLimits.MinFps"/>–<see cref="Games.GameLimits.MaxFps"/>). Changes apply while the desk runs,
+    /// to the next start of each game.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public int? GameFpsLimit { get; set; }
 
     /// <summary>The effective <see cref="HideFromLogon"/> for an account that SplitPlay did (or did not) create.</summary>
     public bool HidesFromLogon(bool createdBySplitPlay) => HideFromLogon ?? (createdBySplitPlay && UserManaged != false);

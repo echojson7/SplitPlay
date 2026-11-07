@@ -31,6 +31,9 @@ public sealed class FakeChildLauncher(IOptions<SupervisorOptions> options, ILogg
     /// <summary>Workers send <c>client_connected</c> after ready and then stream (also <see cref="SupervisorOptions.FakeStreams"/>).</summary>
     public bool SimulateClient { get; set; }
 
+    /// <summary>Workers report a Moonlight client waiting for its PIN until a <c>pair</c> arrives.</summary>
+    public bool SimulatePinRequest { get; set; }
+
     /// <summary>Number of launches so far (all roles).</summary>
     public int Launches => _requests.Count;
 
@@ -62,6 +65,7 @@ public sealed class FakeChildLauncher(IOptions<SupervisorOptions> options, ILogg
             HeartbeatInterval = options.Value.HeartbeatInterval,
             Behavior = Behavior(request),
             SimulateClient = !seat && (SimulateClient || options.Value.FakeStreams),
+            SimulatePinRequest = !seat && SimulatePinRequest,
             ConnectTimeout = TimeSpan.FromMilliseconds(options.Value.HelloTimeoutMs),
             OnMessage = m => _received.Enqueue((request.Role, m)),
             Log = message => logger.LogDebug("fake {Role} {Desk}/{Pid}: {Message}", request.Role, request.DeskId, pid, message),

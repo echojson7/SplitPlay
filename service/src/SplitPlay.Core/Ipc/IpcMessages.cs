@@ -130,6 +130,12 @@ public sealed record HeartbeatMessage : IpcMessage
     /// report them). Kept as raw JSON and parsed leniently with <see cref="IpcStreamSession.ListFromJson"/>.
     /// </summary>
     public JsonElement? Sessions { get; init; }
+
+    /// <summary>
+    /// Worker: the Moonlight client waiting for its PIN, <c>{address, since}</c>, or <c>null</c> (patch 0021; absent from
+    /// older workers). Kept as raw JSON and parsed leniently with <see cref="IpcPinRequest.FromJson"/>.
+    /// </summary>
+    public JsonElement? Pairing { get; init; }
 }
 
 public sealed record LogMessage : IpcMessage

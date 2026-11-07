@@ -78,6 +78,27 @@ public sealed class DeskMetricsDto
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? Input { get; set; }
 
+    /// <summary>
+    /// Video packets lost on the way, percent of the packets sent, from the client's FEC reports (lost or not, before
+    /// FEC repairs them). Null from a worker that does not measure it.
+    /// </summary>
+    public double? PacketLossPct { get; set; }
+
+    /// <summary>The worst FEC block of the interval: lost packets per data packet, percent (the FEC share it needed).</summary>
+    public double? BurstLossPct { get; set; }
+
+    /// <summary>FEC blocks the client repaired with parity in the interval.</summary>
+    public double? FecRecovered { get; set; }
+
+    /// <summary>FEC blocks the client could not repair in the interval.</summary>
+    public double? FecFailed { get; set; }
+
+    /// <summary>FEC share the worker sends now, percent.</summary>
+    public double? FecPercent { get; set; }
+
+    /// <summary>The bitrate the encoder runs at, kbit/s; null when it cannot change it live (or no stream runs).</summary>
+    public double? EncoderKbps { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
 }
@@ -139,6 +160,19 @@ public sealed record DeskHdrDto
 
     /// <summary>When the worker last reported a change.</summary>
     public DateTimeOffset UpdatedAt { get; init; }
+}
+
+/// <summary>The stream adaptation of a desk (<c>desk.adaptive</c>).</summary>
+public sealed record DeskAdaptiveDto
+{
+    /// <summary>FEC share sent to the worker, percent.</summary>
+    public int FecPercent { get; init; }
+
+    /// <summary>Cap on the video traffic of each stream, kbit/s; null when the client's bitrate is used.</summary>
+    public int? BitrateCapKbps { get; init; }
+
+    /// <summary><c>none</c>, <c>loss</c> (the network loses packets) or <c>network</c> (the adapter's share).</summary>
+    public string Limit { get; init; } = "none";
 }
 
 /// <summary>Values of <see cref="DeskHdrDto.State"/>.</summary>
@@ -211,6 +245,8 @@ public sealed class DeskDto
     /// <summary>The HDR state of the desk session's display; null while no worker has reported it.</summary>
     public DeskHdrDto? Hdr { get; set; }
 
+    /// <summary>What "Адаптивный поток" does now; null when it is off or no worker runs.</summary>
+    public DeskAdaptiveDto? Adaptive { get; set; }
     /// <summary>A Moonlight client waiting for its PIN on this desk, null when none is (docs/contracts/web-api.md).</summary>
     public DeskPinRequestDto? PinRequest { get; set; }
 

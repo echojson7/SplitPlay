@@ -29,7 +29,7 @@ import {
   hdrLabel,
   inputLabel,
 } from '../desk'
-import { fmtDateTime, fmtNumber, t } from '../i18n'
+import { fmtBitrate, fmtDateTime, fmtNumber, t } from '../i18n'
 import { store } from '../store'
 import { toast } from '../toast'
 
@@ -62,12 +62,29 @@ const live = computed(() => {
       m.encodeMsP50 !== undefined
         ? t('live.encodeValue', { p50: fmtNumber(m.encodeMsP50, 1, 1), p99: fmtNumber(m.encodeMsP99 ?? 0, 1, 1) })
         : fmtMs(m.encodeMsP99 ?? 0),
-    loss: m.lossPct !== undefined ? t('unit.percent', { value: fmtNumber(m.lossPct, 1) }) : t('common.none'),
+    loss: lossLine(m.lossPct, m.packetLossPct),
     compose: m.captureFps != null ? t('unit.hz', { value: fmtNumber(m.captureFps) }) : t('common.none'),
   }
 })
 
 const gpu = computed(() => gpuLine(desk.value?.metrics))
+
+/** Frames lost, and the packets lost on the way (before FEC repairs them) when the worker measures them. */
+function lossLine(frames: number | undefined, packets: number | null | undefined): string {
+  if (frames === undefined) return t('common.none')
+  if (packets == null) return t('unit.percent', { value: fmtNumber(frames, 1) })
+  return t('live.lossValue', { frames: fmtNumber(frames, 1), packets: fmtNumber(packets, 2) })
+}
+
+/** «Адаптивный поток» while a client streams: FEC share, and the cap with its reason when the bitrate is held down. */
+const adaptive = computed(() => {
+  const a = desk.value?.adaptive
+  if (!a || !stream.value) return null
+  const fec = t('live.adaptiveFec', { value: fmtNumber(a.fecPercent) })
+  if (a.bitrateCapKbps == null) return fec
+  const why = a.limit === 'network' ? t('live.adaptiveNetwork') : t('live.adaptiveLoss')
+  return `${fec} · ${t('live.adaptiveCap', { value: fmtBitrate(a.bitrateCapKbps) })} (${why})`
+})
 
 async function load(): Promise<void> {
   try {
@@ -419,6 +436,11 @@ async function remove(): Promise<void> {
             <span class="row-pad" />
             <div class="text"><span class="title">{{ t('live.loss') }}</span></div>
             <div class="ctl val" data-live-loss>{{ live?.loss }}</div>
+          </div>
+          <div v-if="adaptive" class="srow compact">
+            <span class="row-pad" />
+            <div class="text"><span class="title">{{ t('live.adaptive') }}</span></div>
+            <div class="ctl val" data-live-adaptive>{{ adaptive }}</div>
           </div>
           <div class="srow compact">
             <span class="row-pad" />

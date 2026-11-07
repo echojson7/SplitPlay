@@ -178,9 +178,15 @@ A streaming desk:
     "startedAt": "2026-10-29T18:00:00+00:00"
   },
   "hdr": { "state": "unsupported", "monitor": null, "adapter": "NVIDIA GeForce RTX 5070", "bitsPerColor": 8, "maxNits": 270,
-           "updatedAt": "2026-11-06T18:00:00+00:00" }
+           "updatedAt": "2026-11-06T18:00:00+00:00" },
+  "adaptive": { "fecPercent": 10, "bitrateCapKbps": 36000, "limit": "loss" }
 }
 ```
+
+`adaptive` is what «Адаптивный поток» (`profile.adaptiveStream`, config.md) does while the desk's worker runs: the FEC
+share it sends, the cap on each stream's video traffic (`null`: the client's bitrate) and why it is capped: `none`,
+`loss` (the network lost packets FEC could not make up for, or the round trip grew) or `network` (the desk's share of
+its network adapter). `null` when the setting is off or no worker runs.
 
 `hdr` is the HDR state of the desk session's display as the worker measures it (`display_hdr` in ipc.md), `null` (or
 absent) while the desk's worker has not reported it and after it stops. `state`: `enabled` (Windows composes the
@@ -208,7 +214,10 @@ reported lost, `rttMs` round-trip time to the client (`null` until one is measur
 per second in the desk session (the real composition rate, `null` without a stream). All 0 (`rttMs` and `captureFps`
 `null`) when nothing streams. `input` says where keyboard and mouse go now: `windows`, `rdp`, `rdp_mixed` (relative
 mouse motion on SendInput, the RDP server has no relative mouse PDUs) or `rdp_unavailable` (the seat cannot send input
-now, SendInput is used); it is left out until the worker reports it.
+now, SendInput is used); it is left out until the worker reports it. A worker with the loss telemetry (patches 0023, 0025) adds `packetLossPct` (video packets
+lost on the way, before FEC repairs them), `burstLossPct` (the worst FEC block: lost per data packet), `fecRecovered`
+and `fecFailed` (blocks repaired and not), `fecPercent` (FEC share sent now) and `encoderKbps` (the encoder's bitrate,
+`null` when it cannot change it live); an older worker leaves them `null`.
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.

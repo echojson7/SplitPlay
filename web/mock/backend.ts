@@ -362,7 +362,14 @@ export class MockBackend {
           vramMb: 2900 + Math.round(120 * phase),
           // RDP input: this mock server takes no relative mouse PDUs, like most Windows builds may not.
           input: p.input === 'rdp' ? 'rdp_mixed' : 'windows',
+          packetLossPct: jitter > 0.6 ? Math.round((jitter - 0.6) * 100) / 100 : 0,
+          burstLossPct: jitter > 0.6 ? Math.round((jitter - 0.6) * 300) / 10 : 0,
+          fecRecovered: jitter > 0.6 ? 2 : 0,
+          fecFailed: 0,
+          fecPercent: p.adaptiveStream === false ? (p.fecPercent ?? 20) : (p.fecPercent ?? 10),
+          encoderKbps: Math.round(p.bitrateKbps * 0.9),
         }
+        e.desk.adaptive = p.adaptiveStream === false ? null : { fecPercent: p.fecPercent ?? 10, bitrateCapKbps: null, limit: 'none' }
       } else if (e.desk.state === 'Ready') {
         e.desk.metrics = {
           ...IDLE_METRICS,
@@ -371,8 +378,10 @@ export class MockBackend {
           vramMb: 640,
           input: p.input === 'rdp' ? 'rdp_mixed' : 'windows',
         }
+        e.desk.adaptive = p.adaptiveStream === false ? null : { fecPercent: p.fecPercent ?? 20, bitrateCapKbps: null, limit: 'none' }
       } else {
         e.desk.metrics = { ...IDLE_METRICS }
+        e.desk.adaptive = null
       }
     }
   }

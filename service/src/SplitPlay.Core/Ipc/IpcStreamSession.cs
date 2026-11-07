@@ -36,6 +36,9 @@ public sealed record IpcStreamSession
 
     public bool Hdr { get; init; }
 
+    /// <summary>The client sends FEC reports (<c>fec_feedback</c>), so the worker measures packet loss for it.</summary>
+    public bool FecFeedback { get; init; }
+
     public DateTimeOffset? StartedAt { get; init; }
 
     /// <summary>
@@ -73,6 +76,7 @@ public sealed record IpcStreamSession
             Codec = String(e, "codec"),
             BitrateKbpsRequested = Int(e, "bitrate_kbps_requested"),
             Hdr = e.TryGetProperty("hdr", out var hdr) && hdr.ValueKind == JsonValueKind.True,
+            FecFeedback = e.TryGetProperty("fec_feedback", out var fec) && fec.ValueKind == JsonValueKind.True,
             StartedAt = String(e, "started_at") is { } s
                 && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var t)
                     ? t

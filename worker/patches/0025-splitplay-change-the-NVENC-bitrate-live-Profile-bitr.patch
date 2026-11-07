@@ -1,0 +1,284 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Fri, 6 Nov 2026 22:39:57 +0000
+Subject: [PATCH] splitplay: change the NVENC bitrate live (Profile
+ bitrate_cap_kbps)
+
+Sunshine sets the encoder bitrate once, from the client's setting, when a
+stream starts. On a link that loses packets because it is full, the only
+fix was for the user to lower the bitrate in Moonlight and reconnect.
+
+- The Profile gains `bitrate_cap_kbps` (0-1000000, live; 0 or null = no
+  cap): the most video traffic one stream may send, FEC parity included.
+  splitplay::profile::encode_bitrate_kbps() turns it into an encoder
+  bitrate with the FEC share of the next frame: the stream's own bitrate,
+  or less, never below 500 kbit/s.
+- The native NVENC encoder keeps the parameters it was initialised with
+  and, before each frame, compares the wanted bitrate with the one it
+  runs at. On a change it calls NvEncReconfigureEncoder with the new
+  average bitrate and the VBV buffer and initial delay scaled with it
+  (CBR, no reset, no forced IDR, so the picture does not stall). If the
+  driver refuses, the encoder stays at its bitrate for the rest of the
+  stream and logs it once.
+- Heartbeats gain `metrics.encoder_kbps`, the bitrate the live encoder
+  runs at, or null when there is no stream or the encoder cannot change
+  it (encoders other than native NVENC keep the client's bitrate).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm4nQqGPBDq9D7KQv3H
+
+diff --git a/src/nvenc/nvenc_base.cpp b/src/nvenc/nvenc_base.cpp
+index 0dca50ab4e5e240c36918280a4db230f2ddbc817..912d3de16ef981d252e83a4a2cada352e24f91c1 100644
+--- a/src/nvenc/nvenc_base.cpp
++++ b/src/nvenc/nvenc_base.cpp
+@@ -700,6 +700,18 @@ namespace NVENC_NAMESPACE {
+                      << frame_size_format % (client_config.bitrate / 8. / client_config.framerate) << " kB";
+     log_created_encoder(init_params, enc_config, config, client_config, buffer_format);
+ 
++    // SplitPlay: keep what the encoder was initialised with, so that a new bitrate cap can reconfigure it.
++    splitplay_rate = {};
++    splitplay_rate.init_params = init_params;
++    splitplay_rate.enc_config = enc_config;
++    splitplay_rate.init_params.encodeConfig = &splitplay_rate.enc_config;
++    splitplay_rate.stream_kbps = client_config.bitrate > 0 ? static_cast<std::uint32_t>(client_config.bitrate) : 0;
++    splitplay_rate.vbv_bits = enc_config.rcParams.vbvBufferSize;
++    splitplay_rate.vbv_initial_delay = enc_config.rcParams.vbvInitialDelay;
++    splitplay_rate.stream_fec_percent = splitplay::profile::fec_percentage();
++    splitplay_rate.applied_kbps = splitplay_rate.stream_kbps;
++    splitplay::profile::set_encoder_kbps(splitplay_rate.applied_kbps);
++
+     encoder_state = {};
+     fail_guard.disable();
+     return true;
+@@ -734,6 +746,54 @@ namespace NVENC_NAMESPACE {
+ 
+     encoder_state = {};
+     encoder_params = {};
++    if (splitplay_rate.stream_kbps != 0) {
++      splitplay::profile::set_encoder_kbps(0);
++    }
++    splitplay_rate = {};
++  }
++
++  void nvenc_base::splitplay_follow_bitrate() {
++    auto &rate = splitplay_rate;
++    if (rate.failed || rate.stream_kbps == 0) {
++      return;
++    }
++    const std::uint32_t target = splitplay::profile::encode_bitrate_kbps(rate.stream_kbps, rate.stream_fec_percent);
++    if (target == rate.applied_kbps) {
++      return;
++    }
++
++    // CBR: the average bitrate and, scaled with it, the VBV buffer (one frame's worth plus the configured increase)
++    // and its initial delay; everything else stays as initialised, so no IDR frame is needed.
++    NV_ENC_CONFIG enc_config = rate.enc_config;
++    enc_config.rcParams.averageBitRate = target * 1000;
++    const auto scale = [&](std::uint32_t base) {
++      return static_cast<std::uint32_t>(static_cast<std::uint64_t>(base) * target / rate.stream_kbps);
++    };
++    if (rate.vbv_bits != 0) {
++      enc_config.rcParams.vbvBufferSize = std::max<std::uint32_t>(scale(rate.vbv_bits), 1);
++    }
++    if (rate.vbv_initial_delay != 0) {
++      enc_config.rcParams.vbvInitialDelay = std::max<std::uint32_t>(scale(rate.vbv_initial_delay), 1);
++    }
++
++    NV_ENC_RECONFIGURE_PARAMS params = {NV_ENC_RECONFIGURE_PARAMS_VER};
++    params.reInitEncodeParams = rate.init_params;
++    params.reInitEncodeParams.encodeConfig = &enc_config;
++    params.resetEncoder = 0;
++    params.forceIDR = 0;
++    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &params))) {
++      BOOST_LOG(warning) << "SplitPlay: NvEnc could not change the bitrate to " << target << " kbps, keeping "
++                         << rate.applied_kbps << " kbps for this stream: " << last_nvenc_error_string;
++      rate.failed = true;
++      splitplay::profile::set_encoder_kbps(0);  // heartbeats: this encoder cannot follow a cap
++      return;
++    }
++
++    BOOST_LOG(info) << "SplitPlay: NvEnc bitrate " << rate.applied_kbps << " -> " << target << " kbps (stream "
++                    << rate.stream_kbps << " kbps)";
++    rate.enc_config = enc_config;
++    rate.applied_kbps = target;
++    splitplay::profile::set_encoder_kbps(target);
+   }
+ 
+   ::nvenc::nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr) {
+@@ -741,6 +801,8 @@ namespace NVENC_NAMESPACE {
+       return {};
+     }
+ 
++    splitplay_follow_bitrate();
++
+     assert(registered_input_buffer);
+     assert(output_bitstream);
+ 
+diff --git a/src/nvenc/nvenc_base.h b/src/nvenc/nvenc_base.h
+index d7338bb19d5c0f7498f2c76c5fa5eb099610667e..13d116ff4b77353b8bc6fd13a2935acfd359f0e4 100644
+--- a/src/nvenc/nvenc_base.h
++++ b/src/nvenc/nvenc_base.h
+@@ -332,6 +332,24 @@ namespace NVENC_NAMESPACE {
+ 
+     NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
+ 
++    /**
++     * @brief SplitPlay: follow the desk profile's bitrate cap (splitplay::profile::encode_bitrate_kbps) with
++     *        NvEncReconfigureEncoder, without a new IDR frame. Called before every frame; cheap when nothing changed.
++     */
++    void splitplay_follow_bitrate();
++
++    /// SplitPlay live bitrate: the parameters the encoder was initialised with (encodeConfig points to sp_enc_config).
++    struct {
++      NV_ENC_INITIALIZE_PARAMS init_params {};
++      NV_ENC_CONFIG enc_config {};
++      std::uint32_t stream_kbps = 0;  ///< Bitrate the stream was set up with; 0: no live changes.
++      int stream_fec_percent = 0;  ///< FEC share when the encoder was set up.
++      std::uint32_t vbv_bits = 0;  ///< VBV buffer size for stream_kbps (0: the driver's default).
++      std::uint32_t vbv_initial_delay = 0;  ///< Initial VBV delay for stream_kbps (0: the driver's default).
++      std::uint32_t applied_kbps = 0;  ///< Bitrate the encoder runs at now.
++      bool failed = false;  ///< The driver refused a reconfiguration; stay at applied_kbps for this encoder.
++    } splitplay_rate;
++
+     struct {
+       uint64_t last_encoded_frame_index = 0;
+       bool rfi_needs_confirmation = false;
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index 5c06507e72a865519e0d26abc4c7fdcc51943af7..29c88aa16d64ab1402b479dbd0bbc9a9878ac2e8 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -99,6 +99,7 @@ namespace splitplay::control {
+       {"min_fps", 1, 1000, &splitplay::profile::set_min_fps, true},
+       {"pacing_mbps", 1, 100000, &splitplay::profile::set_pacing_mbps, true},
+       {"dpb_frames", 0, 16, &splitplay::profile::set_dpb_frames, false},
++      {"bitrate_cap_kbps", 0, 1000000, &splitplay::profile::set_bitrate_cap_kbps, true},
+     };
+ 
+     /// The one string field the worker applies: `slot` (default) or `arrival`, live.
+diff --git a/src/splitplay/live_stats.cpp b/src/splitplay/live_stats.cpp
+index bd58693f6b51ca86dda5792bcb2f8b7c774b079d..0b651ff798d0ea5f23de538be55c3044f8b7ded0 100644
+--- a/src/splitplay/live_stats.cpp
++++ b/src/splitplay/live_stats.cpp
+@@ -451,6 +451,7 @@ namespace splitplay::live_stats {
+       {"fec_recovered", total_fec_recovered},
+       {"fec_failed", total_fec_failed},
+       {"fec_percent", splitplay::profile::fec_percentage()},
++      {"encoder_kbps", sessions.empty() || splitplay::profile::encoder_kbps() == 0 ? json(nullptr) : json(splitplay::profile::encoder_kbps())},
+     };
+ 
+     // Pipe I/O happens here, on the heartbeat thread, outside state_mutex: events first, then the heartbeat.
+diff --git a/src/splitplay/live_stats.h b/src/splitplay/live_stats.h
+index 4ab25f3003c1921514824700c72b920f9ae62562..407334f266da270c1fb70c3b89d72c24a53bbb9a 100644
+--- a/src/splitplay/live_stats.h
++++ b/src/splitplay/live_stats.h
+@@ -166,8 +166,8 @@ namespace splitplay::live_stats {
+    * @param send_event Receives each queued client_connected/client_disconnected event, oldest first.
+    * @param send_heartbeat Receives `metrics` (`fps`, `bitrate_kbps`, `encode_ms_p50`, `encode_ms_p99`, `loss_pct`,
+    *                       `rtt_ms` (null when no stream has one yet), `clients`, `capture_fps` (null without a
+-   *                       stream), `packet_loss_pct`, `burst_loss_pct`, `fec_recovered`, `fec_failed`, `fec_percent`)
+-   *                       and the `sessions` array.
++   *                       stream), `packet_loss_pct`, `burst_loss_pct`, `fec_recovered`, `fec_failed`, `fec_percent`,
++   *                       `encoder_kbps` (null without a stream or a live-bitrate encoder)) and the `sessions` array.
+    */
+   void report_heartbeat(const event_sink_t &send_event, const heartbeat_sink_t &send_heartbeat);
+ }  // namespace splitplay::live_stats
+diff --git a/src/splitplay/profile.cpp b/src/splitplay/profile.cpp
+index e38b04f2ec299e1a2ee76907760b7e9146724184..9410e94bf0989078ccd5379203b302d0c27a5e1a 100644
+--- a/src/splitplay/profile.cpp
++++ b/src/splitplay/profile.cpp
+@@ -20,6 +20,11 @@ namespace splitplay::profile {
+     std::atomic_int dpb {unset};
+     std::atomic_int pacing_mbps {unset};
+     std::atomic<capture_mode_e> mode {capture_mode_e::slot};
++    std::atomic_int bitrate_cap {unset};
++    std::atomic<std::uint32_t> live_encoder_kbps {0};
++
++    /// Never ask an encoder for less than this, whatever the cap and FEC share.
++    constexpr std::uint32_t min_encode_kbps = 500;
+ 
+     void store(std::atomic_int &target, std::optional<int> value) {
+       target.store(value ? *value : unset, std::memory_order_relaxed);
+@@ -46,6 +51,36 @@ namespace splitplay::profile {
+     mode.store(value.value_or(capture_mode_e::slot), std::memory_order_relaxed);
+   }
+ 
++  void set_bitrate_cap_kbps(std::optional<int> value) {
++    store(bitrate_cap, value && *value > 0 ? value : std::nullopt);
++  }
++
++  std::uint32_t encode_bitrate_kbps(std::uint32_t stream_kbps, int stream_fec_percent) {
++    if (stream_kbps == 0) {
++      return stream_kbps;
++    }
++    // Parity shards add fec % of the data on the wire. A higher FEC share than at the start lowers the encoder
++    // bitrate so that the traffic stays what the client's bitrate allowed; a cap lowers it further.
++    const auto fec = static_cast<std::uint64_t>(std::max(fec_percentage(), 0));
++    const auto start_fec = static_cast<std::uint64_t>(std::max(stream_fec_percent, 0));
++    const auto wire = static_cast<std::uint64_t>(stream_kbps) * (100 + start_fec) / 100;
++    std::uint64_t budget = wire;
++    const int cap = bitrate_cap.load(std::memory_order_relaxed);
++    if (cap != unset) {
++      budget = std::min<std::uint64_t>(budget, static_cast<std::uint64_t>(cap));
++    }
++    const auto target = static_cast<std::uint32_t>(std::min<std::uint64_t>(budget * 100 / (100 + fec), stream_kbps));
++    return std::min(stream_kbps, std::max(target, min_encode_kbps));
++  }
++
++  void set_encoder_kbps(std::uint32_t kbps) {
++    live_encoder_kbps.store(kbps, std::memory_order_relaxed);
++  }
++
++  std::uint32_t encoder_kbps() {
++    return live_encoder_kbps.load(std::memory_order_relaxed);
++  }
++
+   capture_mode_e capture_mode() {
+     return mode.load(std::memory_order_relaxed);
+   }
+diff --git a/src/splitplay/profile.h b/src/splitplay/profile.h
+index eed8fa41f66c0945c1163945d77f18184d1771e0..a5ee4a4fa1974e372ef6872c0dccc99afc4f2465 100644
+--- a/src/splitplay/profile.h
++++ b/src/splitplay/profile.h
+@@ -13,6 +13,7 @@
+  * | `pacing_mbps` | video send, every frame                      | next frame                    |
+  * | `dpb_frames`  | NVENC encoder creation                       | next stream (or encoder reinit) |
+  * | `capture_mode`| DDA capture loop, every frame                | next frame                    |
++ * | `bitrate_cap_kbps` | NVENC encode loop, every frame          | next frame (native NVENC only) |
+  */
+ // SPDX-License-Identifier: GPL-3.0-only
+ #pragma once
+@@ -66,6 +67,34 @@ namespace splitplay::profile {
+    */
+   void set_capture_mode(std::optional<capture_mode_e> value);
+ 
++  /**
++   * @brief Cap on one stream's video traffic in kbit/s, FEC parity included, 1-1000000. 0 or std::nullopt: no cap (the
++   *        bitrate the client asked for). The service lowers it when the network loses packets it cannot recover.
++   * @param value New value or std::nullopt.
++   */
++  void set_bitrate_cap_kbps(std::optional<int> value);
++
++  /**
++   * @param stream_kbps The encoder bitrate the stream was set up with (the client's bitrate less the FEC and audio
++   *                    allowance).
++   * @param stream_fec_percent The FEC share when the stream was set up.
++   * @return Encoder bitrate for the next frame: `stream_kbps`, or less so that the video traffic with the current FEC
++   *         share stays within the cap and never exceeds what the stream sent at its own FEC share.
++   */
++  std::uint32_t encode_bitrate_kbps(std::uint32_t stream_kbps, int stream_fec_percent);
++
++  /**
++   * @brief The bitrate an encoder that can change it live runs at now (kbit/s); 0 when none does (no stream, or an
++   *        encoder other than native NVENC). Reported in heartbeats as `encoder_kbps`.
++   * @param kbps New value.
++   */
++  void set_encoder_kbps(std::uint32_t kbps);
++
++  /**
++   * @return The value of the last set_encoder_kbps().
++   */
++  std::uint32_t encoder_kbps();
++
+   /**
+    * @return Capture mode for the next frame.
+    */

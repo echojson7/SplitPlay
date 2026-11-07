@@ -63,7 +63,9 @@ describe('app smoke', () => {
     expect(w.find('[data-live-fps]').text()).toMatch(/^\d+$/)
     expect(w.find('[data-live-ping]').text()).toMatch(/^\d+ мс$/)
     expect(w.find('[data-live-encode]').text()).toMatch(/^\d+,\d \/ \d+,\d мс$/)
-    expect(w.find('[data-live-loss]').text()).toMatch(/ %$/)
+    expect(w.find('[data-live-loss]').text()).toMatch(/^кадры [\d,]+ % · пакеты [\d,]+ %$/)
+    // «Адаптивный поток»: the FEC share it sends, no cap on a clean link.
+    expect(w.find('[data-live-adaptive]').text()).toBe('FEC 10 %')
     expect(w.find('[data-live-gpu]').text()).toMatch(/^\d+ % · кодер \d+ % · \d+,\d ГБ$/)
     // The desk display's HDR state, as the worker measured it: an RDP display is SDR only.
     expect(w.find('[data-live-hdr]').text()).toBe('Недоступен')

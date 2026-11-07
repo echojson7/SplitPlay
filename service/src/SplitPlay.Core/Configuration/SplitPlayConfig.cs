@@ -205,6 +205,19 @@ public sealed class ProfileConfig
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? CaptureMode { get; set; }
 
+    /// <summary>
+    /// "Адаптивный поток" (default on; null means on): the service tunes FEC (5–50 %) to the packet loss the client
+    /// reports and lowers the bitrate while the network cannot carry it (<see cref="Streaming.StreamAdaptation"/>),
+    /// and desks on one network adapter share its speed (<see cref="Streaming.NetworkBudget"/>). A desk that sets
+    /// <see cref="FecPercent"/> keeps that FEC share; only its bitrate adapts.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? AdaptiveStream { get; set; }
+
+    /// <summary>The effective <see cref="AdaptiveStream"/>.</summary>
+    [JsonIgnore]
+    public bool AdaptiveStreamEnabled => AdaptiveStream ?? true;
+
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? GpuPriority { get; set; }
 

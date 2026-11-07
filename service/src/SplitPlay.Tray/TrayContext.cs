@@ -52,6 +52,7 @@ internal sealed class TrayContext : ApplicationContext
             _desks = new DeskWatcher(url, Post);
             _desks.Changed += OnDesksChanged;
             _desks.PinRequested += OnPinRequested;
+            _desks.WarningsChanged += OnWarningsChanged;
             _desks.Start();
         }
     }
@@ -106,6 +107,12 @@ internal sealed class TrayContext : ApplicationContext
             _boldFont ??= new Font(open.Font, FontStyle.Bold);
             open.Font = _boldFont;
             _menu.Items.Add(open);
+
+            // Host problems (TermWrap after a Windows update): one line each, under Open.
+            foreach (var line in WarningLines())
+            {
+                _menu.Items.Add(new ToolStripMenuItem(line, null, (_, _) => ShowDashboard()));
+            }
 
             var desks = _desks?.Desks ?? [];
             _menuKey = MenuKey(desks);
@@ -174,10 +181,7 @@ internal sealed class TrayContext : ApplicationContext
 
     private void OnDesksChanged()
     {
-        var waiting = _desks?.Desks.Where(d => d.PinSince is not null).Select(d => d.Name).ToList() ?? [];
-        // NotifyIcon.Text is limited to 127 characters.
-        var text = waiting.Count > 0 ? $"SplitPlay · {TrayText.PinWaiting}" : "SplitPlay";
-        _icon.Text = text.Length > 127 ? text[..127] : text;
+        UpdateIconText();
         if (_menu.Visible && _desks is not null && MenuKey(_desks.Desks) == _menuKey)
         {
             // Same desks: update the open menu in place, so that a submenu under the cursor stays open. Another set
@@ -186,6 +190,29 @@ internal sealed class TrayContext : ApplicationContext
             {
                 UpdateDeskItem(desk);
             }
+        }
+    }
+
+    /// <summary>The icon's tooltip: a waiting PIN first, then the first host problem.</summary>
+    private void UpdateIconText()
+    {
+        var waiting = _desks?.Desks.Any(d => d.PinSince is not null) == true;
+        var problem = WarningLines().FirstOrDefault();
+        var text = waiting ? $"SplitPlay · {TrayText.PinWaiting}" : problem is not null ? $"SplitPlay · {problem}" : "SplitPlay";
+        // NotifyIcon.Text is limited to 127 characters.
+        _icon.Text = text.Length > 127 ? text[..127] : text;
+    }
+
+    private List<string> WarningLines() =>
+        (_desks?.Warnings ?? []).Select(w => TrayWarnings.Text(w, TrayText.Russian)).OfType<string>().ToList();
+
+    private void OnWarningsChanged(IReadOnlyList<TrayWarning> fresh)
+    {
+        UpdateIconText();
+        var first = fresh.Select(w => TrayWarnings.Text(w, TrayText.Russian)).OfType<string>().FirstOrDefault();
+        if (first is not null && _icon.Visible)
+        {
+            _icon.ShowBalloonTip(15000, "SplitPlay", first, ToolTipIcon.Warning);
         }
     }
 

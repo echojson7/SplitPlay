@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
@@ -241,6 +242,106 @@ public sealed class WindowsHostPower : IHostPower
 
     [DllImport("kernel32.dll")]
     private static extern IntPtr LocalFree(IntPtr memory);
+}
+
+/// <summary><see cref="ITermsrvInspector"/> on the real system.</summary>
+[SupportedOSPlatform("windows")]
+public sealed class WindowsTermsrvInspector : ITermsrvInspector
+{
+    public string? TermsrvVersion()
+    {
+        var path = Path.Combine(Environment.SystemDirectory, "termsrv.dll");
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        var info = FileVersionInfo.GetVersionInfo(path);
+        return info.FileMajorPart == 0 && info.FileBuildPart == 0
+            ? info.FileVersion
+            : string.Create(CultureInfo.InvariantCulture, $"{info.FileMajorPart}.{info.FileMinorPart}.{info.FileBuildPart}.{info.FilePrivatePart}");
+    }
+
+    public string? FileStamp(string path)
+    {
+        var file = new FileInfo(path);
+        return file.Exists ? string.Create(CultureInfo.InvariantCulture, $"{file.Length}-{file.LastWriteTimeUtc.Ticks}") : null;
+    }
+
+    public TermWrapProbeRun? RunProbe(string probe, TimeSpan timeout)
+    {
+        var start = new ProcessStartInfo(probe)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            WorkingDirectory = Path.GetDirectoryName(probe)!,
+        };
+        Process? process;
+        try
+        {
+            process = Process.Start(start);
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or IOException)
+        {
+            return null;
+        }
+
+        if (process is null)
+        {
+            return null;
+        }
+
+        using (process)
+        {
+            var output = process.StandardOutput.ReadToEndAsync();
+            var error = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(timeout))
+            {
+                try
+                {
+                    process.Kill();
+                }
+                catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+                {
+                }
+
+                return new TermWrapProbeRun(-1, ["probe: timed out"]);
+            }
+
+            process.WaitForExit();
+            var text = output.GetAwaiter().GetResult() + error.GetAwaiter().GetResult();
+            var lines = text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            return new TermWrapProbeRun(process.ExitCode, lines);
+        }
+    }
+
+    public bool? IsModuleLoaded(string service, string module)
+    {
+        if (WindowsHostServices.ProcessId(service) is not int pid)
+        {
+            return null;
+        }
+
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            foreach (ProcessModule m in process.Modules)
+            {
+                if (string.Equals(m.ModuleName, module, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException or ArgumentException or NotSupportedException)
+        {
+            return null;
+        }
+    }
 }
 
 /// <summary><see cref="IHostServices"/> through the Service Control Manager.</summary>

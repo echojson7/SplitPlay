@@ -88,6 +88,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 | GET | `/host/cpu` | the CPU and how `host.deskCores` splits it: `{"name":"AMD Ryzen 9 7950X3D 16-Core Processor","cores":16,"threads":32,"kind":"x3d","mode":"auto","caches":[{"cpus":[16,…,31],"l3Mb":96},{"cpus":[0,…,15],"l3Mb":32}],"desks":[{"id":"anna","cpus":[16,…,31]},{"id":"guest","cpus":[0,…,15]}],"auto":[…]}`. `kind`: `uniform` (nothing to split), `hybrid` (Intel P- and E-cores), `ccd` (several L3 caches), `x3d` (several, one larger). `caches`: the processors by L3 cache, larger first. `desks`: each desk's processors now (`cpus` null: every processor); `auto`: what `"auto"` would give each desk. Processor numbers as in config.md `profile.cpuSet` |
 | GET | `/host/network` | LAN addresses of the host for Moonlight and what may keep Moonlight from the desks: `{"addresses":["192.168.1.20"],"profile":"Private","mdnsAllowed":true}`. `addresses`: IPv4 addresses of interfaces that are up, without loopback and link-local (169.254/16), those of interfaces with a default gateway first; empty when none. A desk is added in Moonlight as `<address>:<basePort>`. `profile`: the Windows network profile (`Public`, `Private`, `Domain`) of the interfaces with a default gateway (of all interfaces when none has one; virtual switches of Hyper-V or WSL have none), the worst one when they differ; the desks' firewall rules cover private and domain networks only. `mdnsAllowed`: whether inbound mDNS (UDP 5353) reaches Windows' mDNS responder on that profile: the firewall is off for it, or an enabled rule such as the built-in "mDNS (UDP-In)" allows it and none blocks it. `null` when unknown. SplitPlay never changes the profile or the rule; the UI shows "Network · Public" and "mDNS · Off" in Settings only when there is a problem |
 | GET | `/host/services` | the Windows services SplitPlay depends on, see [Host services](#host-services) |
+| GET | `/host/warnings` | the host warnings that do not need the GPU counters (today the TermWrap ones of `host.warnings` below): an array, empty when all is well. Cheap; the tray polls it |
 | POST | `/host/services/{name}/start`, `/host/services/{name}/stop` | start or stop one of those services; 202 with its entry. `{name}` outside the list → 404 `not_found`; a service that cannot be started or stopped now (already running, disabled, not installed, a driver) → 409 `invalid_state`; the SCM refusing → 500 `internal` with its message |
 | GET | `/desks` | array of desks with live state |
 | POST | `/desks` | create a desk (body = desk config, see config.md, plus optional `password`: the Windows password of `user`, verified when the account exists, used for a new account otherwise) |
@@ -302,7 +303,12 @@ The first read after a pause returns `null` for them; they appear about a second
   reset (TDR) within the last 15 minutes, `at` when, `desks` how many desks had their workers restarted (their
   sessions stay). `encoderBusy`: an adapter's video encoder has been at 90 % or more for 5 s (it clears below 80 %).
   `vramFull`: its dedicated memory has been 95 % full or more for 5 s (clears below 90 %). Both carry `gpu` (the
-  adapter name) and `percent`, and need the GPU counters above. Clients ignore codes they do not know.
+  adapter name) and `percent`, and need the GPU counters above. TermWrap (checked at service start and every
+  5 minutes, see `TermWrapGuard`): `termWrapReboot` TermService runs without TermWrap until the PC restarts,
+  `repaired: true` when SplitPlay has just written back the `ServiceDll` a Windows update reset;
+  `termWrapUnsupported` TermWrap cannot patch the installed `termsrv.dll` (`version`), desks cannot start until
+  SplitPlay is updated; `termWrapMissing` its files are gone (reinstall); `termWrapRepairFailed` the `ServiceDll`
+  could not be written back. Clients ignore codes they do not know.
 
 The WebSocket `metrics` event is `{"type":"metrics","host":{…},"desks":[…]}` with the same fields.
 

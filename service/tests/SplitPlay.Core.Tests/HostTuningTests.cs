@@ -4,7 +4,7 @@ using SplitPlay.Core.Host;
 
 namespace SplitPlay.Core.Tests;
 
-public sealed class HostTuningTests : IDisposable
+public sealed partial class HostTuningTests : IDisposable
 {
     private readonly string _dir = Path.Combine(Path.GetTempPath(), "splitplay-host-" + Guid.NewGuid().ToString("N")[..8]);
     private readonly FakeRegistry _registry = new();
@@ -413,7 +413,17 @@ public sealed class HostTuningTests : IDisposable
 
         public RegValue? Get(string key, string name) => _values.TryGetValue((key.ToUpperInvariant(), name.ToUpperInvariant()), out var v) ? v : null;
 
-        public void Set(string key, string name, RegValue value) => _values[(key.ToUpperInvariant(), name.ToUpperInvariant())] = value;
+        public bool FailWrites { get; set; }
+
+        public void Set(string key, string name, RegValue value)
+        {
+            if (FailWrites)
+            {
+                throw new UnauthorizedAccessException("Access is denied");
+            }
+
+            _values[(key.ToUpperInvariant(), name.ToUpperInvariant())] = value;
+        }
 
         public void Delete(string key, string name) => _values.Remove((key.ToUpperInvariant(), name.ToUpperInvariant()));
     }

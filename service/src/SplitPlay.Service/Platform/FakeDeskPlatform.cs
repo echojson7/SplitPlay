@@ -115,6 +115,11 @@ public sealed class FakeDeskPlatform : IDeskPlatform
             throw new InvalidOperationException("The RPC server is unavailable");
         }
 
+        if (TermWrap.Problem is { } termWrap)
+        {
+            throw new DeskProvisioningException(termWrap);
+        }
+
         var credentials = EnsureAccount(desk);
         if (desk.SteamIsolationEnabled)
         {
@@ -363,6 +368,19 @@ public sealed class FakeDeskPlatform : IDeskPlatform
     {
         _actions.Enqueue($"compose {composeIntervalMs}");
         return true;
+    }
+
+    /// <summary>What <see cref="CheckTermWrap"/> returns; a desk start fails with its problem like on Windows.</summary>
+    public SplitPlay.Core.Host.TermWrapHealth TermWrap { get; set; } = SplitPlay.Core.Host.TermWrapHealth.NotManaged;
+
+    private int _termWrapChecks;
+
+    public int TermWrapChecks => Volatile.Read(ref _termWrapChecks);
+
+    public SplitPlay.Core.Host.TermWrapHealth CheckTermWrap(bool runProbe = true)
+    {
+        Interlocked.Increment(ref _termWrapChecks);
+        return TermWrap;
     }
 
     public int? ConsoleSessionId() => ConsoleSession;

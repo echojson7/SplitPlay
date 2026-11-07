@@ -7,7 +7,7 @@ namespace SplitPlay.Tray;
 /// <summary>Texts of the tray menu and its notifications, in Russian or English as the Windows display language.</summary>
 internal static class TrayText
 {
-    private static bool Russian => CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru";
+    public static bool Russian => CultureInfo.CurrentUICulture.TwoLetterISOLanguageName == "ru";
 
     public static string Open => Russian ? "Открыть SplitPlay" : "Open SplitPlay";
 

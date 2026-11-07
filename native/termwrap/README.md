@@ -39,6 +39,7 @@ Imports of the shipped DLLs, as measured in CI:
 | `UmWrap.dll` | Replaces `umrdp.dll` as `UmRdpService`'s `ServiceDll` (Home and Server editions only) |
 | `EndpWrap.dll` | Optional: audio *recording* redirection on Home and Server editions (see below). SplitPlay does not install it |
 | `Zydis.dll` | Disassembler used by all three wrappers; must sit next to them |
+| `termwrap-probe.exe` | Upstream's `TermWrapTest` project built with our `probe.cpp` as its main: runs TermWrap's patch search on a private copy of `termsrv.dll` and prints what TermWrap reports (see below) |
 | `LICENSE` | TermWrap's MIT licence |
 | `LICENSE.zydis` | Zydis' MIT licence |
 | `VERSION.txt` | The TermWrap and Zydis commits the files were built from |
@@ -189,3 +190,27 @@ and `Zydis.dll` copied to `System32` (and the x86 builds to `SysWOW64`). It also
 `HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp\AudioEnumeratorDll` changed from
 `rdpendp.dll` to `EndpWrap.dll`. SplitPlay streams audio out of the desk only (rdpsnd playback), so it does not need
 this. Only the x64 build is shipped.
+
+## Surviving Windows updates
+
+Windows updates break TermWrap in two ways. A feature update writes TermService's `ServiceDll` back to `termsrv.dll`.
+A cumulative update may ship a `termsrv.dll` in which TermWrap does not find its patch points. Either way the next
+desk logon would end the console session or fail with an obscure error. The service's `TermWrapGuard`
+(`service/src/SplitPlay.Core/Host/TermWrapGuard.cs`) runs when the service starts, every 5 minutes, and before each
+desk start:
+
+1. If a recorded TermWrap `ServiceDll` differs, it is written back (only on a host prepared with TermWrap) and the
+   change is marked "reboot required", as after `host prepare`.
+2. Once per `termsrv.dll` version (and probe build), `termwrap-probe.exe` runs. Its verdict is cached in
+   `%ProgramData%\SplitPlay\termwrap-check.json`. Messages from the patches concurrent sessions need
+   (`DefPolicyPatch…`, `CDefPolicy_Query not found`, `CSLQuery_Initialize not found`, `bInitialized not found`) or a
+   crash mean "unsupported". The other messages (single session per user, licence type, PnP, non-RDP stack) are
+   only logged.
+3. The running TermService must have `TermWrap.dll` loaded; if not, a reboot is required.
+
+The result is one line in the web UI (`host.warnings`: `termWrapReboot`, `termWrapUnsupported`, `termWrapMissing`,
+`termWrapRepairFailed`) and in the tray, and the same reason in a desk's `lastError` when it is started.
+
+The probe prints `probe: termsrv <path>`, TermWrap's messages one per line, then `probe: done`. Exit codes: 0 the
+search ran to the end, 1 `termsrv.dll` cannot be loaded, 3 the search crashed. CI runs it on the runner's
+`termsrv.dll` through a pipe.

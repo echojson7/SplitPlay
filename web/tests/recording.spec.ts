@@ -49,6 +49,7 @@ describe('stream recording', () => {
     await row().findAll('button')[0]!.trigger('click')
     await settle()
     expect(row().find('.desc').text()).toContain('Готово')
+    expect(w.find('[data-recording-report]').text()).toContain('desk Gaming')
 
     const copy = row().findAll('button').find((b) => b.text() === 'Копировать')!
     await copy.trigger('click')

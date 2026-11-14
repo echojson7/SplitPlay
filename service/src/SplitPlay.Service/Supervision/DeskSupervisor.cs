@@ -290,9 +290,8 @@ public sealed class DeskSupervisor : IHostedService
             return new RecordingDto(false, null, null, null, 0);
         }
 
-        var now = _time.GetUtcNow();
-        return new RecordingDto(recording.IsRunning(now), recording.StartedAt, recording.StoppedAt ?? recording.EndsAt,
-            recording.Report(now), recording.Samples);
+        var snap = recording.Snapshot(_time.GetUtcNow());
+        return new RecordingDto(snap.Running, snap.StartedAt, snap.EndsAt, snap.Report, snap.Samples);
     }
 
     /// <summary>What the report starts with: version, host settings and every desk's profile.</summary>
@@ -332,6 +331,7 @@ public sealed class DeskSupervisor : IHostedService
         try
         {
             var usage = _gpuUsage.Current();
+            var console = _platform.ConsoleSessionId();
             RecordingSample sample;
             lock (rt.Gate)
             {
@@ -341,14 +341,17 @@ public sealed class DeskSupervisor : IHostedService
                 }
 
                 var m = rt.Metrics;
-                var session = rt.SessionId is int id && id > 0 ? usage?.Sessions.GetValueOrDefault(id) : null;
-                var stream = rt.Streams.Count == 0 ? null : string.Join(" + ", rt.Streams.Select(StreamLine));
+                // A desk without its own session (a dev worker on the console) would show the console's load.
+                var session = rt.SessionId is int id && id > 0 && id != console ? usage?.Sessions.GetValueOrDefault(id) : null;
+                var profile = rt.Config.Profile;
+                var fps = profile.Fps ?? 0;
                 sample = new RecordingSample
                 {
                     At = now,
                     Desk = rt.Config.Name ?? rt.Id,
-                    Stream = stream,
+                    Streams = rt.Streams.Select(st => new RecordingStream(StreamKey(st), StreamLine(st), st.IdrRequests)).ToList(),
                     Fps = m.Fps,
+                    MinFps = profile.MinFps ?? (fps > 0 ? Math.Min(ProfileConfig.DefaultMinFps, fps) : ProfileConfig.DefaultMinFps),
                     ComposeHz = m.CaptureFps,
                     EncodeMsP50 = m.EncodeMsP50,
                     EncodeMsP99 = m.EncodeMsP99,
@@ -358,7 +361,6 @@ public sealed class DeskSupervisor : IHostedService
                     FecFailed = m.FecFailed,
                     FecPercent = m.FecPercent,
                     WireKbps = m.BitrateKbps,
-                    IdrRequests = m.IdrRequests,
                     FrameGapMsMax = m.FrameGapMsMax,
                     BitrateCapKbps = rt.Adaptive?.BitrateCapKbps,
                     CapReason = rt.Adaptive?.Limit switch
@@ -380,6 +382,9 @@ public sealed class DeskSupervisor : IHostedService
             _logger.LogDebug("Stream recording: {Message}", ex.Message);
         }
     }
+
+    private static string StreamKey(IpcStreamSession s) =>
+        s.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? $"{s.Address}@{s.StartedAt:O}";
 
     private static string StreamLine(IpcStreamSession s)
     {

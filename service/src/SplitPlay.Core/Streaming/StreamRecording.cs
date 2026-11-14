@@ -4,9 +4,15 @@ using System.Text;
 
 namespace SplitPlay.Core.Streaming;
 
+/// <summary>One Moonlight stream of a <see cref="RecordingSample"/>.</summary>
+/// <param name="Key">Stable while the stream runs (the worker's launch id, or address and start time).</param>
+/// <param name="Line">What the report shows ("Laptop 192.168.1.106 2560x1440@180 hevc 100 Mbit/s").</param>
+/// <param name="IdrRequests">Key frames the client asked for since the stream started; null when not measured.</param>
+public sealed record RecordingStream(string Key, string Line, double? IdrRequests);
+
 /// <summary>
-/// One worker heartbeat of a streaming desk as a <see cref="StreamRecording"/> keeps it (about once a second). Values a
-/// worker or the GPU counters do not report are null.
+/// One worker heartbeat of a desk as a <see cref="StreamRecording"/> keeps it (about once a second). Values a worker
+/// or the GPU counters do not report are null.
 /// </summary>
 public sealed record RecordingSample
 {
@@ -14,10 +20,13 @@ public sealed record RecordingSample
 
     public required string Desk { get; init; }
 
-    /// <summary>The stream(s) as one line ("Laptop 192.168.1.106 2560x1440@180 hevc 100 Mbit/s"); null without a client.</summary>
-    public string? Stream { get; init; }
+    /// <summary>The desk's running streams; empty without a client.</summary>
+    public IReadOnlyList<RecordingStream> Streams { get; init; } = [];
 
     public double Fps { get; init; }
+
+    /// <summary>The idle frame rate the worker keeps on a static picture (profile min fps); null when unknown.</summary>
+    public double? MinFps { get; init; }
 
     public double? ComposeHz { get; init; }
 
@@ -37,9 +46,6 @@ public sealed record RecordingSample
 
     public double WireKbps { get; init; }
 
-    /// <summary>Key frames the clients asked for since their streams started (cumulative).</summary>
-    public double? IdrRequests { get; init; }
-
     public double? FrameGapMsMax { get; init; }
 
     /// <summary>The bitrate cap the adaptation holds, kbit/s; null when none.</summary>
@@ -58,31 +64,47 @@ public sealed record RecordingSample
     public double? HostGpuPercent { get; init; }
 }
 
+/// <summary>What a recording is now, read in one step.</summary>
+public sealed record RecordingSnapshot(bool Running, DateTimeOffset StartedAt, DateTimeOffset EndsAt, string Report, int Samples);
+
 /// <summary>
 /// "Запись потока": collects the heartbeats of every streaming desk for a while and turns them into a short text that
-/// fits in a chat message: one line per desk and minute (min, average and worst values) and a list of notable moments
-/// (key frame requests, pauses, losses, bitrate cuts, clients coming and going). Thread-safe.
+/// fits in a chat message: one line per desk and minute (min, average and worst values), totals, and a list of notable
+/// moments (key frame requests, pauses, losses, bitrate cuts, clients coming and going). Thread-safe.
 /// </summary>
 public sealed class StreamRecording
 {
-    /// <summary>Notable moments kept; later ones are only counted.</summary>
+    /// <summary>Notable moments kept. Beyond it a serious one replaces the oldest minor one; the rest are only counted.</summary>
     public const int MaxEvents = 60;
 
-    /// <summary>A pause between frames that counts as a stall while the stream otherwise runs (at least 20 fps).</summary>
+    /// <summary>The shortest pause between frames that counts as a stall while the stream runs.</summary>
     public const double StallMs = 50;
+
+    /// <summary>
+    /// A stream below this rate, or below twice its idle rate (<see cref="RecordingSample.MinFps"/>), is (nearly)
+    /// static: its pauses say nothing about pacing.
+    /// </summary>
+    public const double MovingFps = 20;
 
     /// <summary>Host processing time (p99) that counts as a spike.</summary>
     public const double EncodeSpikeMs = 12;
 
-    /// <summary>Events of one kind and desk this close together are merged into one line ("×3").</summary>
+    /// <summary>A ping this much above the lowest one seen (and at least twice it) is a spike.</summary>
+    public const double PingRiseMs = 30;
+
+    /// <summary>Events of one kind and desk this close together are merged into one line ("×3", worst value kept).</summary>
     public static readonly TimeSpan MergeWindow = TimeSpan.FromSeconds(5);
+
+    private static readonly HashSet<string> Minor = new(StringComparer.Ordinal) { "loss", "ping", "enc" };
 
     private readonly object _gate = new();
     private readonly TimeZoneInfo _zone;
     private readonly string _header;
     private readonly SortedDictionary<string, DeskTrack> _desks = new(StringComparer.Ordinal);
     private readonly List<Event> _events = [];
-    private int _droppedEvents;
+    private readonly SortedDictionary<string, int> _dropped = new(StringComparer.Ordinal);
+    private DateTimeOffset? _stoppedAt;
+    private int _samples;
 
     public StreamRecording(DateTimeOffset startedAt, TimeSpan duration, string header, TimeZoneInfo? zone = null)
     {
@@ -98,16 +120,34 @@ public sealed class StreamRecording
     public DateTimeOffset EndsAt { get; }
 
     /// <summary>Set by <see cref="Stop"/> or by the first sample past <see cref="EndsAt"/>.</summary>
-    public DateTimeOffset? StoppedAt { get; private set; }
+    public DateTimeOffset? StoppedAt
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _stoppedAt;
+            }
+        }
+    }
 
-    /// <summary>Samples taken so far.</summary>
-    public int Samples { get; private set; }
+    /// <summary>Heartbeats of streaming desks taken so far.</summary>
+    public int Samples
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _samples;
+            }
+        }
+    }
 
     public bool IsRunning(DateTimeOffset now)
     {
         lock (_gate)
         {
-            return StoppedAt is null && now < EndsAt;
+            return _stoppedAt is null && now < EndsAt;
         }
     }
 
@@ -115,7 +155,16 @@ public sealed class StreamRecording
     {
         lock (_gate)
         {
-            StoppedAt ??= now < EndsAt ? now : EndsAt;
+            _stoppedAt ??= now < EndsAt ? now : EndsAt;
+        }
+    }
+
+    /// <summary>State and report, consistent with each other.</summary>
+    public RecordingSnapshot Snapshot(DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            return new RecordingSnapshot(_stoppedAt is null && now < EndsAt, StartedAt, _stoppedAt ?? EndsAt, Report(now), _samples);
         }
     }
 
@@ -125,20 +174,25 @@ public sealed class StreamRecording
         ArgumentNullException.ThrowIfNull(sample);
         lock (_gate)
         {
-            if (StoppedAt is not null || sample.At < StartedAt)
+            if (_stoppedAt is not null || sample.At < StartedAt)
             {
                 return;
             }
 
             if (sample.At >= EndsAt)
             {
-                StoppedAt = EndsAt;
+                _stoppedAt = EndsAt;
                 return;
             }
 
-            Samples++;
             if (!_desks.TryGetValue(sample.Desk, out var track))
             {
+                // A desk enters the report with its first stream: a desk that runs without a client stays out.
+                if (sample.Streams.Count == 0)
+                {
+                    return;
+                }
+
                 track = new DeskTrack();
                 _desks[sample.Desk] = track;
             }
@@ -152,10 +206,10 @@ public sealed class StreamRecording
     {
         lock (_gate)
         {
-            var end = StoppedAt ?? (now < EndsAt ? now : EndsAt);
+            var end = _stoppedAt ?? (now < EndsAt ? now : EndsAt);
             var sb = new StringBuilder();
             sb.Append(_header).Append('\n');
-            sb.Append(Inv($"recorded {Clock(StartedAt)}–{Clock(end)} ({Minutes(end - StartedAt)} min), {Samples} samples\n"));
+            sb.Append(Inv($"recorded {Clock(StartedAt)}–{Clock(end)} ({Minutes(end - StartedAt)} min), {_samples} samples\n"));
             if (_desks.Count == 0)
             {
                 sb.Append("no stream was running\n");
@@ -164,9 +218,9 @@ public sealed class StreamRecording
             foreach (var (desk, track) in _desks)
             {
                 sb.Append('\n').Append("desk ").Append(desk).Append('\n');
-                foreach (var stream in track.Streams)
+                foreach (var line in track.Lines)
                 {
-                    sb.Append("  stream ").Append(stream).Append('\n');
+                    sb.Append("  stream ").Append(line).Append('\n');
                 }
 
                 sb.Append("  min  fps min/avg  hz   enc p50/p99max  ping avg/max  pkt% avg/max  fec%  Mbit/s  idr  gap max  gpu/enc%  host gpu%\n");
@@ -178,7 +232,7 @@ public sealed class StreamRecording
                 var t = track.Total;
                 sb.Append(Inv($"  total: fps avg {F0(t.Fps.Avg)} (min {F0(t.Fps.Min)}), hz avg {F0(t.Compose.Avg)}, enc p99 max {F1(t.EncP99.Max)} ms, ping avg {F0(t.Rtt.Avg)} max {F0(t.Rtt.Max)} ms, "));
                 sb.Append(Inv($"packet loss avg {F2(t.Packet.Avg)} % (seconds with loss {track.LossSeconds}), frames lost max {F1(track.FrameLossMax)} %, FEC failed {F0(track.FecFailed)}, "));
-                sb.Append(Inv($"IDR requests {track.IdrTotal}, stalls ≥{StallMs:0} ms {track.Stalls}, gap max {F0(t.Gap.Max)} ms\n"));
+                sb.Append(Inv($"IDR requests {track.IdrTotal}, stalls {track.Stalls}, gap max {F0(t.Gap.Max)} ms\n"));
             }
 
             sb.Append('\n').Append("events");
@@ -191,7 +245,7 @@ public sealed class StreamRecording
                 sb.Append('\n');
                 foreach (var e in _events)
                 {
-                    sb.Append(Clock(e.At)).Append(' ').Append(e.Desk).Append(' ').Append(e.Text);
+                    sb.Append(Clock(e.At)).Append(' ').Append(e.Desk).Append(' ').Append(e.Text());
                     if (e.Count > 1)
                     {
                         sb.Append(Inv($" ×{e.Count}"));
@@ -199,11 +253,13 @@ public sealed class StreamRecording
 
                     sb.Append('\n');
                 }
+            }
 
-                if (_droppedEvents > 0)
-                {
-                    sb.Append(Inv($"… {_droppedEvents} more\n"));
-                }
+            if (_dropped.Count > 0)
+            {
+                sb.Append(Inv($"… {_dropped.Values.Sum()} more: "))
+                    .Append(string.Join(", ", _dropped.Select(d => Inv($"{d.Key} {d.Value}"))))
+                    .Append('\n');
             }
 
             return sb.ToString();
@@ -214,47 +270,57 @@ public sealed class StreamRecording
 
     private void Track(DeskTrack track, RecordingSample s)
     {
-        if (s.Stream != track.LastStream)
+        // Streams coming and going; key frame requests counted per stream from what it had when the recording first
+        // saw it (a stream that starts while recording counts from 0).
+        var idrNew = 0;
+        var now = new Dictionary<string, RecordingStream>(StringComparer.Ordinal);
+        foreach (var stream in s.Streams)
         {
-            if (s.Stream is not null)
-            {
-                if (!track.Streams.Contains(s.Stream, StringComparer.Ordinal))
-                {
-                    track.Streams.Add(s.Stream);
-                }
-
-                AddEvent(s, "connect", $"client connected: {s.Stream}");
-            }
-            else
-            {
-                AddEvent(s, "disconnect", "client disconnected");
-            }
-
-            track.LastStream = s.Stream;
-            track.LastIdr = null;
+            now[stream.Key] = stream;
         }
 
-        if (s.Stream is null)
+        foreach (var (key, stream) in now)
+        {
+            if (!track.Lines.Contains(stream.Line, StringComparer.Ordinal))
+            {
+                track.Lines.Add(stream.Line);
+            }
+
+            if (!track.Idr.TryGetValue(key, out var before))
+            {
+                AddEvent(s, "connect", track.Started ? $"client connected: {stream.Line}" : $"streaming: {stream.Line}");
+                before = track.Started ? 0 : stream.IdrRequests ?? 0;
+            }
+
+            var current = stream.IdrRequests ?? before;
+            idrNew += (int)Math.Max(0, current - before);
+            track.Idr[key] = Math.Max(before, current);
+        }
+
+        foreach (var gone in track.Idr.Keys.Where(k => !now.ContainsKey(k)).ToList())
+        {
+            track.Idr.Remove(gone);
+            AddEvent(s, "disconnect", "client disconnected");
+        }
+
+        track.Started = true;
+        if (now.Count == 0)
         {
             return;
         }
 
-        var minute = (int)((s.At - StartedAt).TotalMinutes);
+        _samples++;
+        var minute = (int)(s.At - StartedAt).TotalMinutes;
         if (!track.Minutes.TryGetValue(minute, out var bucket))
         {
             bucket = new Bucket();
             track.Minutes[minute] = bucket;
         }
 
-        // A new stream counts its key frame requests from 0 again.
-        var idrNew = 0;
-        if (s.IdrRequests is double idr)
-        {
-            var before = track.LastIdr ?? 0;
-            idrNew = idr >= before ? (int)(idr - before) : (int)idr;
-            track.LastIdr = idr;
-        }
-
+        // A static picture sends few frames (the idle rate, min fps): its pauses say nothing about pacing. A stream counts
+        // as moving at twice the idle rate, so a picture that only changes now and then is not taken for stalls.
+        var moving = s.Fps >= Math.Max(MovingFps, 2 * (s.MinFps ?? 0));
+        var stallMs = StallMs;
         foreach (var b in new[] { bucket, track.Total })
         {
             b.Fps.Add(s.Fps);
@@ -265,8 +331,7 @@ public sealed class StreamRecording
             b.Packet.Add(s.PacketLossPct);
             b.Fec.Add(s.FecPercent);
             b.Mbps.Add(s.WireKbps / 1000);
-            // A static picture sends few frames: its pauses say nothing about pacing.
-            b.Gap.Add(s.Fps >= 20 ? s.FrameGapMsMax : null);
+            b.Gap.Add(moving ? s.FrameGapMsMax : null);
             b.Gpu.Add(s.GpuPercent);
             b.Enc.Add(s.EncoderPercent);
             b.HostGpu.Add(s.HostGpuPercent);
@@ -283,40 +348,41 @@ public sealed class StreamRecording
 
         if (idrNew > 0)
         {
-            AddEvent(s, "idr", "IDR requested (client dropped frames: slow decoder or unrepaired loss)", idrNew);
+            AddEvent(s, "idr", "IDR requested (Moonlight dropped frames: slow decoder, unrepaired loss or window change)", count: idrNew);
         }
 
         if (s.FrameLossPct > 0)
         {
-            AddEvent(s, "frames", Inv($"frames lost {F1(s.FrameLossPct)} %"));
+            AddEvent(s, "frames", "frames lost {0:0.0} %", s.FrameLossPct);
         }
 
         if (s.FecFailed > 0)
         {
-            AddEvent(s, "fecfail", Inv($"FEC could not repair {F0(s.FecFailed)} block(s), packet loss {F2(s.PacketLossPct)} %"));
+            AddEvent(s, "fecfail", "FEC could not repair a block, packet loss up to {0:0.00} %", s.PacketLossPct ?? 0, count: (int)s.FecFailed.Value);
         }
         else if (s.PacketLossPct >= 1)
         {
-            AddEvent(s, "loss", Inv($"packet loss {F2(s.PacketLossPct)} %"));
+            AddEvent(s, "loss", "packet loss up to {0:0.00} %", s.PacketLossPct.Value);
         }
 
-        if (s.FrameGapMsMax >= StallMs && s.Fps >= 20)
+        if (moving && s.FrameGapMsMax >= stallMs)
         {
             track.Stalls++;
-            AddEvent(s, "gap", Inv($"pause between frames {F0(s.FrameGapMsMax)} ms (fps {F0(s.Fps)})"));
+            AddEvent(s, "gap", "pause between frames up to {0:0} ms", s.FrameGapMsMax.Value);
         }
 
         if (s.EncodeMsP99 >= EncodeSpikeMs)
         {
-            AddEvent(s, "enc", Inv($"host processing p99 {F1(s.EncodeMsP99)} ms"));
+            AddEvent(s, "enc", "host processing p99 up to {0:0.0} ms", s.EncodeMsP99);
         }
 
         if (s.RttMs is double rtt)
         {
-            track.MinRtt = Math.Min(track.MinRtt ?? rtt, rtt);
-            if (rtt >= 2 * track.MinRtt + 10)
+            var lowest = Math.Min(track.MinRtt ?? rtt, rtt);
+            track.MinRtt = lowest;
+            if (rtt >= lowest + PingRiseMs && rtt >= 2 * lowest)
             {
-                AddEvent(s, "ping", Inv($"ping {F0(rtt)} ms (lowest {F0(track.MinRtt)})"));
+                AddEvent(s, "ping", Inv($"ping up to {{0:0}} ms (lowest {lowest:0})"), rtt);
             }
         }
 
@@ -329,31 +395,41 @@ public sealed class StreamRecording
         }
     }
 
-    private void AddEvent(RecordingSample s, string kind, string text, int count = 1)
+    /// <param name="format">The line; with <paramref name="value"/> a composite format whose <c>{0}</c> takes the worst value.</param>
+    private void AddEvent(RecordingSample s, string kind, string format, double? value = null, int count = 1)
     {
-        for (var i = _events.Count - 1; i >= 0; i--)
+        if (kind is not ("connect" or "disconnect" or "cap"))
         {
-            var e = _events[i];
-            if (s.At - e.Last > MergeWindow)
+            // Events are in time order and only the last few seconds can merge.
+            for (var i = _events.Count - 1; i >= 0 && s.At - _events[i].At <= TimeSpan.FromMinutes(1); i--)
             {
-                break;
-            }
-
-            if (e.Desk == s.Desk && e.Kind == kind && kind is not ("connect" or "disconnect" or "cap"))
-            {
-                e.Count += count;
-                e.Last = s.At;
-                return;
+                var e = _events[i];
+                if (e.Desk == s.Desk && e.Kind == kind && s.At - e.Last <= MergeWindow)
+                {
+                    e.Count += count;
+                    e.Value = Math.Max(e.Value, value ?? 0);
+                    e.Last = s.At;
+                    return;
+                }
             }
         }
 
         if (_events.Count >= MaxEvents)
         {
-            _droppedEvents++;
-            return;
+            // Over the budget a serious moment pushes out the oldest minor one; anything else is only counted.
+            var minor = Minor.Contains(kind) ? -1 : _events.FindIndex(e => Minor.Contains(e.Kind));
+            if (minor < 0)
+            {
+                _dropped[kind] = _dropped.GetValueOrDefault(kind) + count;
+                return;
+            }
+
+            var pushed = _events[minor];
+            _dropped[pushed.Kind] = _dropped.GetValueOrDefault(pushed.Kind) + pushed.Count;
+            _events.RemoveAt(minor);
         }
 
-        _events.Add(new Event(s.At, s.Desk, kind, text) { Count = count, Last = s.At });
+        _events.Add(new Event(s.At, s.Desk, kind, format) { Count = count, Value = value ?? 0, HasValue = value is not null, Last = s.At });
     }
 
     // ------------------------------------------------------------------ formatting
@@ -370,7 +446,7 @@ public sealed class StreamRecording
 
     private static string F2(double? v) => v is double d ? d.ToString("0.00", CultureInfo.InvariantCulture) : "-";
 
-    private sealed class Event(DateTimeOffset at, string desk, string kind, string text)
+    private sealed class Event(DateTimeOffset at, string desk, string kind, string format)
     {
         public DateTimeOffset At { get; } = at;
 
@@ -378,11 +454,17 @@ public sealed class StreamRecording
 
         public string Kind { get; } = kind;
 
-        public string Text { get; } = text;
-
         public int Count { get; set; }
 
+        /// <summary>The worst value of the merged moments, put into the format's <c>{0}</c>.</summary>
+        public double Value { get; set; }
+
         public DateTimeOffset Last { get; set; }
+
+        /// <summary>The line: the format with the worst value, or the format itself when it carries no value.</summary>
+        public string Text() => HasValue ? string.Format(CultureInfo.InvariantCulture, format, Value) : format;
+
+        public bool HasValue { get; init; }
     }
 
     private sealed class DeskTrack
@@ -391,11 +473,13 @@ public sealed class StreamRecording
 
         public Bucket Total { get; } = new();
 
-        public List<string> Streams { get; } = [];
+        public List<string> Lines { get; } = [];
 
-        public string? LastStream { get; set; }
+        /// <summary>The key frame count each running stream had at its last sample.</summary>
+        public Dictionary<string, double> Idr { get; } = new(StringComparer.Ordinal);
 
-        public double? LastIdr { get; set; }
+        /// <summary>False until the first sample: streams seen then were already running.</summary>
+        public bool Started { get; set; }
 
         public int? LastCap { get; set; }
 

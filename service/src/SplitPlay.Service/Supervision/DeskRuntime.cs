@@ -406,7 +406,8 @@ internal sealed class DeskRuntime
             Streams.Clear();
             Streams.AddRange(next);
             SortStreams();
-            return !before.SequenceEqual(Streams);
+            // The key frame count moves with the stream's health, not with who streams: it alone is no change.
+            return !before.Select(s => s with { IdrRequests = null }).SequenceEqual(Streams.Select(s => s with { IdrRequests = null }));
         }
     }
 

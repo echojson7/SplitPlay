@@ -57,10 +57,14 @@ async function recAction(action: 'start' | 'stop'): Promise<void> {
   }
 }
 
+// Copies the report already on screen, inside the click (browsers allow the clipboard only then), and refreshes it
+// afterwards; the text is also shown below the row to select by hand.
 async function copyReport(): Promise<void> {
-  await loadRecording()
   const text = recording.value?.report
-  if (text) toast((await copyText(text)) ? t('common.copied') : text)
+  if (!text) return
+  const copied = await copyText(text)
+  toast(copied ? t('common.copied') : t('rec.copyFailed'), copied ? undefined : 'error')
+  if (recording.value?.running) void loadRecording()
 }
 
 onMounted(() => {
@@ -117,6 +121,10 @@ function deskName(id: string): string {
             <button v-if="recording.report" type="button" class="btn-accent" @click="copyReport">{{ t('common.copy') }}</button>
           </div>
         </div>
+        <details v-if="recording?.report" class="rec-report">
+          <summary>{{ t('rec.show') }}</summary>
+          <pre data-recording-report>{{ recording.report }}</pre>
+        </details>
       </div>
 
       <h2 class="group-title">{{ t('metrics.gpus') }}</h2>
@@ -175,6 +183,17 @@ function deskName(id: string): string {
 </template>
 
 <style scoped>
+.rec-report {
+  padding: 4px 16px 8px;
+}
+
+.rec-report pre {
+  max-height: 320px;
+  overflow: auto;
+  font-size: 12px;
+  user-select: text;
+}
+
 .val {
   font-variant-numeric: tabular-nums;
   color: var(--text-2);

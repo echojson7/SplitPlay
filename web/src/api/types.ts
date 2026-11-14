@@ -190,6 +190,10 @@ export interface DeskMetrics {
   fecPercent?: number | null
   /** The encoder's bitrate, kbit/s; null when it cannot change it live. */
   encoderKbps?: number | null
+  /** Key frames Moonlight asked for since the stream started: frames it threw away (slow decoder or unrepaired loss). */
+  idrRequests?: number | null
+  /** Longest pause between two frames sent over the last interval, ms. */
+  frameGapMsMax?: number | null
 }
 
 /** The Moonlight stream a desk is serving (`desk.stream`): who is connected and what it asked for. */
@@ -438,4 +442,15 @@ export type LiveEvent =
 
 export interface ApiErrorBody {
   error: { code: string; message: string }
+}
+
+/** «Запись потока» (`GET /diagnostics/recording`): a short per-minute report of every streaming desk, to copy. */
+export interface Recording {
+  running: boolean
+  startedAt: string | null
+  /** When it ends (running) or ended. */
+  endsAt: string | null
+  /** The report so far; null before the first recording. */
+  report: string | null
+  samples: number
 }

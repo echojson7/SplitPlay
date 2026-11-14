@@ -200,6 +200,7 @@ export class MockBackend {
   private readonly stepMs: number
   private readonly startedAt: number
   private password: string | undefined
+  private recordingState: { startedAt: number; endsAt: number; stoppedAt?: number } | undefined
   private readonly trusted: boolean
   private readonly sessions = new Map<string, string>() // session id -> csrf token
   private readonly desks = new Map<string, DeskEntry>()
@@ -636,6 +637,16 @@ export class MockBackend {
     // --- host
     if (path === '/metrics' && method === 'GET') return ok(this.metrics())
     if (path === '/logs' && method === 'GET') return ok(this.logs(req.query ?? {}))
+    if (path === '/diagnostics/recording') {
+      if (method === 'POST') {
+        const minutes = (req.body as { minutes?: number } | undefined)?.minutes ?? 30
+        if (minutes < 1 || minutes > 180) return err(400, 'bad_request', 'minutes must be 1-180')
+        this.recordingState = { startedAt: Date.now(), endsAt: Date.now() + minutes * 60_000 }
+      } else if (method === 'DELETE') {
+        if (this.recordingState) this.recordingState.stoppedAt ??= Date.now()
+      } else if (method !== 'GET') return err(405, 'bad_request', 'method not allowed')
+      return ok(this.recording())
+    }
     if (path === '/host' && method === 'GET') return ok(clone(this.host))
     if (path === '/host/network' && method === 'GET') return ok({ addresses: [...MOCK_ADDRESSES], ...this.network })
     if (path === '/host/cpu' && method === 'GET') return ok(this.cpu())
@@ -724,6 +735,30 @@ export class MockBackend {
       mode,
       desks: mode === 'auto' ? auto : auto.map((d) => ({ id: d.id, cpus: null })),
       auto,
+    }
+  }
+
+  private recording() {
+    const r = this.recordingState
+    if (!r) return { running: false, startedAt: null, endsAt: null, report: null, samples: 0 }
+    const end = r.stoppedAt ?? Math.min(Date.now(), r.endsAt)
+    const samples = Math.max(0, Math.floor((end - r.startedAt) / 1000))
+    const report = [
+      'SplitPlay mock stream recording · compose 500 Hz (2 ms)',
+      `recorded ${samples} samples`,
+      '',
+      'desk Gaming',
+      '  min  fps min/avg  hz   enc p50/p99max  ping avg/max',
+      '    0  118/120      240  2.4/3.9        3/5',
+      '',
+      'events: none',
+    ].join('\n')
+    return {
+      running: r.stoppedAt === undefined && Date.now() < r.endsAt,
+      startedAt: new Date(r.startedAt).toISOString(),
+      endsAt: new Date(r.stoppedAt ?? r.endsAt).toISOString(),
+      report,
+      samples,
     }
   }
 

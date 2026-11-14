@@ -1,11 +1,14 @@
 <!-- SPDX-License-Identifier: MIT -->
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { api } from '../api/client'
+import type { Recording } from '../api/types'
 import HostWarnings from '../components/HostWarnings.vue'
-import { useLive } from '../composables'
+import { copyText, errorText, useLive } from '../composables'
 import { fmtGb, fmtPercent } from '../desk'
 import { fmtBitrate, fmtNumber, t } from '../i18n'
 import { store } from '../store'
+import { toast } from '../toast'
 
 useLive()
 const s = store.state
@@ -17,6 +20,57 @@ function pct(used?: number | null, total?: number | null): number | null {
 }
 
 const gb = fmtGb
+
+// ---- «Запись потока»: 30 minutes of every streaming desk as a short text to copy
+const recording = ref<Recording | null>(null)
+const recBusy = ref(false)
+const now = ref(Date.now())
+let recTimer: ReturnType<typeof setInterval> | undefined
+
+async function loadRecording(): Promise<void> {
+  try {
+    recording.value = await api.recording()
+    now.value = Date.now()
+  } catch {
+    // An older service has no recording: the row stays hidden.
+    recording.value = null
+  }
+}
+
+const recStatus = computed(() => {
+  const r = recording.value
+  if (!r?.startedAt) return null
+  const end = r.endsAt ? Date.parse(r.endsAt) : now.value
+  if (r.running) return t('rec.left', { minutes: Math.max(1, Math.ceil((end - now.value) / 60_000)) })
+  return t('rec.done', { minutes: fmtNumber(Math.max(0, (end - Date.parse(r.startedAt)) / 60_000), 1) })
+})
+
+async function recAction(action: 'start' | 'stop'): Promise<void> {
+  recBusy.value = true
+  try {
+    recording.value = action === 'start' ? await api.startRecording(30) : await api.stopRecording()
+    now.value = Date.now()
+  } catch (e) {
+    toast(errorText(e), 'error')
+  } finally {
+    recBusy.value = false
+  }
+}
+
+async function copyReport(): Promise<void> {
+  await loadRecording()
+  const text = recording.value?.report
+  if (text) toast((await copyText(text)) ? t('common.copied') : text)
+}
+
+onMounted(() => {
+  void loadRecording()
+  recTimer = setInterval(() => {
+    now.value = Date.now()
+    if (recording.value?.running) void loadRecording()
+  }, 10_000)
+})
+onUnmounted(() => clearInterval(recTimer))
 
 function deskName(id: string): string {
   return s.desks.find((d) => d.id === id)?.name ?? id
@@ -48,6 +102,19 @@ function deskName(id: string): string {
           <div class="ctl">
             <span class="val">{{ host.composeHz == null ? t('common.none') : `${host.composeHz} Hz` }}</span>
             <span class="meter" />
+          </div>
+        </div>
+        <div v-if="recording" class="srow compact" data-recording>
+          <span class="text">
+            <span class="title">{{ t('rec.title') }}</span>
+            <span class="desc">{{ recStatus ?? t('rec.hint') }}</span>
+          </span>
+          <div class="ctl">
+            <button v-if="recording.running" type="button" :disabled="recBusy" @click="recAction('stop')">
+              {{ t('rec.stop') }}
+            </button>
+            <button v-else type="button" :disabled="recBusy" @click="recAction('start')">{{ t('rec.start') }}</button>
+            <button v-if="recording.report" type="button" class="btn-accent" @click="copyReport">{{ t('common.copy') }}</button>
           </div>
         </div>
       </div>

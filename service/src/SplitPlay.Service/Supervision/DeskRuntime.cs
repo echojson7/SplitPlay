@@ -510,6 +510,12 @@ internal sealed class DeskRuntime
                 case "fec_percent":
                     dto.FecPercent = number;
                     break;
+                case "idr_requests":
+                    dto.IdrRequests = number;
+                    break;
+                case "frame_gap_ms_max":
+                    dto.FrameGapMsMax = number;
+                    break;
                 case "encoder_kbps":
                     // null: no stream, or an encoder that cannot change its bitrate live.
                     dto.EncoderKbps = number;

@@ -106,6 +106,9 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 | DELETE | `/games/{exe}` | forget a game (its limit goes); 204, 404 for an unknown game. Found again, it comes back |
 | GET | `/metrics` | host-level metrics plus per-desk metrics |
 | GET | `/logs?component=service&desk=desk-1&tail=200` | array of `{"time","level","component","desk"?,"message"}` |
+| GET | `/diagnostics/recording` | «Запись потока»: `{"running","startedAt","endsAt","report","samples"}`; `report` is a short text (one line per desk and minute: fps min/avg, composition, host processing p50/p99, ping, packet loss, FEC, Mbit/s, IDR requests, longest frame pause, GPU; then totals and up to 60 notable moments), `null` before the first recording. Kept in memory until the next recording or a service restart |
+| POST | `/diagnostics/recording` | `{"minutes":30}` (1–180, default 30): start recording every streaming desk's heartbeats; replaces a running recording. 200 with the state |
+| DELETE | `/diagnostics/recording` | stop; the report stays. 200 with the state |
 | GET | `/config/export` | zip download (secrets excluded unless `?includeSecrets=true&password=...`) |
 | POST | `/config/import` | zip upload |
 | GET | `/ws` | WebSocket: a `desk` event per desk on connect and on every change (including `stream`), `metrics` every 2 s |
@@ -218,7 +221,9 @@ mouse motion on SendInput, the RDP server has no relative mouse PDUs) or `rdp_un
 now, SendInput is used); it is left out until the worker reports it. A worker with the loss telemetry (patches 0023, 0025) adds `packetLossPct` (video packets
 lost on the way, before FEC repairs them), `burstLossPct` (the worst FEC block: lost per data packet), `fecRecovered`
 and `fecFailed` (blocks repaired and not), `fecPercent` (FEC share sent now) and `encoderKbps` (the encoder's bitrate,
-`null` when it cannot change it live); an older worker leaves them `null`.
+`null` when it cannot change it live); an older worker leaves them `null`. Patch 0026 adds `idrRequests` (key frames
+the clients asked for since their streams started: frames Moonlight threw away because its decoder fell behind or a
+loss could not be repaired) and `frameGapMsMax` (the longest pause between two frames sent in the last interval).
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.

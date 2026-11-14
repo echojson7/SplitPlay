@@ -29,6 +29,24 @@ public sealed class HostNetworkTests
     }
 
     [Fact]
+    public void Select_leaves_out_host_only_virtual_switches_without_a_gateway()
+    {
+        var picked = HostNetwork.Select(
+        [
+            new HostNetwork.Candidate(IPAddress.Parse("172.31.160.1"), HasGateway: false, "Hyper-V Virtual Ethernet Adapter"),
+            new HostNetwork.Candidate(IPAddress.Parse("172.20.48.1"), HasGateway: false, "Hyper-V Virtual Ethernet Adapter #2"),
+            new HostNetwork.Candidate(IPAddress.Parse("192.168.56.1"), HasGateway: false, "VirtualBox Host-Only Ethernet Adapter"),
+            new HostNetwork.Candidate(IPAddress.Parse("192.168.80.1"), HasGateway: false, "VMware Virtual Ethernet Adapter for VMnet8"),
+            new HostNetwork.Candidate(IPAddress.Parse("192.168.1.100"), HasGateway: true, "Realtek PCIe 2.5GbE Family Controller"),
+            // An external Hyper-V switch carries the LAN itself.
+            new HostNetwork.Candidate(IPAddress.Parse("192.168.1.101"), HasGateway: true, "Hyper-V Virtual Ethernet Adapter #3"),
+            new HostNetwork.Candidate(IPAddress.Parse("100.101.102.103"), HasGateway: false, "Tailscale Tunnel"),
+        ]);
+
+        Assert.Equal(new[] { "192.168.1.100", "192.168.1.101", "100.101.102.103" }, picked);
+    }
+
+    [Fact]
     public void Select_of_nothing_is_empty()
     {
         Assert.Empty(HostNetwork.Select([]));

@@ -42,6 +42,12 @@ public sealed record IpcStreamSession
     public DateTimeOffset? StartedAt { get; init; }
 
     /// <summary>
+    /// Key frames the client asked for since the stream started (<c>idr_requests</c>, worker patch 0026); null from
+    /// an older worker.
+    /// </summary>
+    public long? IdrRequests { get; init; }
+
+    /// <summary>
     /// True when <paramref name="other"/> describes the same stream: the same id when both have one, otherwise the same
     /// address and start time.
     /// </summary>
@@ -77,6 +83,7 @@ public sealed record IpcStreamSession
             BitrateKbpsRequested = Int(e, "bitrate_kbps_requested"),
             Hdr = e.TryGetProperty("hdr", out var hdr) && hdr.ValueKind == JsonValueKind.True,
             FecFeedback = e.TryGetProperty("fec_feedback", out var fec) && fec.ValueKind == JsonValueKind.True,
+            IdrRequests = Long(e, "idr_requests"),
             StartedAt = String(e, "started_at") is { } s
                 && DateTimeOffset.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var t)
                     ? t

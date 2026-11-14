@@ -239,6 +239,160 @@ public sealed class DeskSupervisor : IHostedService
         ApplyComposeInterval();
     }
 
+    // ------------------------------------------------------------------ stream recording
+
+    /// <summary>The longest recording <see cref="StartRecording"/> takes.</summary>
+    public static readonly TimeSpan MaxRecording = TimeSpan.FromHours(3);
+
+    private readonly object _recordingGate = new();
+    private StreamRecording? _recording;
+
+    /// <summary>
+    /// Starts "Запись потока" for <paramref name="duration"/> (1 minute to <see cref="MaxRecording"/>): every streaming
+    /// desk's heartbeats from now on go into a short report. A recording already running is replaced.
+    /// </summary>
+    public RecordingDto StartRecording(TimeSpan duration)
+    {
+        var now = _time.GetUtcNow();
+        duration = TimeSpan.FromTicks(Math.Clamp(duration.Ticks, TimeSpan.FromMinutes(1).Ticks, MaxRecording.Ticks));
+        var recording = new StreamRecording(now, duration, RecordingHeader());
+        lock (_recordingGate)
+        {
+            _recording = recording;
+        }
+
+        _logger.LogInformation("Stream recording started for {Minutes} min", duration.TotalMinutes);
+        return RecordingStatus();
+    }
+
+    /// <summary>Stops the running recording; its report stays until the next one starts.</summary>
+    public RecordingDto StopRecording()
+    {
+        lock (_recordingGate)
+        {
+            _recording?.Stop(_time.GetUtcNow());
+        }
+
+        return RecordingStatus();
+    }
+
+    /// <summary>The recording's state and report (the report so far while it runs).</summary>
+    public RecordingDto RecordingStatus()
+    {
+        StreamRecording? recording;
+        lock (_recordingGate)
+        {
+            recording = _recording;
+        }
+
+        if (recording is null)
+        {
+            return new RecordingDto(false, null, null, null, 0);
+        }
+
+        var snap = recording.Snapshot(_time.GetUtcNow());
+        return new RecordingDto(snap.Running, snap.StartedAt, snap.EndsAt, snap.Report, snap.Samples);
+    }
+
+    /// <summary>What the report starts with: version, host settings and every desk's profile.</summary>
+    private string RecordingHeader()
+    {
+        var cfg = _config.Snapshot();
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var compose = EffectiveComposeIntervalMs();
+        var sb = new System.Text.StringBuilder();
+        sb.Append(inv, $"SplitPlay {SplitPlay.Core.BuildInfo.Version} stream recording · compose {(compose > 0 ? 1000 / compose : 0)} Hz ({compose} ms)");
+        sb.Append(inv, $" · {Environment.ProcessorCount} CPUs");
+        foreach (var desk in cfg.Desks)
+        {
+            var p = desk.Profile;
+            sb.Append('\n').Append(inv, $"profile {desk.Name ?? desk.Id}: {p.Width}x{p.Height}@{p.Fps} · adaptive {(p.AdaptiveStreamEnabled ? "on" : "off")}");
+            sb.Append(inv, $" · fec {(p.FecPercent is int f ? f + " %" : "auto")} · min fps {p.MinFps?.ToString(inv) ?? "default"} · capture {p.CaptureMode ?? "default"} · input {p.Input ?? "windows"}");
+        }
+
+        return sb.ToString();
+    }
+
+    /// <summary>Feeds the desk's latest heartbeat to the running recording, if any. Never throws.</summary>
+    private void Record(DeskRuntime rt, IpcConnection connection)
+    {
+        StreamRecording? recording;
+        lock (_recordingGate)
+        {
+            recording = _recording;
+        }
+
+        var now = _time.GetUtcNow();
+        if (recording is null || !recording.IsRunning(now))
+        {
+            return;
+        }
+
+        try
+        {
+            var usage = _gpuUsage.Current();
+            var console = _platform.ConsoleSessionId();
+            RecordingSample sample;
+            lock (rt.Gate)
+            {
+                if (!rt.IsCurrent(connection))
+                {
+                    return;
+                }
+
+                var m = rt.Metrics;
+                // A desk without its own session (a dev worker on the console) would show the console's load.
+                var session = rt.SessionId is int id && id > 0 && id != console ? usage?.Sessions.GetValueOrDefault(id) : null;
+                var profile = rt.Config.Profile;
+                var fps = profile.Fps ?? 0;
+                sample = new RecordingSample
+                {
+                    At = now,
+                    Desk = rt.Config.Name ?? rt.Id,
+                    Streams = rt.Streams.Select(st => new RecordingStream(StreamKey(st), StreamLine(st), st.IdrRequests)).ToList(),
+                    Fps = m.Fps,
+                    MinFps = profile.MinFps ?? (fps > 0 ? Math.Min(ProfileConfig.DefaultMinFps, fps) : ProfileConfig.DefaultMinFps),
+                    ComposeHz = m.CaptureFps,
+                    EncodeMsP50 = m.EncodeMsP50,
+                    EncodeMsP99 = m.EncodeMsP99,
+                    RttMs = m.RttMs,
+                    FrameLossPct = m.LossPct,
+                    PacketLossPct = m.PacketLossPct,
+                    FecFailed = m.FecFailed,
+                    FecPercent = m.FecPercent,
+                    WireKbps = m.BitrateKbps,
+                    FrameGapMsMax = m.FrameGapMsMax,
+                    BitrateCapKbps = rt.Adaptive?.BitrateCapKbps,
+                    CapReason = rt.Adaptive?.Limit switch
+                    {
+                        AdaptiveLimit.Loss => "loss",
+                        AdaptiveLimit.Network => "network",
+                        _ => null,
+                    },
+                    GpuPercent = session?.GpuPercent,
+                    EncoderPercent = session?.EncoderPercent,
+                    HostGpuPercent = usage is { Adapters.Count: > 0 } ? usage.Adapters.Values.Max(a => a.UtilizationPercent) : null,
+                };
+            }
+
+            recording.Add(sample);
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger.LogDebug("Stream recording: {Message}", ex.Message);
+        }
+    }
+
+    private static string StreamKey(IpcStreamSession s) =>
+        s.Id?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? $"{s.Address}@{s.StartedAt:O}";
+
+    private static string StreamLine(IpcStreamSession s)
+    {
+        var inv = System.Globalization.CultureInfo.InvariantCulture;
+        var who = s.Client is { Length: > 0 } c ? $"{c} {s.Address}" : s.Address ?? "?";
+        return string.Create(inv, $"{who} {s.Width}x{s.Height}@{s.FpsRequested} {s.Codec} {s.BitrateKbpsRequested / 1000} Mbit/s{(s.Hdr ? " HDR" : "")}{(s.FecFeedback ? "" : " (no FEC reports)")}");
+    }
+
     // ------------------------------------------------------------------ composition interval
 
     /// <summary>
@@ -2340,6 +2494,7 @@ public sealed class DeskSupervisor : IHostedService
                     Publish(rt);
                 }
 
+                Record(rt, worker.Connection);
                 break;
             }
 

@@ -62,18 +62,24 @@ const live = computed(() => {
       m.encodeMsP50 !== undefined
         ? t('live.encodeValue', { p50: fmtNumber(m.encodeMsP50, 1, 1), p99: fmtNumber(m.encodeMsP99 ?? 0, 1, 1) })
         : fmtMs(m.encodeMsP99 ?? 0),
-    loss: lossLine(m.lossPct, m.packetLossPct),
+    loss: lossLine(m.lossPct, m.packetLossPct, m.idrRequests),
     compose: m.captureFps != null ? t('unit.hz', { value: fmtNumber(m.captureFps) }) : t('common.none'),
   }
 })
 
 const gpu = computed(() => gpuLine(desk.value?.metrics))
 
-/** Frames lost, and the packets lost on the way (before FEC repairs them) when the worker measures them. */
-function lossLine(frames: number | undefined, packets: number | null | undefined): string {
+/**
+ * Frames lost, and the packets lost on the way (before FEC repairs them) when the worker measures them, plus the key
+ * frames Moonlight asked for since the stream started once there are any (each one: frames it threw away).
+ */
+function lossLine(frames: number | undefined, packets: number | null | undefined, idr?: number | null): string {
   if (frames === undefined) return t('common.none')
-  if (packets == null) return t('unit.percent', { value: fmtNumber(frames, 1) })
-  return t('live.lossValue', { frames: fmtNumber(frames, 1), packets: fmtNumber(packets, 2) })
+  const line =
+    packets == null
+      ? t('unit.percent', { value: fmtNumber(frames, 1) })
+      : t('live.lossValue', { frames: fmtNumber(frames, 1), packets: fmtNumber(packets, 2) })
+  return idr ? `${line} · ${t('live.lossIdr', { count: fmtNumber(idr) })}` : line
 }
 
 /** «Адаптивный поток» while a client streams: FEC share, and the cap with its reason when the bitrate is held down. */

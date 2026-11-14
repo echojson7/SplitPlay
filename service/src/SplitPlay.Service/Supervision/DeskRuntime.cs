@@ -406,7 +406,8 @@ internal sealed class DeskRuntime
             Streams.Clear();
             Streams.AddRange(next);
             SortStreams();
-            return !before.SequenceEqual(Streams);
+            // The key frame count moves with the stream's health, not with who streams: it alone is no change.
+            return !before.Select(s => s with { IdrRequests = null }).SequenceEqual(Streams.Select(s => s with { IdrRequests = null }));
         }
     }
 
@@ -509,6 +510,12 @@ internal sealed class DeskRuntime
                     break;
                 case "fec_percent":
                     dto.FecPercent = number;
+                    break;
+                case "idr_requests":
+                    dto.IdrRequests = number;
+                    break;
+                case "frame_gap_ms_max":
+                    dto.FrameGapMsMax = number;
                     break;
                 case "encoder_kbps":
                     // null: no stream, or an encoder that cannot change its bitrate live.

@@ -476,6 +476,26 @@ public static partial class ApiEndpoints
         api.MapGet("/logs", (string? component, string? desk, int? tail, LogStore logs) =>
             Results.Json(logs.Tail(Math.Clamp(tail ?? 200, 1, 5000), component, desk), Ctx.ListLogLineDto));
 
+        // ---- stream recording ("Запись потока"): a short per-minute report of every streaming desk
+        api.MapGet("/diagnostics/recording", (DeskSupervisor s) => Results.Json(s.RecordingStatus(), Ctx.RecordingDto));
+        api.MapPost("/diagnostics/recording", async (HttpRequest request, DeskSupervisor s) =>
+        {
+            var minutes = 30;
+            if (request.ContentLength is > 0)
+            {
+                var body = await ReadBodyAsync(request, Ctx.RecordingRequest).ConfigureAwait(false);
+                minutes = body.Minutes ?? minutes;
+            }
+
+            if (minutes is < 1 or > 180)
+            {
+                throw ApiException.BadRequest("minutes must be 1-180");
+            }
+
+            return Results.Json(s.StartRecording(TimeSpan.FromMinutes(minutes)), Ctx.RecordingDto);
+        });
+        api.MapDelete("/diagnostics/recording", (DeskSupervisor s) => Results.Json(s.StopRecording(), Ctx.RecordingDto));
+
         // ---- import / export
         api.MapGet("/config/export", (bool? includeSecrets, ConfigService config) =>
         {

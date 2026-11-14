@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
+using System.Net.Http.Json;
 using System.Text.Json;
 using SplitPlay.Core.Api;
 using SplitPlay.Core.Configuration;
 using SplitPlay.Core.Ipc;
+using SplitPlay.Core.Json;
 using SplitPlay.Core.Lifecycle;
 using SplitPlay.Service.Supervision;
 
@@ -289,5 +291,47 @@ public sealed class LiveStatsTests
 
         await svc.PostDeskActionAsync("desk-1", "stop");
         await svc.WaitForStateAsync("desk-1", DeskState.Stopped);
+    }
+
+    [Fact]
+    public async Task A_stream_recording_reports_the_streaming_desk_and_stops()
+    {
+        await using var svc = await TestService.StartAsync(setup: l => l.SimulateClient = true);
+        Assert.Contains("\"running\":false", await svc.Client.GetStringAsync("/api/v1/diagnostics/recording"), StringComparison.Ordinal);
+        await svc.CreateDeskAsync("desk-1");
+        await svc.PostDeskActionAsync("desk-1", "start");
+        await svc.WaitForAsync("desk-1", d => d.State == DeskState.Streaming && d.Metrics.Fps > 0, what: "streaming");
+
+        var bad = await svc.Client.PostAsync("/api/v1/diagnostics/recording",
+            new StringContent("""{"minutes":0}""", System.Text.Encoding.UTF8, "application/json"));
+        Assert.Equal(System.Net.HttpStatusCode.BadRequest, bad.StatusCode);
+
+        var started = await svc.Client.PostAsync("/api/v1/diagnostics/recording",
+            new StringContent("""{"minutes":5}""", System.Text.Encoding.UTF8, "application/json"));
+        Assert.Equal(System.Net.HttpStatusCode.OK, started.StatusCode);
+
+        RecordingDto? status = null;
+        for (var i = 0; i < 100; i++)
+        {
+            status = await svc.Client.GetFromJsonAsync("/api/v1/diagnostics/recording", SplitPlayJsonContext.Default.RecordingDto);
+            if (status is { Samples: >= 2 })
+            {
+                break;
+            }
+
+            await Task.Delay(100);
+        }
+
+        Assert.NotNull(status);
+        Assert.True(status.Running);
+        Assert.True(status.Samples >= 2);
+        Assert.Contains("desk desk-1", status.Report, StringComparison.Ordinal);
+        Assert.Contains("stream Laptop 192.168.1.42 1920x1080@120 hevc 50 Mbit/s", status.Report, StringComparison.Ordinal);
+
+        var stopped = await svc.Client.DeleteAsync("/api/v1/diagnostics/recording");
+        var after = await stopped.Content.ReadFromJsonAsync(SplitPlayJsonContext.Default.RecordingDto);
+        Assert.NotNull(after);
+        Assert.False(after.Running);
+        Assert.Contains("desk desk-1", after.Report, StringComparison.Ordinal);
     }
 }

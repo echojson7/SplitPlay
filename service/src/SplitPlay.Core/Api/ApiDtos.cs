@@ -99,6 +99,15 @@ public sealed class DeskMetricsDto
     /// <summary>The bitrate the encoder runs at, kbit/s; null when it cannot change it live (or no stream runs).</summary>
     public double? EncoderKbps { get; set; }
 
+    /// <summary>
+    /// Key frames the Moonlight clients asked for since their streams started (worker patch 0026): each one means the
+    /// client threw frames away (its decoder fell behind, or a loss it could not repair). Null from an older worker.
+    /// </summary>
+    public double? IdrRequests { get; set; }
+
+    /// <summary>The longest pause between two video frames sent in the last interval, ms (patch 0026); null when unknown.</summary>
+    public double? FrameGapMsMax { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
 }
@@ -456,3 +465,12 @@ public sealed record WsMetricsEvent(HostMetricsDto Host, IReadOnlyList<DeskMetri
     [JsonPropertyOrder(-1)]
     public string Type => "metrics";
 }
+
+/// <summary>
+/// "Запись потока" (<c>GET /diagnostics/recording</c>): whether it runs, when it started and ends (or ended), and the
+/// report so far; <c>Report</c> is null before the first recording.
+/// </summary>
+public sealed record RecordingDto(bool Running, DateTimeOffset? StartedAt, DateTimeOffset? EndsAt, string? Report, int Samples);
+
+/// <summary><c>POST /diagnostics/recording</c>: minutes to record (1–180, default 30).</summary>
+public sealed record RecordingRequest(int? Minutes);

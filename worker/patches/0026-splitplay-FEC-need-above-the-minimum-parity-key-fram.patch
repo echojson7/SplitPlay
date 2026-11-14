@@ -1,0 +1,238 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Sat, 14 Nov 2026 17:00:00 +0000
+Subject: [PATCH] splitplay: FEC need above the minimum parity, key frame
+ requests, frame gaps
+
+Three changes to the live stream statistics (docs/contracts/ipc.md):
+
+- burst_loss_pct ignores FEC blocks whose loss the minimum parity covers
+  with parity to spare (fewer lost packets than the client's
+  minRequiredFecPackets, 2 for Moonlight, which every block gets whatever
+  the FEC share). One packet lost in a small frame (5 data shards) used
+  to read as a 20 % need, and the service's adaptive FEC then held 30 %
+  on a link with no real loss, spending a quarter of the video traffic on
+  parity. A block that used up the whole minimum still counts. Packet
+  loss and the recovered/failed counts are unchanged.
+- idr_requests: key frames the client asked for (IDX_REQUEST_IDR_FRAME)
+  since the stream was reported, per stream and summed in metrics.
+  Moonlight asks for one when its decode queue overflows (the decoder
+  falls behind), after losses reference frame invalidation could not
+  repair, and when it re-creates its decoder (window resized or moved,
+  device reset). The frames it throws away until the key frame arrives
+  count as lost in Moonlight's "slow connection to PC" check, yet
+  loss_pct never saw them. Requests in the first 3 s after the stream is
+  reported are the client creating its decoder and are not counted.
+- frame_gap_ms_max: the longest pause between two frames sent in the
+  interval (frame pacing as the client receives it), per stream and the
+  worst in metrics.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm2JfgMZHfj9R2WKefE
+
+diff --git a/src/splitplay/live_stats.cpp b/src/splitplay/live_stats.cpp
+index 0b651ff798d0ea5f23de538be55c3044f8b7ded0..8ad5b922f390c9e3393c212efb4e61a3ca553d56 100644
+--- a/src/splitplay/live_stats.cpp
++++ b/src/splitplay/live_stats.cpp
+@@ -49,6 +49,10 @@ namespace splitplay::live_stats {
+     std::atomic<std::uint64_t> fec_failed {0};  ///< FEC blocks the client could not recover.
+     std::atomic<std::uint32_t> burst_permille {0};  ///< Worst block of the interval: lost packets per data shard, 1/1000.
+     std::atomic<std::uint64_t> lost {0};  ///< Frames the client reported lost.
++    std::atomic<std::uint32_t> gap_us_max {0};  ///< Longest pause between two frames sent in the interval, microseconds.
++    std::int64_t last_sent_ns = 0;  ///< When the previous frame was sent (steady clock); video broadcast thread only.
++    std::atomic<std::uint64_t> idr_requests {0};  ///< Key frames the client asked for since the stream was reported.
++    std::atomic<std::int64_t> idr_after_ns {0};  ///< Requests before this (steady clock) belong to the client's start-up.
+     std::atomic<std::int64_t> highest_lost {-1};  ///< Last frame index already counted as lost.
+     std::atomic<std::int64_t> rtt_ms {-1};  ///< ENet round-trip time, -1 until the control peer is connected.
+ 
+@@ -84,6 +88,13 @@ namespace splitplay::live_stats {
+     std::uint64_t seen_composed = 0;
+     std::chrono::steady_clock::time_point seen_composed_at = std::chrono::steady_clock::now();
+ 
++    /// Key frame requests this long after a stream is reported are still the client's start-up.
++    constexpr std::int64_t idr_startup_ns = 3'000'000'000;
++
++    std::int64_t steady_ns() {
++      return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
++    }
++
+     double round1(double v) {
+       return std::round(v * 10.0) / 10.0;
+     }
+@@ -174,6 +185,11 @@ namespace splitplay::live_stats {
+       stats->seen_fec_recovered = stats->fec_recovered.load(std::memory_order_relaxed);
+       stats->seen_fec_failed = stats->fec_failed.load(std::memory_order_relaxed);
+       stats->burst_permille.store(0, std::memory_order_relaxed);
++      // Requests sent while the client connects and opens its window and decoder belong to the start-up (Moonlight
++      // asks for a key frame once its decoder exists), not to the stream.
++      stats->idr_requests.store(0, std::memory_order_relaxed);
++      stats->idr_after_ns.store(steady_ns() + idr_startup_ns, std::memory_order_relaxed);
++      stats->gap_us_max.store(0, std::memory_order_relaxed);
+       stats->seen_at = std::chrono::steady_clock::now();
+       {
+         std::lock_guard lg {stats->samples_mutex};
+@@ -247,6 +263,16 @@ namespace splitplay::live_stats {
+     stats->frames.fetch_add(1, std::memory_order_relaxed);
+     stats->bytes.fetch_add(wire_bytes, std::memory_order_relaxed);
+     stats->packets.fetch_add(packets, std::memory_order_relaxed);
++    // Frame pacing as the client receives it: the longest pause between two frames of the interval. Only the video
++    // broadcast thread sends frames, so last_sent_ns needs no synchronisation.
++    const auto now_ns = steady_ns();
++    if (stats->last_sent_ns != 0 && now_ns > stats->last_sent_ns) {
++      const auto gap_us = static_cast<std::uint32_t>(std::min<std::int64_t>((now_ns - stats->last_sent_ns) / 1000, std::numeric_limits<std::uint32_t>::max()));
++      auto worst = stats->gap_us_max.load(std::memory_order_relaxed);
++      while (gap_us > worst && !stats->gap_us_max.compare_exchange_weak(worst, gap_us, std::memory_order_relaxed)) {
++      }
++    }
++    stats->last_sent_ns = now_ns;
+     if (latency_100us) {
+       std::lock_guard lg {stats->samples_mutex};
+       if (stats->sample_count < max_samples) {
+@@ -272,6 +298,17 @@ namespace splitplay::live_stats {
+     stats->lost.fetch_add(std::min(count, max_lost_per_report), std::memory_order_relaxed);
+   }
+ 
++  void idr_requested(session_stats_t *stats) noexcept {
++    if (!stats) {
++      return;
++    }
++    // 0 until the stream is registered: everything before that is start-up as well.
++    const auto after = stats->idr_after_ns.load(std::memory_order_relaxed);
++    if (after != 0 && steady_ns() >= after) {
++      stats->idr_requests.fetch_add(1, std::memory_order_relaxed);
++    }
++  }
++
+   void loss_count(session_stats_t *stats, std::int32_t count) noexcept {
+     if (!stats || count <= 0) {
+       return;
+@@ -318,6 +355,13 @@ namespace splitplay::live_stats {
+     stats->fec_missing.fetch_add(missing, std::memory_order_relaxed);
+     (recovered ? stats->fec_recovered : stats->fec_failed).fetch_add(1, std::memory_order_relaxed);
+ 
++    // The minimum parity every block gets covers this loss with parity to spare whatever the FEC share: nothing to
++    // learn for it. Without this, one lost packet of a small frame (5 data shards, 2 parity) read as a 20 % need and
++    // kept FEC at 30 %. A loss that used up the whole minimum still counts: the next burst may be one packet larger.
++    if (missing < static_cast<std::uint32_t>(std::max(0, stats->info.min_fec_packets))) {
++      return;
++    }
++
+     // The FEC share this block would have needed: lost packets per data shard (at most 65.535 times the data).
+     const auto permille = static_cast<std::uint32_t>(std::min<std::uint64_t>(std::uint64_t {missing} * 1000 / status.data_packets, 65535));
+     auto worst = stats->burst_permille.load(std::memory_order_relaxed);
+@@ -349,6 +393,8 @@ namespace splitplay::live_stats {
+     std::uint64_t total_fec_recovered = 0;
+     std::uint64_t total_fec_failed = 0;
+     std::uint32_t max_burst = 0;
++    std::uint64_t total_idr_requests = 0;
++    std::uint32_t max_gap_us = 0;
+     std::int64_t max_rtt = -1;
+     json sessions = json::array();
+ 
+@@ -377,6 +423,8 @@ namespace splitplay::live_stats {
+         const auto fec_recovered = s->fec_recovered.load(std::memory_order_relaxed);
+         const auto fec_failed = s->fec_failed.load(std::memory_order_relaxed);
+         const auto burst = s->burst_permille.exchange(0, std::memory_order_relaxed);
++        const auto idr_requests = s->idr_requests.load(std::memory_order_relaxed);
++        const auto gap_us = s->gap_us_max.exchange(0, std::memory_order_relaxed);
+ 
+         const auto d_frames = frames - s->seen_frames;
+         const auto d_bytes = bytes - s->seen_bytes;
+@@ -408,6 +456,8 @@ namespace splitplay::live_stats {
+         entry["burst_loss_pct"] = round1(burst / 10.0);
+         entry["fec_recovered"] = d_fec_recovered;
+         entry["fec_failed"] = d_fec_failed;
++        entry["idr_requests"] = idr_requests;
++        entry["frame_gap_ms_max"] = round1(gap_us / 1000.0);
+         pooled.insert(pooled.end(), mine.begin(), mine.end());
+         entry["encode_ms_p50"] = percentile_ms(mine, 0.50);
+         entry["encode_ms_p99"] = percentile_ms(mine, 0.99);
+@@ -423,6 +473,8 @@ namespace splitplay::live_stats {
+         total_fec_recovered += d_fec_recovered;
+         total_fec_failed += d_fec_failed;
+         max_burst = std::max(max_burst, burst);
++        total_idr_requests += idr_requests;
++        max_gap_us = std::max(max_gap_us, gap_us);
+       }
+     }
+ 
+@@ -451,6 +503,8 @@ namespace splitplay::live_stats {
+       {"fec_recovered", total_fec_recovered},
+       {"fec_failed", total_fec_failed},
+       {"fec_percent", splitplay::profile::fec_percentage()},
++      {"idr_requests", total_idr_requests},
++      {"frame_gap_ms_max", round1(max_gap_us / 1000.0)},
+       {"encoder_kbps", sessions.empty() || splitplay::profile::encoder_kbps() == 0 ? json(nullptr) : json(splitplay::profile::encoder_kbps())},
+     };
+ 
+diff --git a/src/splitplay/live_stats.h b/src/splitplay/live_stats.h
+index 407334f266da270c1fb70c3b89d72c24a53bbb9a..f90e25fb77beb8a57a4053b2400aa2fc2c0d79ef 100644
+--- a/src/splitplay/live_stats.h
++++ b/src/splitplay/live_stats.h
+@@ -46,6 +46,7 @@ namespace splitplay::live_stats {
+     int bitrate_kbps_requested = 0;  ///< Bitrate the client asked for (its configured bitrate when it sends one).
+     bool hdr = false;  ///< The client asked for a 10-bit HDR stream.
+     bool fec_feedback = false;  ///< The client announced ML_FF_FEC_STATUS: it reports every FEC block that lost packets.
++    int min_fec_packets = 0;  ///< Parity shards every FEC block gets at least (the client's minRequiredFecPackets).
+     std::chrono::system_clock::time_point started_at;  ///< When the stream was first reported.
+   };
+ 
+@@ -126,6 +127,10 @@ namespace splitplay::live_stats {
+    * @brief One FEC report from the client (control thread). A block the client recovered counts the packets missing
+    *        below the highest one received (later ones may only be late); a block it could not recover counts every
+    *        packet it did not receive. Relaxed atomic adds and one atomic max, never a lock.
++   *
++   *        The block's FEC need (the heartbeat's `burst_loss_pct`) is only taken from blocks that lost at least as
++   *        many packets as the minimum parity every block gets anyway (`session_info_t::min_fec_packets`): a small
++   *        frame that lost one packet out of five needs no FEC share at all, not 20 %.
+    */
+   void fec_status(session_stats_t *stats, const fec_status_t &status) noexcept;
+ 
+@@ -135,6 +140,16 @@ namespace splitplay::live_stats {
+    */
+   void frames_lost(session_stats_t *stats, std::int64_t first, std::int64_t last) noexcept;
+ 
++  /**
++   * @brief The client asked for a key frame (`IDX_REQUEST_IDR_FRAME`) and shows no new picture until it comes.
++   *        Moonlight does that when its decode queue overflows (the decoder falls behind), after losses reference frame
++   *        invalidation could not repair, and when it re-creates its decoder (window resized or moved to another
++   *        display, device reset). The frames thrown away count as lost in Moonlight's "slow connection to PC" check
++   *        although `loss_pct` does not see them. Requests in the first 3 s after the stream is reported (the client
++   *        creating its decoder) are not counted.
++   */
++  void idr_requested(session_stats_t *stats) noexcept;
++
+   /**
+    * @brief Loss count from a legacy loss-stats message (`IDX_LOSS_STATS`).
+    */
+@@ -167,7 +182,8 @@ namespace splitplay::live_stats {
+    * @param send_heartbeat Receives `metrics` (`fps`, `bitrate_kbps`, `encode_ms_p50`, `encode_ms_p99`, `loss_pct`,
+    *                       `rtt_ms` (null when no stream has one yet), `clients`, `capture_fps` (null without a
+    *                       stream), `packet_loss_pct`, `burst_loss_pct`, `fec_recovered`, `fec_failed`, `fec_percent`,
+-   *                       `encoder_kbps` (null without a stream or a live-bitrate encoder)) and the `sessions` array.
++   *                       `idr_requests` (since the streams started), `frame_gap_ms_max`, `encoder_kbps` (null
++   *                       without a stream or a live-bitrate encoder)) and the `sessions` array.
+    */
+   void report_heartbeat(const event_sink_t &send_event, const heartbeat_sink_t &send_heartbeat);
+ }  // namespace splitplay::live_stats
+diff --git a/src/stream.cpp b/src/stream.cpp
+index fd278df88119b06e410ac9c3084ff4b418a69467..a467baff914092941e21aa95ad480cf58b74788e 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -1192,6 +1192,8 @@ namespace stream {
+     server->map(packetTypes[IDX_REQUEST_IDR_FRAME], [&](session_t *session, const std::string_view &payload) {
+       BOOST_LOG(debug) << "type [IDX_REQUEST_IDR_FRAME]"sv;
+ 
++      splitplay::live_stats::idr_requested(session->sp_stats.get());
++
+       session->video.idr_events->raise(true);
+     });
+ 
+@@ -2367,6 +2369,7 @@ namespace stream {
+         info.bitrate_kbps_requested = config.clientBitrateKbps;
+         info.hdr = config.monitor.dynamicRange > 0;
+         info.fec_feedback = (config.mlFeatureFlags & ML_FF_FEC_STATUS) != 0;
++        info.min_fec_packets = config.minRequiredFecPackets;
+         session->sp_stats = splitplay::live_stats::create(std::move(info));
+       }
+ 

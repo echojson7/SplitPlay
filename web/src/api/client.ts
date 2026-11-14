@@ -26,6 +26,7 @@ import type {
   MetricsSnapshot,
   PairedClient,
   PairRequest,
+  Recording,
 } from './types'
 import { GAME_STATUSES } from './types'
 
@@ -288,6 +289,21 @@ export class ApiClient {
       query: { component: query.component, desk: query.desk, tail: query.tail },
     })
     return unwrapList<LogLine>(raw, 'lines')
+  }
+
+  /** «Запись потока»: state and report so far. */
+  recording(): Promise<Recording> {
+    return this.request('GET', '/diagnostics/recording')
+  }
+
+  /** Starts a stream recording for `minutes` (1–180); one already running is replaced. */
+  startRecording(minutes: number): Promise<Recording> {
+    return this.request('POST', '/diagnostics/recording', { body: { minutes } })
+  }
+
+  /** Stops the recording; its report stays. */
+  stopRecording(): Promise<Recording> {
+    return this.request('DELETE', '/diagnostics/recording')
   }
 
   /** Enabled local Windows accounts that can be picked as a desk user. */

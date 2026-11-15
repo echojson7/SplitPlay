@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: MIT -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { Recording } from '../api/types'
 import HostWarnings from '../components/HostWarnings.vue'
 import { copyText, errorText, useLive } from '../composables'
@@ -33,9 +33,10 @@ async function loadRecording(): Promise<void> {
     recording.value = await api.recording()
     recUnavailable.value = false
     now.value = Date.now()
-  } catch {
-    // The row stays visible either way: a service without recording says so instead of the row vanishing.
-    if (!recording.value) recUnavailable.value = true
+  } catch (e) {
+    // The row stays visible either way: a service without recording says so instead of the row vanishing; any other
+    // failure (sign-in not done yet, a restart) leaves the row as it is.
+    if (e instanceof ApiError && (e.status === 404 || e.status === 405)) recUnavailable.value = true
   }
 }
 

@@ -137,7 +137,8 @@ Stream object (`sessions[]` and the `data` of the client events):
 | `id` | RTSP launch-session id, unique while the worker runs |
 | `client`, `client_uuid` | name and uuid of the paired client (as `list_clients` reports them); `null` when unknown |
 | `address` | client IP address (IPv4-mapped IPv6 addresses are reported as plain IPv4) |
-| `width`, `height`, `fps_requested` | the mode the client launched with |
+| `width`, `height`, `fps_requested` | the mode the client launched with; since patch 0029 `fps_requested` is at most the profile's `fps` |
+| `fps_client` | the frame rate the client asked for when the profile's `fps` capped the stream, `null` otherwise (patch 0029) |
 | `codec` | `h264`, `hevc` or `av1` |
 | `bitrate_kbps_requested` | the client's bitrate setting |
 | `hdr` | the client asked for a 10-bit HDR stream |
@@ -270,6 +271,7 @@ What the worker applies (worker/README.md, *Stream profile*), from `welcome` and
 
 | Field | Range | Takes effect |
 |---|---|---|
+| `fps` | 1–1000: the most frames per second a stream runs at, whatever the client asks for (patch 0029) | next stream |
 | `fec_percent` | 0–255 | next frame (the encoder's bitrate allowance for FEC: next stream) |
 | `min_fps` | 1–1000, capped at the stream's fps | next frame |
 | `pacing_mbps` | 1–100000, send pacing of one stream | next frame |

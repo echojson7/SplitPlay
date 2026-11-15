@@ -134,7 +134,9 @@ Rules:
   passed to the worker as in ipc.md). A `cpuSet` keeps the desk's processes on those processors whatever
   `host.deskCores` says; numbers this PC does not have are dropped, and a set with none left counts as not set.
 - Desk port ranges may not overlap each other or contain `host.webPort`; `basePortStride` must be at least 27.
-- `profile.fps` 10–500, `codec` one of `h264`, `hevc`, `av1`; `gpuPriority` `normal`, `high`, `realtime`.
+- `profile.fps` 10–500, `codec` one of `h264`, `hevc`, `av1`; `gpuPriority` `normal`, `high`, `realtime`. `fps` also
+  caps every stream of the desk (worker patch 0029, from the next stream): a client that asks for more (Moonlight offers
+  its display's rate, 180 on a laptop) gets `fps`; without `fps` a stream runs at the client's rate.
 - Stream settings the worker applies (ipc.md, *Profile object*); a running desk takes a change at once except
   `dpbFrames` (next stream). Left out, the service sends its defaults: `fecPercent` 0–100, default 20;
   `minFps` 1–`fps`, default 20 (capped at `fps`: an unchanged desktop is encoded 20 times a second instead of at half

@@ -84,7 +84,8 @@ public sealed class IpcCodecTests
     public void Fields_are_snake_case_and_nulls_are_omitted()
     {
         var json = IpcCodec.EncodeToString(new SetProfileMessage { Id = 1, Profile = new IpcProfile { BitrateKbps = 1000, CpuSet = [1] } });
-        Assert.Equal("""{"type":"set_profile","id":1,"profile":{"bitrate_kbps":1000,"cpu_set":[1]}}""", json);
+        // fps is always written: null lifts the worker's stream fps cap.
+        Assert.Equal("""{"type":"set_profile","id":1,"profile":{"fps":null,"bitrate_kbps":1000,"cpu_set":[1]}}""", json);
     }
 
     [Fact]

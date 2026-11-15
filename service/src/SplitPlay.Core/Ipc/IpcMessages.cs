@@ -284,6 +284,11 @@ public sealed record UnknownIpcMessage : IpcMessage
 /// </summary>
 public sealed record IpcProfile
 {
+    /// <summary>
+    /// The desk's frame rate; the worker caps streams at it (patch 0029). Always written, null included, so that clearing
+    /// it on a running desk lifts the cap instead of keeping the old one.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.Never)]
     public int? Fps { get; init; }
 
     public int? Width { get; init; }

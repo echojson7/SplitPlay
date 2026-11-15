@@ -517,6 +517,54 @@ internal sealed class DeskRuntime
                 case "frame_gap_ms_max":
                     dto.FrameGapMsMax = number;
                     break;
+                case "capture_ms_p50":
+                    dto.CaptureMsP50 = number;
+                    break;
+                case "capture_ms_p99":
+                    dto.CaptureMsP99 = number;
+                    break;
+                case "encoder_ms_p50":
+                    dto.EncoderMsP50 = number;
+                    break;
+                case "encoder_ms_p99":
+                    dto.EncoderMsP99 = number;
+                    break;
+                case "queue_ms_p50":
+                    dto.QueueMsP50 = number;
+                    break;
+                case "queue_ms_p99":
+                    dto.QueueMsP99 = number;
+                    break;
+                case "send_ms_p50":
+                    dto.SendMsP50 = number;
+                    break;
+                case "send_ms_p99":
+                    dto.SendMsP99 = number;
+                    break;
+                case "sent_ms_p50":
+                    dto.SentMsP50 = number;
+                    break;
+                case "sent_ms_p99":
+                    dto.SentMsP99 = number;
+                    break;
+                case "sent_ms_max":
+                    dto.SentMsMax = number;
+                    break;
+                case "frame_kb_avg":
+                    dto.FrameKbAvg = number;
+                    break;
+                case "frame_kb_max":
+                    dto.FrameKbMax = number;
+                    break;
+                case "key_frames":
+                    dto.KeyFrames = number;
+                    break;
+                case "key_frame_kb_max":
+                    dto.KeyFrameKbMax = number;
+                    break;
+                case "repeated_frames":
+                    dto.RepeatedFrames = number;
+                    break;
                 case "encoder_kbps":
                     // null: no stream, or an encoder that cannot change its bitrate live.
                     dto.EncoderKbps = number;

@@ -194,6 +194,24 @@ export interface DeskMetrics {
   idrRequests?: number | null
   /** Longest pause between two frames sent over the last interval, ms. */
   frameGapMsMax?: number | null
+  /** Where a frame's time goes on the host (worker 0028), ms over the last interval. */
+  captureMsP50?: number | null
+  captureMsP99?: number | null
+  encoderMsP50?: number | null
+  encoderMsP99?: number | null
+  queueMsP50?: number | null
+  queueMsP99?: number | null
+  sendMsP50?: number | null
+  sendMsP99?: number | null
+  sentMsP50?: number | null
+  sentMsP99?: number | null
+  sentMsMax?: number | null
+  /** Encoded frame sizes, KiB; key frames and frames without new content in the interval. */
+  frameKbAvg?: number | null
+  frameKbMax?: number | null
+  keyFrames?: number | null
+  keyFrameKbMax?: number | null
+  repeatedFrames?: number | null
 }
 
 /** The Moonlight stream a desk is serving (`desk.stream`): who is connected and what it asked for. */

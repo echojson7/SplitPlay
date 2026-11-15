@@ -121,6 +121,8 @@ public sealed class DeskSupervisor : IHostedService
         _startedAt = time.GetUtcNow();
         _lastCpuAt = _startedAt;
         FindLink = new NetworkLinks(time).Find;
+        ReadCpu = CpuLoadSampler.ForThisHost(time).Current;
+        ReadLink = LinkStatusReader.Read;
         _lastCpu = Process.GetCurrentProcess().TotalProcessorTime;
 
         foreach (var desk in config.Snapshot().Desks)
@@ -131,6 +133,12 @@ public sealed class DeskSupervisor : IHostedService
 
     /// <summary>The network adapter a client address is reached through (replaced by tests).</summary>
     internal Func<string?, NetworkLink?> FindLink { get; set; }
+
+    /// <summary>CPU load since the previous read, for the stream recording (replaced by tests).</summary>
+    internal Func<CpuLoad?> ReadCpu { get; set; }
+
+    /// <summary>The state of a network adapter by id, for the stream recording (replaced by tests).</summary>
+    internal Func<string, LinkStatus?> ReadLink { get; set; }
 
     /// <summary>Raised (synchronously, possibly under a desk lock) whenever a desk's state or config changes.</summary>
     public event Action<DeskDto>? DeskChanged;
@@ -332,6 +340,29 @@ public sealed class DeskSupervisor : IHostedService
         {
             var usage = _gpuUsage.Current();
             var console = _platform.ConsoleSessionId();
+            var cpu = ReadCpu();
+            // The busiest GPU: the one the games and encoders share (its VRAM is what fills up).
+            var gpu = GpusWithUsage(usage).OrderByDescending(g => g.UtilizationPercent ?? -1).FirstOrDefault();
+            IReadOnlyList<int>? deskCpus = null;
+            string? address;
+            lock (rt.Gate)
+            {
+                address = rt.Streams.FirstOrDefault()?.Address;
+            }
+
+            try
+            {
+                deskCpus = CpuPlan().GetValueOrDefault(rt.Id);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // No plan: the desk's busiest processor is the host's.
+            }
+
+            // The adapter lookups read the system's adapter list and the WLAN service, outside the desk's gate.
+            var link = FindLink(address) is { } found && ReadLink(found.Id) is { } status
+                ? new RecordingLink(status.Describe(), status.OutDiscards, status.WifiSignalPercent, status.WifiRssiDbm, status.WifiTxMbps)
+                : null;
             RecordingSample sample;
             lock (rt.Gate)
             {
@@ -372,6 +403,25 @@ public sealed class DeskSupervisor : IHostedService
                     GpuPercent = session?.GpuPercent,
                     EncoderPercent = session?.EncoderPercent,
                     HostGpuPercent = usage is { Adapters.Count: > 0 } ? usage.Adapters.Values.Max(a => a.UtilizationPercent) : null,
+                    CaptureMsP99 = m.CaptureMsP99,
+                    EncoderMsP99 = m.EncoderMsP99,
+                    QueueMsP99 = m.QueueMsP99,
+                    SendMsP99 = m.SendMsP99,
+                    SentMsP50 = m.SentMsP50,
+                    SentMsP99 = m.SentMsP99,
+                    SentMsMax = m.SentMsMax,
+                    FrameKbAvg = m.FrameKbAvg,
+                    FrameKbMax = m.FrameKbMax,
+                    KeyFrames = m.KeyFrames,
+                    KeyFrameKbMax = m.KeyFrameKbMax,
+                    RepeatedFrames = m.RepeatedFrames,
+                    DeskVramMb = session?.VramMb,
+                    HostVramUsedMb = gpu?.VramUsedMb,
+                    HostVramTotalMb = gpu?.VramTotalMb,
+                    CpuPercent = cpu?.TotalPercent,
+                    CpuMaxCorePercent = cpu?.MaxOf(null),
+                    DeskCpuMaxPercent = cpu?.MaxOf(deskCpus),
+                    Link = link,
                 };
             }
 

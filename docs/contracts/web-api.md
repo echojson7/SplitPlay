@@ -223,7 +223,11 @@ lost on the way, before FEC repairs them), `burstLossPct` (the worst FEC block: 
 and `fecFailed` (blocks repaired and not), `fecPercent` (FEC share sent now) and `encoderKbps` (the encoder's bitrate,
 `null` when it cannot change it live); an older worker leaves them `null`. Patch 0026 adds `idrRequests` (key frames
 the clients asked for since their streams started: frames Moonlight threw away because its decoder fell behind or a
-loss could not be repaired) and `frameGapMsMax` (the longest pause between two frames sent in the last interval).
+loss could not be repaired) and `frameGapMsMax` (the longest pause between two frames sent in the last interval). Patch 0028
+adds where a frame's time goes on the host, p50/p99 in ms: `captureMs*` (present to encode start), `encoderMs*` (GPU
+conversion and the encoder), `queueMs*` (waiting for the sender), `sendMs*` (FEC and paced sending), `sentMs*` and
+`sentMsMax` (present to the last packet sent), and frame sizes `frameKbAvg`, `frameKbMax`, `keyFrames`,
+`keyFrameKbMax`, `repeatedFrames` (frames without new content); `null` from an older worker.
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.

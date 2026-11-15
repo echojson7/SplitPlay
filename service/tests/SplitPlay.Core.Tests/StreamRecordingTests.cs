@@ -35,6 +35,29 @@ public sealed class StreamRecordingTests
         HostGpuPercent = 80,
     };
 
+    /// <summary>A sample from a worker with stage times (patch 0028) on a host whose numbers the service reads.</summary>
+    private static RecordingSample Full(int second, RecordingStream[]? streams = null) => At(second, streams) with
+    {
+        CaptureMsP99 = 1.8,
+        EncoderMsP99 = 4.6,
+        QueueMsP99 = 0.1,
+        SendMsP99 = 1.2,
+        SentMsP50 = 5.1,
+        SentMsP99 = 7.4,
+        SentMsMax = 9.8,
+        FrameKbAvg = 58,
+        FrameKbMax = 140,
+        KeyFrames = 0,
+        RepeatedFrames = 2,
+        DeskVramMb = 5300,
+        HostVramUsedMb = 9100,
+        HostVramTotalMb = 12227,
+        CpuPercent = 41,
+        CpuMaxCorePercent = 97,
+        DeskCpuMaxPercent = 88,
+        Link = new RecordingLink("Ethernet Realtek PCIe 2.5GbE 2500 Mbit/s", 1000),
+    };
+
     [Fact]
     public void A_clean_half_hour_is_one_line_per_minute_and_short()
     {
@@ -55,7 +78,63 @@ public sealed class StreamRecordingTests
         Assert.Contains("IDR requests 0", report, StringComparison.Ordinal);
         Assert.Contains("17:00:00 player2 streaming: Laptop", report, StringComparison.Ordinal);
         // Small enough to paste into a chat message.
-        Assert.InRange(report.Length, 500, 6000);
+        Assert.InRange(report.Length, 500, 9000);
+    }
+
+    [Fact]
+    public void Stage_times_frame_sizes_and_the_host_get_their_own_columns()
+    {
+        var r = New();
+        for (var s = 0; s < 30 * 60; s++)
+        {
+            r.Add(Full(s));
+        }
+
+        var report = r.Report(Start.AddMinutes(31));
+        Assert.Contains("  host link Ethernet Realtek PCIe 2.5GbE 2500 Mbit/s", report, StringComparison.Ordinal);
+        // fps, new content, repeated, Mbit/s, frame KB avg/max.
+        Assert.Contains("    0  114/114     112    2      69  58/140", report, StringComparison.Ordinal);
+        // hz, cap, enc, q, send, total p50/p99/max, gpu/enc, desk VRAM, desk CPU, drops.
+        Assert.Contains("    0  115  1.8  4.6  0.1   1.2  5.1/7.4/10         68/16         5.2    88     0", report, StringComparison.Ordinal);
+        Assert.Contains("host p99 max: cap 1.8 enc 4.6 q 0.1 send 1.2 total 7.4 ms", report, StringComparison.Ordinal);
+        Assert.Contains("    0   41/97             80  8.9/11.9", report, StringComparison.Ordinal);
+        Assert.DoesNotContain("wifi", report, StringComparison.Ordinal);
+        Assert.Contains("events\n17:00:00 player2 streaming:", report, StringComparison.Ordinal);
+        Assert.InRange(report.Length, 2000, 9000);
+    }
+
+    [Fact]
+    public void Host_latency_spikes_keep_the_breakdown_of_the_worst_second()
+    {
+        var r = New();
+        r.Add(Full(0));
+        r.Add(Full(1) with { SentMsP99 = 18, SendMsP99 = 11, FrameKbMax = 900 });
+        r.Add(Full(2) with { SentMsP99 = 30, EncoderMsP99 = 25, CaptureMsP99 = 2.5 });
+        r.Add(Full(3) with { SentMsP99 = 20 });
+
+        var report = r.Report(Start.AddMinutes(1));
+        Assert.Contains("17:00:01 player2 host latency p99 up to 30.0 ms (cap 2.5 enc 25.0 q 0.1 send 1.2, frames up to 140 KB) ×3", report, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Adapter_drops_link_changes_weak_wifi_and_full_vram_are_events()
+    {
+        var wifi = new RecordingLink("Wi-Fi Intel AX210 ch 36 ax 1201 Mbit/s", 50, 80, -55, 1201);
+        var r = New();
+        r.Add(Full(0) with { Link = wifi });
+        r.Add(Full(1) with { Link = wifi with { OutDiscards = 53 } });
+        r.Add(Full(2) with { Link = wifi with { OutDiscards = 60, WifiSignalPercent = 45, WifiRssiDbm = -78, WifiTxMbps = 144 } });
+        r.Add(Full(3) with { HostVramUsedMb = 11900 });
+        r.Add(Full(4));
+
+        var report = r.Report(Start.AddMinutes(1));
+        Assert.Contains("17:00:01 player2 host adapter discarded 10 outgoing packets ×2", report, StringComparison.Ordinal);
+        Assert.Contains("host Wi-Fi signal down to 45 % (-78 dBm, 144 Mbit/s)", report, StringComparison.Ordinal);
+        Assert.Contains("VRAM nearly full: 11.6 of 11.9 GB", report, StringComparison.Ordinal);
+        Assert.Contains("17:00:03 player2 host link now Ethernet Realtek PCIe 2.5GbE 2500 Mbit/s", report, StringComparison.Ordinal);
+        Assert.Contains("wifi %/dBm/Mbit", report, StringComparison.Ordinal);
+        Assert.Contains("  45/-78/144", report, StringComparison.Ordinal);
+        Assert.Contains("host adapter drops 10", report, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -49,14 +49,17 @@ public sealed class NvApiDrs : IDrsProvider
     internal const int UnicodeStringBytes = UnicodeStringChars * 2;
 
     // NVDRS_SETTING_V1: version, settingName, settingId, settingType, settingLocation, isCurrentPredefined,
-    // isPredefinedValid, then two 8-byte aligned unions of max(NVDRS_BINARY_SETTING = 4 + 4096, wchar[2048], u64).
-    internal const int SettingSize = 12328;
+    // isPredefinedValid, then two unions of max(NVDRS_BINARY_SETTING = 4 + 4096, wchar[2048], u64, f32). nvapi.h
+    // declares it under #pragma pack(push, 4): the u64 member does not 8-align the unions, so each is 4100 bytes and
+    // the struct 12320 (NVDRS_SETTING_VER1 = 0x13020). The driver rejects any other size with
+    // NVAPI_INCOMPATIBLE_STRUCT_VERSION (-9), which is what 12328 got on a real RTX 5070.
+    internal const int SettingSize = 12320;
     internal const int SettingIdOffset = 4 + UnicodeStringBytes;            // 4100
     internal const int SettingTypeOffset = SettingIdOffset + 4;             // 4104
     internal const int SettingLocationOffset = SettingTypeOffset + 4;       // 4108
     internal const int SettingIsCurrentPredefinedOffset = SettingLocationOffset + 4; // 4112
-    internal const int SettingCurrentValueOffset = 8224;                    // 4120 + 4104
-    internal const uint SettingVersion1 = SettingSize | (1u << 16);         // NVDRS_SETTING_VER1 = 0x13028
+    internal const int SettingCurrentValueOffset = 8220;                    // 4120 + 4100
+    internal const uint SettingVersion1 = SettingSize | (1u << 16);         // NVDRS_SETTING_VER1 = 0x13020
     private const uint DwordType = 0;                                       // NVDRS_DWORD_TYPE
     private const uint CurrentProfileLocation = 0;                          // NVDRS_CURRENT_PROFILE_LOCATION
 

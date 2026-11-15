@@ -70,7 +70,7 @@ Rules:
   keeps the current value unless the user changes.
 - `gameFpsLimit` (optional; a request that leaves it out keeps the current value): the NVIDIA driver's frame rate
   limit ("Max Frame Rate", `FRL_FPS`) for the games the service finds in this desk. Left out or `null`: Auto, the
-  frame rate the desk's last Moonlight client asked for (the desk's `profile.fps` before any client connected); `0`:
+  frame rate of the desk's last Moonlight stream (what the client asked for, at most `profile.fps`; the desk's `profile.fps` before any client connected); `0`:
   off; `10`–`1000`: that many FPS. Changes apply while the desk runs. How it works:
   - While a desk runs with the limit on, the service reads the GPU load per process every 5 s (the counters behind
     `/metrics`). A process in the desk's session that renders at 10 % or more in 3 reads within a minute is a game unless it lives in
@@ -171,7 +171,7 @@ Rules:
 - `host.composeIntervalMs` is written to `DWMFRAMEINTERVAL` by the service (2 = 500 Hz, 4 = 250 Hz), 1–100. `0`
   (default, «Частота композиции: Авто»): the service composes at least twice per frame of the fastest desk and never
   slower than 250 Hz: 4 ms up to 125 fps, 3 ms for 126–166 fps (144, 165), 2 ms from 167 fps (240). The fastest desk is the highest
-  `profile.fps` or the highest frame rate a Moonlight client asked for since the service started. DWM reads the value
+  `profile.fps` or the highest stream frame rate (what a client asked for, at most its desk's `profile.fps`) since the service started. DWM reads the value
   when a session logs on, so a change applies to desk sessions that log on afterwards. `GET /metrics` reports the
   resolved rate as `host.composeHz`; each desk's measured rate is `captureFps`.
 - `host.keepAwake` (default `true`; left out = `true`): while a Moonlight client streams from any desk the service holds

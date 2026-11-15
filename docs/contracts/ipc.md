@@ -280,13 +280,13 @@ What the worker applies (worker/README.md, *Stream profile*), from `welcome` and
 | `input` | `"windows"` (SendInput in the session) or `"rdp"` (keyboard and mouse into the seat's input ring, sent as RDP input PDUs; see *RDP input* below) | next event |
 | `bitrate_cap_kbps` | 0–1000000, 0 = no cap: the most video traffic one stream may send, FEC included; the encoder bitrate becomes `min(stream's own, min(stream's own traffic at its starting FEC share, cap) × 100 / (100 + fec_percent))`, at least 500, so a higher FEC share never adds traffic either (patch 0025). The service splits the desk's cap between its streams | next frame, native NVENC only |
 
-`null` restores the worker's default (Sunshine's: FEC 20 %, half the stream's fps, 800 Mbit/s, DPB 5 or 8). A value
+`null` restores the worker's default (Sunshine's: FEC 20 %, half the stream's fps, 800 Mbit/s, DPB 5 or 8; `fps`: the client's rate). A value
 of the wrong type or out of range fails `set_profile` with `bad_request` and nothing is applied. The other fields
-are accepted and ignored by the worker (the client picks mode, bitrate and codec). The service always sends these
-six fields, with its defaults where the desk sets none (config.md; `capture_mode` `slot`, `input` `windows`). With «Адаптивный поток»
+are accepted and ignored by the worker (the client picks size, bitrate and codec). The service always sends these
+fields and `fps` (null included), with its defaults where the desk sets none (config.md; `capture_mode` `slot`, `input` `windows`). With «Адаптивный поток»
 (config.md, `profile.adaptiveStream`) it sends a new `set_profile` whenever the adaptation changes `fec_percent` or
 `bitrate_cap_kbps`, at most once per heartbeat; otherwise `bitrate_cap_kbps` is 0. The answer lists what happened:
 
 ```json
-{"type":"result","id":5,"ok":true,"data":{"applied":["fec_percent","min_fps","pacing_mbps"],"next_stream":["dpb_frames"],"not_applied":["fps","width","height","bitrate_kbps","codec","gpu_priority"]}}
+{"type":"result","id":5,"ok":true,"data":{"applied":["fec_percent","min_fps","pacing_mbps"],"next_stream":["dpb_frames","fps"],"not_applied":["width","height","bitrate_kbps","codec","gpu_priority"]}}
 ```

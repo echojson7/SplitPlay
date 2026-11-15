@@ -2,6 +2,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <!-- Explorer, taskbar and shortcuts show this; built by service/assets/make-icon.py from the in-app logo. -->
+    <ApplicationIcon>..\..\assets\splitplay.ico</ApplicationIcon>
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWindowsForms>true</UseWindowsForms>
     <RootNamespace>SplitPlay.Tray</RootNamespace>
@@ -24,6 +26,7 @@
 
   <ItemGroup>
     <EmbeddedResource Include="FallbackPage.html" LogicalName="SplitPlay.Tray.FallbackPage.html" />
+    <EmbeddedResource Include="..\..\assets\splitplay.ico" LogicalName="SplitPlay.Tray.splitplay.ico" />
   </ItemGroup>
 
   <ItemGroup>

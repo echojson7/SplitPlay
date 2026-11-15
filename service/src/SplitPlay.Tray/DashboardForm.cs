@@ -70,7 +70,7 @@ internal sealed class DashboardForm : Form
         _url = url;
         _health = new Uri(url, "api/v1/health");
         Text = "SplitPlay";
-        Icon = SystemIcons.Application;
+        Icon = AppIcon.All;
         StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1200, 800);
         MinimumSize = new Size(480, 360);

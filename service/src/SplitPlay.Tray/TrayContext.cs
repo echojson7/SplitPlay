@@ -31,7 +31,7 @@ internal sealed class TrayContext : ApplicationContext
 
         _icon = new NotifyIcon
         {
-            Icon = SystemIcons.Application,
+            Icon = AppIcon.Small(),
             Text = "SplitPlay",
             ContextMenuStrip = _menu,
             Visible = visible,
@@ -257,7 +257,9 @@ internal sealed class TrayContext : ApplicationContext
         if (disposing)
         {
             _desks?.Dispose();
+            var icon = _icon.Icon;
             _icon.Dispose();
+            icon?.Dispose();
             _menu.Dispose();
             _boldFont?.Dispose();
             _invoker.Dispose();

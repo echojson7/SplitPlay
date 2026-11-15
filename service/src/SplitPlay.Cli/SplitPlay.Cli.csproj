@@ -2,6 +2,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
+    <!-- Explorer, taskbar and shortcuts show this; built by service/assets/make-icon.py from the in-app logo. -->
+    <ApplicationIcon>..\..\assets\splitplay.ico</ApplicationIcon>
     <TargetFramework>net10.0-windows</TargetFramework>
     <RootNamespace>SplitPlay.Cli</RootNamespace>
     <AssemblyName>splitplay</AssemblyName>

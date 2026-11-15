@@ -15,8 +15,17 @@ async function settle(): Promise<void> {
   }
 }
 
-async function metrics() {
-  vi.stubGlobal('fetch', mockFetch(new MockBackend({ stepMs: 10 })))
+async function metrics(noRecording = false) {
+  const fetch = mockFetch(new MockBackend({ stepMs: 10 }))
+  vi.stubGlobal(
+    'fetch',
+    noRecording
+      ? (input: RequestInfo | URL, init?: RequestInit) =>
+          String(input instanceof Request ? input.url : input).includes('/diagnostics/recording')
+            ? Promise.resolve(new Response('{"error":"not_found"}', { status: 404 }))
+            : fetch(input, init)
+      : fetch,
+  )
   vi.stubGlobal('WebSocket', undefined)
   const router = createAppRouter()
   const w = mount(App, { global: { plugins: [router] }, attachTo: document.body })
@@ -30,6 +39,15 @@ describe('stream recording', () => {
     store.stopLive()
     vi.unstubAllGlobals()
     locale.value = 'ru'
+  })
+
+  it('keeps the row when the service has no recording', async () => {
+    const w = await metrics(true)
+    const row = w.find('[data-recording]')
+    expect(row.find('.title').text()).toBe('Запись потока')
+    expect(row.find('.desc').text()).toBe('Не поддерживается этой версией службы')
+    expect(row.find('button').attributes('disabled')).toBeDefined()
+    w.unmount()
   })
 
   it('records 30 minutes, stops and copies the report', async () => {

@@ -1,7 +1,7 @@
 <!-- SPDX-License-Identifier: MIT -->
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { Recording } from '../api/types'
 import HostWarnings from '../components/HostWarnings.vue'
 import { copyText, errorText, useLive } from '../composables'
@@ -23,6 +23,7 @@ const gb = fmtGb
 
 // ---- «Запись потока»: 30 minutes of every streaming desk as a short text to copy
 const recording = ref<Recording | null>(null)
+const recUnavailable = ref(false)
 const recBusy = ref(false)
 const now = ref(Date.now())
 let recTimer: ReturnType<typeof setInterval> | undefined
@@ -30,10 +31,12 @@ let recTimer: ReturnType<typeof setInterval> | undefined
 async function loadRecording(): Promise<void> {
   try {
     recording.value = await api.recording()
+    recUnavailable.value = false
     now.value = Date.now()
-  } catch {
-    // An older service has no recording: the row stays hidden.
-    recording.value = null
+  } catch (e) {
+    // The row stays visible either way: a service without recording says so instead of the row vanishing; any other
+    // failure (sign-in not done yet, a restart) leaves the row as it is.
+    if (e instanceof ApiError && (e.status === 404 || e.status === 405)) recUnavailable.value = true
   }
 }
 
@@ -108,17 +111,19 @@ function deskName(id: string): string {
             <span class="meter" />
           </div>
         </div>
-        <div v-if="recording" class="srow compact" data-recording>
+        <div class="srow compact" data-recording>
           <span class="text">
             <span class="title">{{ t('rec.title') }}</span>
-            <span class="desc">{{ recStatus ?? t('rec.hint') }}</span>
+            <span class="desc">{{ recUnavailable ? t('common.notSupported') : (recStatus ?? t('rec.hint')) }}</span>
           </span>
           <div class="ctl">
-            <button v-if="recording.running" type="button" :disabled="recBusy" @click="recAction('stop')">
+            <button v-if="recording?.running" type="button" :disabled="recBusy" @click="recAction('stop')">
               {{ t('rec.stop') }}
             </button>
-            <button v-else type="button" :disabled="recBusy" @click="recAction('start')">{{ t('rec.start') }}</button>
-            <button v-if="recording.report" type="button" class="btn-accent" @click="copyReport">{{ t('common.copy') }}</button>
+            <button v-else type="button" :disabled="recBusy || recUnavailable" @click="recAction('start')">
+              {{ t('rec.start') }}
+            </button>
+            <button v-if="recording?.report" type="button" class="btn-accent" @click="copyReport">{{ t('common.copy') }}</button>
           </div>
         </div>
         <details v-if="recording?.report" class="rec-report">

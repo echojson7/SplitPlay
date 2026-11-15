@@ -308,7 +308,15 @@ public sealed class ApiTests
         try
         {
             await using var svc = await TestService.StartAsync(webRoot: webRoot);
-            Assert.Contains("SplitPlay test", await svc.Client.GetStringAsync("/"), StringComparison.Ordinal);
+            var index = await svc.Client.GetAsync("/");
+            Assert.Contains("SplitPlay test", await index.Content.ReadAsStringAsync(), StringComparison.Ordinal);
+            // index.html is revalidated on every load, so an update shows the new UI at once.
+            Assert.True(index.Headers.CacheControl?.NoCache, index.Headers.CacheControl?.ToString());
+            Directory.CreateDirectory(Path.Combine(webRoot, "assets"));
+            await File.WriteAllTextAsync(Path.Combine(webRoot, "assets", "index-abc123.js"), "1");
+            var asset = await svc.Client.GetAsync("/assets/index-abc123.js");
+            Assert.Equal(HttpStatusCode.OK, asset.StatusCode);
+            Assert.Contains("immutable", asset.Headers.CacheControl?.ToString() ?? "", StringComparison.Ordinal);
             // Hash routing: no server-side fallback, unknown paths are plain 404s.
             Assert.Equal(HttpStatusCode.NotFound, (await svc.Client.GetAsync("/desks/desk-1")).StatusCode);
         }

@@ -110,6 +110,9 @@ internal sealed class DashboardForm : Form
             await _webView.EnsureCoreWebView2Async(environment);
             var core = _webView.CoreWebView2;
             core.Settings.AreDevToolsEnabled = false;
+            // The UI is local and small: drop the HTTP cache on every start so that an update never shows the previous
+            // version's page (older services sent index.html without Cache-Control and WebView2 kept it). Cookies stay.
+            await core.Profile.ClearBrowsingDataAsync(CoreWebView2BrowsingDataKinds.DiskCache);
             core.NewWindowRequested += (_, args) =>
             {
                 // External links open in the default browser, not in the dashboard window.

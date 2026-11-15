@@ -206,10 +206,22 @@ public static class ServiceHost
         app.UseApiErrorHandling();
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
         app.UseDefaultFiles();
-        app.UseStaticFiles();
+        app.UseStaticFiles(new StaticFileOptions { OnPrepareResponse = static ctx => SetUiCaching(ctx.Context) });
         app.MapSplitPlayApi();
         // No SPA fallback: the UI uses hash routing and relative asset paths.
         return app;
+    }
+
+    /// <summary>
+    /// Vite's <c>assets/</c> files carry a content hash in their name and never change; everything else (index.html
+    /// above all) is revalidated on every load. Without a Cache-Control header the tray's WebView2 cached index.html
+    /// heuristically and kept showing the previous version's UI after an update.
+    /// </summary>
+    internal static void SetUiCaching(HttpContext context)
+    {
+        context.Response.Headers.CacheControl = context.Request.Path.StartsWithSegments("/assets", StringComparison.OrdinalIgnoreCase)
+            ? "public, max-age=31536000, immutable"
+            : "no-cache";
     }
 
     private static LogLevel MapLevel(string? level) => level switch

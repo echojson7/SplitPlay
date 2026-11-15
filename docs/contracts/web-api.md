@@ -106,7 +106,7 @@ waits 0.1, 0.2, 0.4 … s first, at most 2 s.
 | DELETE | `/games/{exe}` | forget a game (its limit goes); 204, 404 for an unknown game. Found again, it comes back |
 | GET | `/metrics` | host-level metrics plus per-desk metrics |
 | GET | `/logs?component=service&desk=desk-1&tail=200` | array of `{"time","level","component","desk"?,"message"}` |
-| GET | `/diagnostics/recording` | «Запись потока»: `{"running","startedAt","endsAt","report","samples"}`; `report` is a short text (one line per desk and minute: fps min/avg, composition, host processing p50/p99, ping, packet loss, FEC, Mbit/s, IDR requests, longest frame pause, GPU; then totals and up to 60 notable moments), `null` before the first recording. Kept in memory until the next recording or a service restart |
+| GET | `/diagnostics/recording` | «Запись потока»: `{"running","startedAt","endsAt","report","samples"}`; `report` is a short text: a legend; per desk its streams and host adapter, then two lines per minute (fps min/avg, frames with new content and repeated, Mbit/s, frame KB avg/max, key frames, ping, packet loss, FEC, IDR requests, longest frame pause; and composition rate, host stage times p99 (capture, encoder, queue, send), present-to-sent p50/p99/max, desk GPU/NVENC, desk VRAM, the desk's busiest CPU core, host Wi-Fi signal/RSSI/rate when the host is on Wi-Fi) and totals; a host table per minute (CPU avg and busiest core, GPU, VRAM used/total, packets the host adapters discarded); then up to 60 notable moments (key frame requests, pauses, losses, bitrate caps, host latency spikes with their breakdown, adapter drops, a changed adapter, weak host Wi-Fi, VRAM nearly full, clients coming and going), `null` before the first recording. Kept in memory until the next recording or a service restart |
 | POST | `/diagnostics/recording` | `{"minutes":30}` (1–180, default 30): start recording every streaming desk's heartbeats; replaces a running recording. 200 with the state |
 | DELETE | `/diagnostics/recording` | stop; the report stays. 200 with the state |
 | GET | `/config/export` | zip download (secrets excluded unless `?includeSecrets=true&password=...`) |
@@ -227,7 +227,7 @@ loss could not be repaired) and `frameGapMsMax` (the longest pause between two f
 adds where a frame's time goes on the host, p50/p99 in ms: `captureMs*` (present to encode start), `encoderMs*` (GPU
 conversion and the encoder), `queueMs*` (waiting for the sender), `sendMs*` (FEC and paced sending), `sentMs*` and
 `sentMsMax` (present to the last packet sent), and frame sizes `frameKbAvg`, `frameKbMax`, `keyFrames`,
-`keyFrameKbMax`, `repeatedFrames` (frames without new content); `null` from an older worker.
+`keyFrameKbMax`, `repeatedFrames` (frames without new content), `newFps` (frames with new content per second); `null` from an older worker.
 
 `hasPassword` tells whether a password for `user` is stored; the password itself is never returned.
 `resolutionPendingRestart` is true when the resolution changed while running and the seat could not resize the session.

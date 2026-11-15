@@ -11,12 +11,13 @@ namespace SplitPlay.Core.Streaming;
 public sealed record RecordingStream(string Key, string Line, double? IdrRequests);
 
 /// <summary>The host's network adapter towards a desk's client, as a <see cref="RecordingSample"/> carries it.</summary>
+/// <param name="Key">Stable for the adapter (its id).</param>
 /// <param name="Line">What the report shows ("Ethernet Realtek PCIe 2.5GbE 2500 Mbit/s").</param>
 /// <param name="OutDiscards">Outgoing packets the adapter threw away since it came up; null when unknown.</param>
 /// <param name="WifiSignalPercent">Wi-Fi signal quality, 0-100; null on a wired adapter.</param>
 /// <param name="WifiRssiDbm">Wi-Fi signal strength, dBm.</param>
 /// <param name="WifiTxMbps">Wi-Fi transmit rate, Mbit/s.</param>
-public sealed record RecordingLink(string Line, long? OutDiscards, int? WifiSignalPercent = null, int? WifiRssiDbm = null, double? WifiTxMbps = null);
+public sealed record RecordingLink(string Key, string Line, long? OutDiscards, int? WifiSignalPercent = null, int? WifiRssiDbm = null, double? WifiTxMbps = null);
 
 /// <summary>
 /// One worker heartbeat of a desk as a <see cref="StreamRecording"/> keeps it (about once a second). Values a worker
@@ -105,6 +106,9 @@ public sealed record RecordingSample
     /// <summary>Frames sent without new content in the interval (about one second).</summary>
     public double? RepeatedFrames { get; init; }
 
+    /// <summary>Frames with new content per second (the fastest stream of the desk).</summary>
+    public double? NewFps { get; init; }
+
     /// <summary>The desk session's dedicated VRAM, MB.</summary>
     public double? DeskVramMb { get; init; }
 
@@ -174,6 +178,10 @@ public sealed class StreamRecording
     private readonly SortedDictionary<string, DeskTrack> _desks = new(StringComparer.Ordinal);
     private readonly List<Event> _events = [];
     private readonly SortedDictionary<int, HostBucket> _host = [];
+
+    /// <summary>The discard counter each host adapter had at its last sample (the counter is the adapter's, not a desk's).</summary>
+    private readonly Dictionary<string, long> _discards = new(StringComparer.OrdinalIgnoreCase);
+    private long _dropsTotal;
     private readonly SortedDictionary<string, int> _dropped = new(StringComparer.Ordinal);
     private DateTimeOffset? _stoppedAt;
     private int _samples;
@@ -291,7 +299,7 @@ public sealed class StreamRecording
             {
                 sb.Append("legend: new = frames with new content/s, rep = repeated; host ms p99: cap = present→encode start, enc = GPU convert + encoder, ")
                     .Append("q = wait for the sender, send = FEC + paced send, total = present→last packet sent (p50/p99/max); ")
-                    .Append("cpu = busiest core of the desk; drop = packets the host adapter discarded\n");
+                    .Append("cpu = busiest core of the desk; host drop = outgoing packets the host's adapters discarded\n");
             }
 
             foreach (var (desk, track) in _desks)
@@ -302,26 +310,32 @@ public sealed class StreamRecording
                     sb.Append("  stream ").Append(line).Append('\n');
                 }
 
-                foreach (var line in track.Links)
+                foreach (var line in track.Links.Values)
                 {
                     sb.Append("  host link ").Append(line).Append('\n');
                 }
 
-                sb.Append("  min  fps min/avg  new  rep  Mbit/s  KB avg/max  key  ping avg/max  pkt% avg/max  fec%  idr  gap max\n");
+                // Header and rows share one layout, so the columns line up whatever the widths.
+                static string NetRow(string min, string fps, string fresh, string rep, string mbps, string kb, string key, string ping, string pkt, string fec, string idr, string gap) =>
+                    Inv($"  {min,3}  {fps,-11} {fresh,4} {rep,4}  {mbps,6}  {kb,-10} {key,3}  {ping,-12} {pkt,-12} {fec,4}  {idr,3}  {gap,7}\n");
+                sb.Append(NetRow("min", "fps min/avg", "new", "rep", "Mbit/s", "KB avg/max", "key", "ping avg/max", "pkt% avg/max", "fec%", "idr", "gap max"));
                 foreach (var (minute, b) in track.Minutes)
                 {
-                    sb.Append(Inv($"  {minute,3}  {F0(b.Fps.Min)}/{F0(b.Fps.Avg),-6} {F0(b.NewFps.Avg),4} {F0(b.Repeated.Avg),4}  {F0(b.Mbps.Avg),6}  {F0(b.FrameKb.Avg)}/{F0(b.FrameKbMax.Max),-6} {b.Keys,4}  {F0(b.Rtt.Avg)}/{F0(b.Rtt.Max),-9}  {F2(b.Packet.Avg)}/{F2(b.Packet.Max),-7}  {F0(b.Fec.Avg),4}  {b.Idr,3}  {F0(b.Gap.Max),7}\n"));
+                    sb.Append(NetRow(minute.ToString(CultureInfo.InvariantCulture), $"{F0(b.Fps.Min)}/{F0(b.Fps.Avg)}", F0(b.NewFps.Avg), F0(b.Repeated.Avg),
+                        F0(b.Mbps.Avg), $"{F0(b.FrameKb.Avg)}/{F0(b.FrameKbMax.Max)}", b.Keys.ToString(CultureInfo.InvariantCulture),
+                        $"{F0(b.Rtt.Avg)}/{F0(b.Rtt.Max)}", $"{F2(b.Packet.Avg)}/{F2(b.Packet.Max)}", F0(b.Fec.Avg),
+                        b.Idr.ToString(CultureInfo.InvariantCulture), F0(b.Gap.Max)));
                 }
 
                 var wifi = track.Total.WifiSignal.Max is not null;
-                sb.Append("  min   hz  cap  enc    q  send  total p50/p99/max  gpu/enc%  vram GB  cpu%  drop").Append(wifi ? "  wifi %/dBm/Mbit" : "").Append('\n');
+                sb.Append("  min   hz  cap  enc    q  send  total p50/p99/max  gpu/enc%  vram GB  cpu%").Append(wifi ? "  wifi %/dBm/Mbit" : "").Append('\n');
                 foreach (var (minute, b) in track.Minutes)
                 {
                     // An older worker has no stage times: its host latency (present to hand-off) stands in for the total.
                     var total = b.SentP99.Max is not null
                         ? Inv($"{F1(b.SentP50.Avg)}/{F1(b.SentP99.Max)}/{F0(b.SentMax.Max)}")
                         : Inv($"{F1(b.EncP50.Avg)}/{F1(b.EncP99.Max)}/-");
-                    sb.Append(Inv($"  {minute,3}  {F0(b.Compose.Avg),3} {F1(b.CapP99.Max),4} {F1(b.EncoderP99.Max),4} {F1(b.QueueP99.Max),4} {F1(b.SendP99.Max),5}  {total,-17}  {F0(b.Gpu.Avg)}/{F0(b.Enc.Avg),-6} {F1(b.DeskVramMb.Avg / 1024),7}  {F0(b.DeskCpu.Max),4}  {Drops(b),4}"));
+                    sb.Append(Inv($"  {minute,3}  {F0(b.Compose.Avg),3} {F1(b.CapP99.Max),4} {F1(b.EncoderP99.Max),4} {F1(b.QueueP99.Max),4} {F1(b.SendP99.Max),5}  {total,-17}  {F0(b.Gpu.Avg)}/{F0(b.Enc.Avg),-6} {F1(b.DeskVramMb.Avg / 1024),7}  {F0(b.DeskCpu.Max),4}"));
                     if (wifi)
                     {
                         sb.Append(Inv($"  {F0(b.WifiSignal.Min)}/{F0(b.WifiRssi.Min)}/{F0(b.WifiTx.Min)}"));
@@ -344,17 +358,21 @@ public sealed class StreamRecording
 
                 sb.Append(Inv($"ping avg {F0(t.Rtt.Avg)} max {F0(t.Rtt.Max)} ms, "));
                 sb.Append(Inv($"packet loss avg {F2(t.Packet.Avg)} % (seconds with loss {track.LossSeconds}), frames lost max {F1(track.FrameLossMax)} %, FEC failed {F0(track.FecFailed)}, "));
-                sb.Append(Inv($"IDR requests {track.IdrTotal}, stalls {track.Stalls}, gap max {F0(t.Gap.Max)} ms, host adapter drops {track.DropsTotal}\n"));
+                sb.Append(Inv($"IDR requests {track.IdrTotal}, stalls {track.Stalls}, gap max {F0(t.Gap.Max)} ms\n"));
             }
 
             if (_host.Count > 0)
             {
                 sb.Append('\n').Append("host\n");
-                sb.Append("  min  cpu avg/core max  gpu%  vram GB used/total\n");
+                sb.Append("  min  cpu avg/core max  gpu%  vram GB used/total  drop\n");
                 foreach (var (minute, h) in _host)
                 {
-                    sb.Append(Inv($"  {minute,3}  {F0(h.Cpu.Avg),3}/{F0(h.CpuCore.Max),-12} {F0(h.Gpu.Avg),4}  {F1(h.VramUsed.Max / 1024)}/{F1(h.VramTotal.Max / 1024)}\n"));
+                    var vram = Inv($"{F1(h.VramUsed.Max / 1024)}/{F1(h.VramTotal.Max / 1024)}");
+                    var drop = h.Drops is long d ? d.ToString(CultureInfo.InvariantCulture) : "-";
+                    sb.Append(Inv($"  {minute,3}  {F0(h.Cpu.Avg),3}/{F0(h.CpuCore.Max),-12} {F0(h.Gpu.Avg),4}  {vram,-18} {drop,5}\n"));
                 }
+
+                sb.Append(Inv($"  total: host adapter drops {_dropsTotal}\n"));
             }
 
             sb.Append('\n').Append("events");
@@ -443,27 +461,28 @@ public sealed class StreamRecording
         // as moving at twice the idle rate, so a picture that only changes now and then is not taken for stalls.
         var moving = s.Fps >= Math.Max(MovingFps, 2 * (s.MinFps ?? 0));
         var stallMs = StallMs;
-        // The host adapter: a new one (or its first sight) is a line of its own; dropped packets counted per sample.
+        // The host adapter: its first sight is a line of the desk, another one later an event. Its discard counter is the
+        // adapter's: every desk whose client it serves reports the same value, so only an increase counts (once).
         long? drops = null;
         if (s.Link is { } link)
         {
-            if (!track.Links.Contains(link.Line, StringComparer.Ordinal))
+            if (!track.Links.ContainsKey(link.Key))
             {
-                if (track.Links.Count > 0)
-                {
-                    AddEvent(s, "link", $"host link now {link.Line}");
-                }
-
-                track.Links.Add(link.Line);
+                track.Links[link.Key] = link.Line;
             }
 
-            if (link.OutDiscards is long now0)
+            if (track.LastLinkKey is { } lastKey && !string.Equals(lastKey, link.Key, StringComparison.OrdinalIgnoreCase))
             {
-                drops = track.LastDiscards is long before0 && now0 >= before0 && track.LastLink == link.Line ? now0 - before0 : 0;
-                track.LastDiscards = now0;
+                AddEvent(s, "link", $"host link now {link.Line}");
             }
 
-            track.LastLink = link.Line;
+            track.LastLinkKey = link.Key;
+            if (link.OutDiscards is long counter)
+            {
+                // A counter below the last one: the adapter was reset and counts from 0 again.
+                drops = _discards.TryGetValue(link.Key, out var before) && counter >= before ? counter - before : 0;
+                _discards[link.Key] = counter;
+            }
         }
 
         var hostMinute = minute;
@@ -478,12 +497,17 @@ public sealed class StreamRecording
         host.Gpu.Add(s.HostGpuPercent);
         host.VramUsed.Add(s.HostVramUsedMb);
         host.VramTotal.Add(s.HostVramTotalMb);
+        if (drops is long hostDrops)
+        {
+            host.Drops = (host.Drops ?? 0) + hostDrops;
+            _dropsTotal += hostDrops;
+        }
 
         var repeated = s.RepeatedFrames;
         foreach (var b in new[] { bucket, track.Total })
         {
             b.Fps.Add(s.Fps);
-            b.NewFps.Add(repeated is double rep ? Math.Max(0, s.Fps - rep) : null);
+            b.NewFps.Add(s.NewFps ?? (repeated is double rep ? Math.Max(0, s.Fps - rep) : null));
             b.Repeated.Add(repeated);
             b.FrameKb.Add(s.FrameKbAvg);
             b.FrameKbMax.Add(s.FrameKbMax);
@@ -501,10 +525,6 @@ public sealed class StreamRecording
             b.WifiSignal.Add(s.Link?.WifiSignalPercent);
             b.WifiRssi.Add(s.Link?.WifiRssiDbm);
             b.WifiTx.Add(s.Link?.WifiTxMbps);
-            if (drops is long d)
-            {
-                b.Drops = (b.Drops ?? 0) + d;
-            }
 
             b.Compose.Add(s.ComposeHz);
             b.EncP50.Add(s.EncodeMsP50);
@@ -521,7 +541,7 @@ public sealed class StreamRecording
         }
 
         track.IdrTotal += idrNew;
-        track.DropsTotal += drops ?? 0;
+
         track.FecFailed += s.FecFailed ?? 0;
         track.FrameLossMax = Math.Max(track.FrameLossMax, s.FrameLossPct);
         if (s.PacketLossPct > 0)
@@ -569,7 +589,7 @@ public sealed class StreamRecording
 
         if (drops > 0)
         {
-            AddEvent(s, "drop", "host adapter discarded {0:0} outgoing packets", drops.Value, merge: Merge.Sum);
+            AddEvent(s with { Desk = "host" }, "drop", "host adapter discarded {0:0} outgoing packets", drops.Value, merge: Merge.Sum);
         }
 
         if (s.Link?.WifiSignalPercent is int signal && signal < WeakWifiPercent)
@@ -676,7 +696,6 @@ public sealed class StreamRecording
         Sum,
     }
 
-    private static string Drops(Bucket b) => b.Drops is long d ? d.ToString(CultureInfo.InvariantCulture) : "-";
 
     private sealed class Event(DateTimeOffset at, string desk, string kind, string format)
     {
@@ -710,13 +729,9 @@ public sealed class StreamRecording
         public List<string> Lines { get; } = [];
 
         /// <summary>The host adapters seen towards the desk's client, in order.</summary>
-        public List<string> Links { get; } = [];
+        public Dictionary<string, string> Links { get; } = new(StringComparer.OrdinalIgnoreCase);
 
-        public string? LastLink { get; set; }
-
-        public long? LastDiscards { get; set; }
-
-        public long DropsTotal { get; set; }
+        public string? LastLinkKey { get; set; }
 
         /// <summary>The key frame count each running stream had at its last sample.</summary>
         public Dictionary<string, double> Idr { get; } = new(StringComparer.Ordinal);
@@ -802,9 +817,6 @@ public sealed class StreamRecording
         public int Idr { get; set; }
 
         public int Keys { get; set; }
-
-        /// <summary>Packets the host adapter discarded; null while its counter is unknown.</summary>
-        public long? Drops { get; set; }
     }
 
     /// <summary>Host-wide numbers of one minute (every desk's samples carry them).</summary>
@@ -819,6 +831,9 @@ public sealed class StreamRecording
         public Stat VramUsed { get; } = new();
 
         public Stat VramTotal { get; } = new();
+
+        /// <summary>Outgoing packets the host's adapters discarded; null while no counter is known.</summary>
+        public long? Drops { get; set; }
     }
 
     /// <summary>Min, average and max of the values seen (nulls skipped).</summary>

@@ -169,8 +169,9 @@ Worker metric definitions (all over the interval since the previous heartbeat, a
 | `send_ms_p50`, `send_ms_p99` | packetising, FEC, encryption and paced sending, up to the last packet handed to the socket (patch 0028); large frames at a low `pacing_mbps` take long |
 | `sent_ms_p50`, `sent_ms_p99`, `sent_ms_max` | present to the last packet sent: what the host adds to the picture's way (patch 0028) |
 | `frame_kb_avg`, `frame_kb_max` | encoded frame size, KiB (before headers and FEC); `null` without frames (patch 0028) |
-| `key_frames`, `key_frame_kb_max` | key frames sent in the interval and the largest (patch 0028) |
-| `repeated_frames` | frames sent in the interval without new content (the idle rate, a key frame on a static picture) (patch 0028) |
+| `key_frames`, `key_frame_kb_max` | key frames sent in the interval (in `metrics` the sum over streams) and the largest (`null` without one) (patch 0028) |
+| `repeated_frames` | frames sent in the interval without new content (the idle rate, a key frame on a static picture); in `metrics` the sum over streams (patch 0028) |
+| `new_fps` | frames with new content per second; in `metrics` the fastest stream (patch 0028) |
 | `fec_recovered`, `fec_failed` | FEC blocks the client repaired with parity, and blocks it could not repair |
 | `fec_percent` (`metrics` only) | the FEC share the next frame is sent with |
 | `encoder_kbps` (`metrics` only) | the bitrate the encoder runs at, after `bitrate_cap_kbps` (patch 0025); `null` without a stream or when the encoder cannot change it live (encoders other than native NVENC) |

@@ -6,23 +6,26 @@ using System.Runtime.Versioning;
 
 namespace SplitPlay.Service.Platform;
 
-/// <summary>CPU load since the previous read: the whole CPU and each logical processor (by processor number), percent.</summary>
-public sealed record CpuLoad(double TotalPercent, IReadOnlyList<double> PerCpu)
+/// <summary>
+/// CPU load since the previous read: the whole CPU and each logical processor, percent. Processors are keyed by their
+/// index as config and <see cref="SplitPlay.Core.Host.LogicalCpu.Index"/> number them (<c>group * 64 + number</c>).
+/// </summary>
+public sealed record CpuLoad(double TotalPercent, IReadOnlyDictionary<int, double> PerCpu)
 {
-    /// <summary>The busiest of <paramref name="cpus"/> (processor indexes; all of them when null); null when none is known.</summary>
+    /// <summary>The busiest of <paramref name="cpus"/> (all processors when null); null when none of them is known.</summary>
     public double? MaxOf(IReadOnlyList<int>? cpus)
     {
         if (cpus is null)
         {
-            return PerCpu.Count > 0 ? PerCpu.Max() : null;
+            return PerCpu.Count > 0 ? PerCpu.Values.Max() : null;
         }
 
         double? max = null;
         foreach (var i in cpus)
         {
-            if (i >= 0 && i < PerCpu.Count)
+            if (PerCpu.TryGetValue(i, out var v))
             {
-                max = Math.Max(max ?? 0, PerCpu[i]);
+                max = Math.Max(max ?? 0, v);
             }
         }
 
@@ -34,43 +37,37 @@ public sealed record CpuLoad(double TotalPercent, IReadOnlyList<double> PerCpu)
 public readonly record struct CpuTimes(long Idle, long Total);
 
 /// <summary>
-/// Turns cumulative processor times into load: reads them at most once per <see cref="MinInterval"/> (several desks
-/// ask every second) and keeps the last result in between. Thread-safe; never throws.
+/// Turns cumulative processor times into load. Each <see cref="Sample"/> reads them once and measures since the
+/// previous read; a read more than <see cref="MaxGap"/> after the previous one starts over (a load averaged over the
+/// hours between two recordings says nothing). Thread-safe; never throws.
 /// </summary>
 public sealed class CpuLoadSampler
 {
-    /// <summary>Reads closer together than this return the previous result.</summary>
-    public static readonly TimeSpan MinInterval = TimeSpan.FromMilliseconds(900);
+    /// <summary>Reads further apart than this start a new baseline instead of reporting a load.</summary>
+    public static readonly TimeSpan MaxGap = TimeSpan.FromSeconds(3);
 
-    private readonly Func<IReadOnlyList<CpuTimes>?> _read;
+    private readonly Func<IReadOnlyDictionary<int, CpuTimes>?> _read;
     private readonly TimeProvider _time;
     private readonly object _gate = new();
-    private IReadOnlyList<CpuTimes>? _previous;
+    private IReadOnlyDictionary<int, CpuTimes>? _previous;
     private DateTimeOffset _readAt = DateTimeOffset.MinValue;
-    private CpuLoad? _last;
 
-    public CpuLoadSampler(Func<IReadOnlyList<CpuTimes>?> read, TimeProvider time)
+    public CpuLoadSampler(Func<IReadOnlyDictionary<int, CpuTimes>?> read, TimeProvider time)
     {
         _read = read;
         _time = time;
     }
 
-    /// <summary>The processor times of this machine: <c>NtQuerySystemInformation</c> on Windows, nothing elsewhere.</summary>
+    /// <summary>The processor times of this machine: <c>NtQuerySystemInformationEx</c> on Windows, nothing elsewhere.</summary>
     public static CpuLoadSampler ForThisHost(TimeProvider time) =>
         new(OperatingSystem.IsWindows() ? WindowsCpuTimes.Read : () => null, time);
 
-    /// <summary>Load since the previous read; null before two reads or when the times cannot be read.</summary>
-    public CpuLoad? Current()
+    /// <summary>Reads the times now: the load since the previous read, or null (first read, a long gap, no times).</summary>
+    public CpuLoad? Sample()
     {
         lock (_gate)
         {
-            var now = _time.GetUtcNow();
-            if (now - _readAt < MinInterval)
-            {
-                return _last;
-            }
-
-            IReadOnlyList<CpuTimes>? times;
+            IReadOnlyDictionary<int, CpuTimes>? times;
             try
             {
                 times = _read();
@@ -80,40 +77,48 @@ public sealed class CpuLoadSampler
                 times = null;
             }
 
-            _readAt = now;
-            _last = times is not null && _previous is not null ? Load(_previous, times) : null;
+            var now = _time.GetUtcNow();
+            var load = times is not null && _previous is not null && now - _readAt <= MaxGap ? Load(_previous, times) : null;
             _previous = times;
-            return _last;
+            _readAt = now;
+            return load;
         }
     }
 
-    /// <summary>Load between two reads; null when they do not describe the same processors.</summary>
-    public static CpuLoad? Load(IReadOnlyList<CpuTimes> before, IReadOnlyList<CpuTimes> after)
+    /// <summary>Load between two reads, over the processors both have; null when they share none.</summary>
+    public static CpuLoad? Load(IReadOnlyDictionary<int, CpuTimes> before, IReadOnlyDictionary<int, CpuTimes> after)
     {
         ArgumentNullException.ThrowIfNull(before);
         ArgumentNullException.ThrowIfNull(after);
-        if (before.Count != after.Count || after.Count == 0)
+        var per = new Dictionary<int, double>();
+        long idle = 0, total = 0;
+        foreach (var (cpu, a) in after)
+        {
+            if (!before.TryGetValue(cpu, out var b))
+            {
+                continue;
+            }
+
+            var dTotal = Math.Max(0, a.Total - b.Total);
+            var dIdle = Math.Clamp(a.Idle - b.Idle, 0, dTotal);
+            per[cpu] = dTotal > 0 ? Math.Round(100.0 * (dTotal - dIdle) / dTotal, 1) : 0;
+            idle += dIdle;
+            total += dTotal;
+        }
+
+        if (per.Count == 0)
         {
             return null;
         }
 
-        var per = new double[after.Count];
-        long idle = 0, total = 0;
-        for (var i = 0; i < after.Count; i++)
-        {
-            var dIdle = Math.Max(0, after[i].Idle - before[i].Idle);
-            var dTotal = Math.Max(0, after[i].Total - before[i].Total);
-            per[i] = dTotal > 0 ? Math.Round(Math.Clamp(100.0 * (dTotal - Math.Min(dIdle, dTotal)) / dTotal, 0, 100), 1) : 0;
-            idle += Math.Min(dIdle, dTotal);
-            total += dTotal;
-        }
-
-        var all = total > 0 ? Math.Round(100.0 * (total - idle) / total, 1) : 0;
-        return new CpuLoad(all, per);
+        return new CpuLoad(total > 0 ? Math.Round(100.0 * (total - idle) / total, 1) : 0, per);
     }
 }
 
-/// <summary>Processor times from <c>NtQuerySystemInformation(SystemProcessorPerformanceInformation)</c>.</summary>
+/// <summary>
+/// Processor times from <c>NtQuerySystemInformationEx(SystemProcessorPerformanceInformation)</c>, one processor group
+/// at a time (the plain call only returns the calling thread's group).
+/// </summary>
 [SupportedOSPlatform("windows")]
 internal static partial class WindowsCpuTimes
 {
@@ -122,31 +127,45 @@ internal static partial class WindowsCpuTimes
     /// <summary>SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION: Idle, Kernel (idle included), User, Dpc, Interrupt (8 each), InterruptCount (4) + padding.</summary>
     private const int EntrySize = 48;
 
-    /// <summary>The processors of the caller's processor group (all of them on PCs with up to 64 logical processors).</summary>
-    public static IReadOnlyList<CpuTimes>? Read()
+    public static IReadOnlyDictionary<int, CpuTimes>? Read()
     {
-        var count = Math.Max(1, Environment.ProcessorCount);
-        var buffer = new byte[EntrySize * count];
-        var status = NtQuerySystemInformation(SystemProcessorPerformanceInformation, buffer, buffer.Length, out var returned);
-        if (status != 0 || returned < EntrySize)
+        var result = new Dictionary<int, CpuTimes>();
+        var groups = GetActiveProcessorGroupCount();
+        for (ushort group = 0; group < groups; group++)
         {
-            return null;
+            var count = (int)GetActiveProcessorCount(group);
+            if (count <= 0)
+            {
+                continue;
+            }
+
+            var buffer = new byte[EntrySize * count];
+            var g = group;
+            if (NtQuerySystemInformationEx(SystemProcessorPerformanceInformation, ref g, sizeof(ushort), buffer, buffer.Length, out var returned) != 0)
+            {
+                return null;
+            }
+
+            for (var i = 0; i < returned / EntrySize; i++)
+            {
+                var idle = BitConverter.ToInt64(buffer, i * EntrySize);
+                var kernel = BitConverter.ToInt64(buffer, (i * EntrySize) + 8);
+                var user = BitConverter.ToInt64(buffer, (i * EntrySize) + 16);
+                result[(group * 64) + i] = new CpuTimes(idle, kernel + user);
+            }
         }
 
-        var list = new CpuTimes[returned / EntrySize];
-        for (var i = 0; i < list.Length; i++)
-        {
-            var idle = BitConverter.ToInt64(buffer, i * EntrySize);
-            var kernel = BitConverter.ToInt64(buffer, (i * EntrySize) + 8);
-            var user = BitConverter.ToInt64(buffer, (i * EntrySize) + 16);
-            list[i] = new CpuTimes(idle, kernel + user);
-        }
-
-        return list;
+        return result.Count > 0 ? result : null;
     }
 
     [LibraryImport("ntdll.dll")]
-    private static partial int NtQuerySystemInformation(int infoClass, [Out] byte[] info, int length, out int returned);
+    private static partial int NtQuerySystemInformationEx(int infoClass, ref ushort input, int inputLength, [Out] byte[] info, int length, out int returned);
+
+    [LibraryImport("kernel32.dll")]
+    private static partial ushort GetActiveProcessorGroupCount();
+
+    [LibraryImport("kernel32.dll")]
+    private static partial uint GetActiveProcessorCount(ushort group);
 }
 
 /// <summary>
@@ -177,7 +196,7 @@ public sealed record LinkStatus(
     int? WifiChannel = null,
     string? WifiPhy = null)
 {
-    /// <summary>"Ethernet Realtek PCIe 2.5GbE 2500 Mbit/s" or "Wi-Fi Intel AX210 ch 36 ax 1201 Mbit/s".</summary>
+    /// <summary>"Ethernet Realtek PCIe 2.5GbE 2500 Mbit/s" or "Wi-Fi Intel AX210 ch 36 ax".</summary>
     public string Describe()
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -190,7 +209,9 @@ public sealed record LinkStatus(
         var wifi = Kind == "wifi"
             ? string.Create(inv, $"{(WifiChannel is int ch ? $" ch {ch}" : "")}{(WifiPhy is { } phy ? $" {phy}" : "")}")
             : "";
-        return string.Create(inv, $"{kind} {Name}{wifi} {Mbps:0} Mbit/s");
+        // A Wi-Fi adapter's speed is its current transmit rate, which changes every few seconds: it is not part of the
+        // line (the recording shows the rate in a column of its own).
+        return Kind == "wifi" ? string.Create(inv, $"{kind} {Name}{wifi}") : string.Create(inv, $"{kind} {Name} {Mbps:0} Mbit/s");
     }
 }
 
@@ -288,16 +309,52 @@ internal static partial class WindowsWlan
     private const int TxRateOffset = RxRateOffset + 4;
 
     /// <summary><paramref name="status"/> with the Wi-Fi values the WLAN service reports for the adapter; unchanged when it reports none.</summary>
+    private static readonly object Gate = new();
+    private static IntPtr _handle;
+
     public static LinkStatus Fill(LinkStatus status, Guid adapter)
     {
-        if (WlanOpenHandle(2, IntPtr.Zero, out _, out var handle) != 0)
+        // One client handle for the service's lifetime, opened on first use and dropped when a query fails (the WLAN
+        // service restarted). A host without the WLAN service (wlanapi.dll missing) has no Wi-Fi values.
+        lock (Gate)
         {
-            return status;
-        }
+            try
+            {
+                if (_handle == IntPtr.Zero && WlanOpenHandle(2, IntPtr.Zero, out _, out _handle) != 0)
+                {
+                    _handle = IntPtr.Zero;
+                    return status;
+                }
 
-        try
+                var filled = FillWith(_handle, status, adapter, out var failed);
+                if (failed)
+                {
+                    _ = WlanCloseHandle(_handle, IntPtr.Zero);
+                    _handle = IntPtr.Zero;
+                }
+
+                return filled;
+            }
+            catch (Exception ex) when (ex is DllNotFoundException or EntryPointNotFoundException)
+            {
+                return status;
+            }
+        }
+    }
+
+    private static LinkStatus FillWith(IntPtr handle, LinkStatus status, Guid adapter, out bool failed)
+    {
+        failed = false;
         {
-            if (Query(handle, adapter, OpcodeCurrentConnection) is { } conn && conn.Length >= TxRateOffset + 4)
+            var conn = Query(handle, adapter, OpcodeCurrentConnection);
+            if (conn is null)
+            {
+                // Not connected, or the handle went stale: open a new one next time.
+                failed = true;
+                return status;
+            }
+
+            if (conn.Length >= TxRateOffset + 4)
             {
                 var phy = BitConverter.ToInt32(conn, PhyTypeOffset) switch
                 {
@@ -331,10 +388,6 @@ internal static partial class WindowsWlan
             }
 
             return status;
-        }
-        finally
-        {
-            _ = WlanCloseHandle(handle, IntPtr.Zero);
         }
     }
 

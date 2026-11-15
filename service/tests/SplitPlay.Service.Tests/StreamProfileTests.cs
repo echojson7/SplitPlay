@@ -149,31 +149,37 @@ public sealed class StreamProfileTests
     [Fact]
     public void Cpu_load_comes_from_the_processor_time_deltas()
     {
-        var before = new CpuTimes[] { new(100, 200), new(50, 100), new(0, 0) };
-        var after = new CpuTimes[] { new(150, 300), new(50, 200), new(0, 0) };
+        var before = new Dictionary<int, CpuTimes> { [0] = new(100, 200), [1] = new(50, 100), [64] = new(0, 0) };
+        var after = new Dictionary<int, CpuTimes> { [0] = new(150, 300), [1] = new(50, 200), [64] = new(0, 0) };
         var load = CpuLoadSampler.Load(before, after)!;
-        Assert.Equal([50.0, 100.0, 0.0], load.PerCpu);
+        Assert.Equal(50.0, load.PerCpu[0]);
+        Assert.Equal(100.0, load.PerCpu[1]);
+        Assert.Equal(0.0, load.PerCpu[64]);
         Assert.Equal(75.0, load.TotalPercent);
         Assert.Equal(100.0, load.MaxOf(null));
-        Assert.Equal(50.0, load.MaxOf([0, 2, 9]));
+        // Processors are keyed group * 64 + number, as the desk core plan numbers them.
+        Assert.Equal(50.0, load.MaxOf([0, 64, 9]));
         Assert.Null(load.MaxOf([9]));
-        Assert.Null(CpuLoadSampler.Load(before, after[..2]));
+        Assert.Null(CpuLoadSampler.Load(before, new Dictionary<int, CpuTimes> { [5] = new(1, 2) }));
 
         var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
-        var reads = new Queue<IReadOnlyList<CpuTimes>?>([before, after]);
+        var reads = new Queue<IReadOnlyDictionary<int, CpuTimes>?>([before, after, before, after]);
         var sampler = new CpuLoadSampler(() => reads.Dequeue(), time);
-        Assert.Null(sampler.Current());
-        // Asked again within the interval: the previous result, no new read.
-        Assert.Null(sampler.Current());
+        Assert.Null(sampler.Sample());
         time.Advance(TimeSpan.FromSeconds(1));
-        Assert.Equal(75.0, sampler.Current()!.TotalPercent);
+        Assert.Equal(75.0, sampler.Sample()!.TotalPercent);
+        // Long after the previous read (between two recordings): a new baseline, not an average over the gap.
+        time.Advance(TimeSpan.FromMinutes(30));
+        Assert.Null(sampler.Sample());
+        time.Advance(TimeSpan.FromSeconds(1));
+        Assert.NotNull(sampler.Sample());
     }
 
     [Fact]
     public void A_link_describes_itself_in_one_line()
     {
         Assert.Equal("Ethernet Realtek 2500 Mbit/s", new LinkStatus("Realtek", "ethernet", 2500, 0, 0).Describe());
-        Assert.Equal("Wi-Fi Intel AX210 ch 36 ax 1201 Mbit/s",
+        Assert.Equal("Wi-Fi Intel AX210 ch 36 ax",
             new LinkStatus("Intel AX210", "wifi", 1201, 0, 0, 80, -55, 1201, 960, 36, "ax").Describe());
     }
 

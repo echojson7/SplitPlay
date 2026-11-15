@@ -212,6 +212,8 @@ export interface DeskMetrics {
   keyFrames?: number | null
   keyFrameKbMax?: number | null
   repeatedFrames?: number | null
+  /** Frames with new content per second (the fastest stream). */
+  newFps?: number | null
 }
 
 /** The Moonlight stream a desk is serving (`desk.stream`): who is connected and what it asked for. */

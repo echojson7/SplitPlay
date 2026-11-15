@@ -565,6 +565,9 @@ internal sealed class DeskRuntime
                 case "repeated_frames":
                     dto.RepeatedFrames = number;
                     break;
+                case "new_fps":
+                    dto.NewFps = number;
+                    break;
                 case "encoder_kbps":
                     // null: no stream, or an encoder that cannot change its bitrate live.
                     dto.EncoderKbps = number;

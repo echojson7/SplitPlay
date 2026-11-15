@@ -151,6 +151,9 @@ public sealed class DeskMetricsDto
     /// <summary>Frames sent without new content in the interval (the idle rate on a static picture).</summary>
     public double? RepeatedFrames { get; set; }
 
+    /// <summary>Frames with new content per second (the fastest stream); null from an older worker.</summary>
+    public double? NewFps { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
 }

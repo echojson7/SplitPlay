@@ -108,6 +108,7 @@ CloseApplications=yes
 RestartApplications=no
 UninstallDisplayName=SplitPlay
 UninstallDisplayIcon={app}\tray\SplitPlay.Tray.exe
+SetupIconFile=..\service\assets\splitplay.ico
 SetupLogging=yes
 ChangesEnvironment=no
 
@@ -206,6 +207,8 @@ Source: "..\NOTICE.md"; DestDir: "{app}"; Components: core; Flags: ignoreversion
 
 [INI]
 Filename: "{group}\{cm:WebUiShortcut}.url"; Section: "InternetShortcut"; Key: "URL"; String: "http://127.0.0.1:{#WebPort}/"
+Filename: "{group}\{cm:WebUiShortcut}.url"; Section: "InternetShortcut"; Key: "IconFile"; String: "{app}\tray\SplitPlay.Tray.exe"
+Filename: "{group}\{cm:WebUiShortcut}.url"; Section: "InternetShortcut"; Key: "IconIndex"; String: "0"
 
 [Icons]
 Name: "{group}\SplitPlay"; Filename: "{app}\tray\SplitPlay.Tray.exe"; WorkingDir: "{app}\tray"

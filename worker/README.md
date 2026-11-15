@@ -55,6 +55,7 @@ Each patch is small, does one thing and explains itself in its commit message:
 | `0026` stream health | `burst_loss_pct` only counts FEC blocks that lost at least as many packets as the minimum parity every block gets (Moonlight's `minRequiredFecPackets`, 2), so one lost packet in a small frame no longer pushes adaptive FEC to 30 %; heartbeats gain `idr_requests` (key frames the client asked for after its first 3 s: decoder overflow, loss RFI could not repair, decoder re-created) and `frame_gap_ms_max` (longest pause between frames sent) |
 | `0027` FEC need from real frames | blocks of fewer than 10 data shards (small frames) no longer count towards `burst_loss_pct`: a share cannot be tuned to them without sending nearly 50 % parity with every frame, which is what a Wi-Fi link with a few lost packets now and then got |
 | `0028` stage times | every packet carries when the encoder got the frame and when its bitstream was ready; heartbeats gain p50/p99 of `capture_ms` (present to encode start), `encoder_ms`, `queue_ms`, `send_ms` and `sent_ms` (present to last packet sent, with `sent_ms_max`), and `frame_kb_avg`/`frame_kb_max`, `key_frames`/`key_frame_kb_max`, `repeated_frames`, `new_fps` |
+| `0029` stream fps cap | the Profile's `fps` caps the frame rate of the next stream (Moonlight offers its display's rate, e.g. 180 on a laptop, while the desk's games are limited to the profile's); the stream object reports the capped rate as `fps_requested` and the client's ask as `fps_client` |
 
 Patch numbers 0018–0024 are reserved per Stage 4 PR (docs/ARCHITECTURE.md §10); `export-patches.sh` numbers files in queue order, so rename them back after an export.
 
@@ -244,7 +245,7 @@ Control IPC behaviour (protocol 1):
 
 ### Stream profile (patch 0013)
 
-The worker applies four fields of the Profile object ([`ipc.md`](../docs/contracts/ipc.md)) from `welcome` and every
+The worker applies these fields of the Profile object ([`ipc.md`](../docs/contracts/ipc.md)) from `welcome` and every
 `set_profile`, all or nothing: an absent field keeps its value, `null` restores the default, a value of the wrong
 type or out of range rejects `set_profile` with `bad_request`.
 
@@ -255,6 +256,7 @@ type or out of range rejects `set_profile` with `bad_request`.
 | `pacing_mbps` | 1-100000 | fixed 80 % of 1 Gbit/s (`ratecontrol_packets_in_1ms`, stream.cpp) | next frame |
 | `dpb_frames` | 1-16 (AV1 at most 8), 0 = codec default | 5 (H.264, HEVC) and 8 (AV1) reference frames | next stream (or encoder reinit) |
 | `bitrate_cap_kbps` (patch 0025) | 0-1000000, 0 = no cap | the client's bitrate for the whole stream | next frame (native NVENC only) |
+| `fps` (patch 0029) | 1-1000 | the client's maxFPS, when it asks for more | next stream |
 
 `dpb_frames` only applies when the client leaves the reference frame count to the host, which Moonlight does for
 decoders that support reference frame invalidation (`maxNumReferenceFrames=0`); other decoders keep one reference.
@@ -265,7 +267,7 @@ level 5.x: 5; HEVC 4K at level 5.x and 1080p at 4.1: 6) make NVENC signal a high
 refuse, and every reference costs a reconstructed surface of VRAM (about 200 MB per desk at 4K with 16). If
 `nvEncInitializeEncoder` refuses the DPB size the encoder is created again with the codec default (warning in the
 log); the encoder line in the log shows `dpb=N`. The profile wins over `fec_percentage` and `minimum_fps_target` passed as
-`name=value`. `fps`, size, bitrate and codec stay Moonlight's choice; `gpu_priority`, `gpu_luid` and `cpu_set` are
+`name=value`. Size, bitrate and codec stay Moonlight's choice (`fps` only as long as it is below the profile's); `gpu_priority`, `gpu_luid` and `cpu_set` are
 not applied yet.
 
 ### Loss telemetry and live bitrate (patches 0023, 0025)

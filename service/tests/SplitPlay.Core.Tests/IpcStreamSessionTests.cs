@@ -36,6 +36,17 @@ public sealed class IpcStreamSessionTests
     }
 
     [Fact]
+    public void A_stream_capped_at_the_profile_fps_carries_the_clients_ask()
+    {
+        using var capped = JsonDocument.Parse("""{"id":1,"address":"192.168.1.106","fps_requested":144,"fps_client":180}""");
+        var session = IpcStreamSession.FromJson(capped.RootElement)!;
+        Assert.Equal((144, 180), (session.FpsRequested, session.FpsClient));
+
+        using var free = JsonDocument.Parse("""{"id":2,"address":"192.168.1.106","fps_requested":120,"fps_client":null}""");
+        Assert.Null(IpcStreamSession.FromJson(free.RootElement)!.FpsClient);
+    }
+
+    [Fact]
     public void A_heartbeat_without_sessions_has_none()
     {
         var heartbeat = Assert.IsType<HeartbeatMessage>(IpcCodec.Decode("""{"type":"heartbeat","seq":1,"state":"idle","metrics":{"clients":0}}"""));

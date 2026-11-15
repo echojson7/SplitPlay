@@ -27,7 +27,11 @@ public sealed record IpcStreamSession
 
     public int Height { get; init; }
 
+    /// <summary>The stream's frame rate: what the client asked for, at most the desk profile's fps (worker patch 0029).</summary>
     public int FpsRequested { get; init; }
+
+    /// <summary>What the client asked for when the desk profile's fps capped the stream (patch 0029); null otherwise.</summary>
+    public int? FpsClient { get; init; }
 
     /// <summary><c>h264</c>, <c>hevc</c> or <c>av1</c>.</summary>
     public string? Codec { get; init; }
@@ -79,6 +83,7 @@ public sealed record IpcStreamSession
             Width = Int(e, "width"),
             Height = Int(e, "height"),
             FpsRequested = Int(e, "fps_requested"),
+            FpsClient = Int(e, "fps_client") is > 0 and var asked ? asked : null,
             Codec = String(e, "codec"),
             BitrateKbpsRequested = Int(e, "bitrate_kbps_requested"),
             Hdr = e.TryGetProperty("hdr", out var hdr) && hdr.ValueKind == JsonValueKind.True,

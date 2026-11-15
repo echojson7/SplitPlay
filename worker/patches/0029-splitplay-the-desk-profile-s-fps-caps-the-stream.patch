@@ -1,0 +1,163 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 17:00:00 +0000
+Subject: [PATCH] splitplay: the desk profile's fps caps the stream
+
+Moonlight offers the client display's rate: a 180 Hz laptop streamed a
+desk at 180 fps while the desk profile (and the game FPS limits the
+service sets from it) said 144. The encoder, the composition rate (Auto
+follows the fastest stream) and the Wi-Fi link carried a quarter more
+frames, mostly repeats.
+
+The Profile's `fps` (sent with every welcome and set_profile) now caps
+the frame rate of the next stream: RTSP takes min(client's maxFPS,
+profile fps) and drops the client's display rate (framerateX100), which
+no longer matches. The stream object reports the capped rate as
+fps_requested and what the client asked for as fps_client (null when
+not capped). A profile without fps keeps the client's rate.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm5JX5ZLQfFmc8j2sUj
+
+diff --git a/src/rtsp.cpp b/src/rtsp.cpp
+index f413cbe372ac4f80d3c6502e63b5089efa7834d3..7da6cb3d784461af043b94c79747ce5bf821434f 100644
+--- a/src/rtsp.cpp
++++ b/src/rtsp.cpp
+@@ -1194,6 +1194,13 @@ namespace rtsp_stream {
+           config.monitor.framerateX100 = 0;
+         }
+       }
++      // SplitPlay: the desk profile's fps caps the stream. The client's display rate (framerateX100) no longer matches.
++      if (const int sp_fps = splitplay::profile::stream_fps(config.monitor.framerate); sp_fps != config.monitor.framerate) {
++        BOOST_LOG(info) << "SplitPlay: the client asked for "sv << config.monitor.framerate << " fps, the desk profile streams at most "sv << sp_fps;
++        config.monitor.sp_fps_client = config.monitor.framerate;
++        config.monitor.framerate = sp_fps;
++        config.monitor.framerateX100 = 0;
++      }
+       config.monitor.bitrate = (int) util::from_view(args.at("x-nv-vqos[0].bw.maximumBitrateKbps"sv));
+       config.monitor.slicesPerFrame = (int) util::from_view(args.at("x-nv-video[0].videoEncoderSlicesPerFrame"sv));
+       config.monitor.numRefFrames = (int) util::from_view(args.at("x-nv-video[0].maxNumReferenceFrames"sv));
+diff --git a/src/splitplay/control_client.cpp b/src/splitplay/control_client.cpp
+index f3618be4510d80b1924db89252aa77a8d0c61f56..d963a78457c40bbd906c8422924e6b051530616b 100644
+--- a/src/splitplay/control_client.cpp
++++ b/src/splitplay/control_client.cpp
+@@ -108,6 +108,7 @@ namespace splitplay::control {
+       {"pacing_mbps", 1, 100000, &splitplay::profile::set_pacing_mbps, true},
+       {"dpb_frames", 0, 16, &splitplay::profile::set_dpb_frames, false},
+       {"bitrate_cap_kbps", 0, 1000000, &splitplay::profile::set_bitrate_cap_kbps, true},
++      {"fps", 1, 1000, &splitplay::profile::set_stream_fps, false},
+     };
+ 
+     /// The one string field the worker applies: `slot` (default) or `arrival`, live.
+diff --git a/src/splitplay/live_stats.cpp b/src/splitplay/live_stats.cpp
+index b15a687a44d606df5039ec7111a9b938f1e2d9a0..e1c2682136eb9a1920fd9fd91ff56e6172098cec 100644
+--- a/src/splitplay/live_stats.cpp
++++ b/src/splitplay/live_stats.cpp
+@@ -182,6 +182,7 @@ namespace splitplay::live_stats {
+         {"width", info.width},
+         {"height", info.height},
+         {"fps_requested", info.fps_requested},
++        {"fps_client", info.fps_client ? json(*info.fps_client) : json(nullptr)},
+         {"codec", info.codec},
+         {"bitrate_kbps_requested", info.bitrate_kbps_requested},
+         {"hdr", info.hdr},
+diff --git a/src/splitplay/live_stats.h b/src/splitplay/live_stats.h
+index 0efdca58ba5ddab8609bb0b510d7797ba9348e98..7d683cc51976fe95c4f77925615e581ed3590360 100644
+--- a/src/splitplay/live_stats.h
++++ b/src/splitplay/live_stats.h
+@@ -41,7 +41,8 @@ namespace splitplay::live_stats {
+     std::string address;  ///< Client IP address.
+     int width = 0;  ///< Requested width in pixels.
+     int height = 0;  ///< Requested height in pixels.
+-    int fps_requested = 0;  ///< Requested frame rate.
++    int fps_requested = 0;  ///< The stream's frame rate: what the client asked for, at most the desk profile's fps.
++    std::optional<int> fps_client;  ///< What the client asked for when the profile's fps capped it.
+     std::string codec;  ///< `h264`, `hevc` or `av1`.
+     int bitrate_kbps_requested = 0;  ///< Bitrate the client asked for (its configured bitrate when it sends one).
+     bool hdr = false;  ///< The client asked for a 10-bit HDR stream.
+diff --git a/src/splitplay/profile.cpp b/src/splitplay/profile.cpp
+index 9410e94bf0989078ccd5379203b302d0c27a5e1a..eba4172c91a22a30692b4421c01c23ccc1768f27 100644
+--- a/src/splitplay/profile.cpp
++++ b/src/splitplay/profile.cpp
+@@ -17,6 +17,7 @@ namespace splitplay::profile {
+ 
+     std::atomic_int fec_percent {unset};
+     std::atomic_int min_fps {unset};
++    std::atomic_int max_fps {unset};
+     std::atomic_int dpb {unset};
+     std::atomic_int pacing_mbps {unset};
+     std::atomic<capture_mode_e> mode {capture_mode_e::slot};
+@@ -39,6 +40,15 @@ namespace splitplay::profile {
+     store(min_fps, value);
+   }
+ 
++  void set_stream_fps(std::optional<int> value) {
++    store(max_fps, value);
++  }
++
++  int stream_fps(int requested) {
++    const int cap = max_fps.load(std::memory_order_relaxed);
++    return cap > 0 && requested > cap ? cap : requested;
++  }
++
+   void set_dpb_frames(std::optional<int> value) {
+     store(dpb, value);
+   }
+diff --git a/src/splitplay/profile.h b/src/splitplay/profile.h
+index a5ee4a4fa1974e372ef6872c0dccc99afc4f2465..d64c11644bc5fcea497dd057bd9d6d432b013e98 100644
+--- a/src/splitplay/profile.h
++++ b/src/splitplay/profile.h
+@@ -14,6 +14,7 @@
+  * | `dpb_frames`  | NVENC encoder creation                       | next stream (or encoder reinit) |
+  * | `capture_mode`| DDA capture loop, every frame                | next frame                    |
+  * | `bitrate_cap_kbps` | NVENC encode loop, every frame          | next frame (native NVENC only) |
++ * | `fps`         | RTSP launch                                  | next stream                   |
+  */
+ // SPDX-License-Identifier: GPL-3.0-only
+ #pragma once
+@@ -39,6 +40,19 @@ namespace splitplay::profile {
+    */
+   void set_min_fps(std::optional<int> value);
+ 
++  /**
++   * @brief The desk profile's frame rate, 1-1000: a stream never runs faster, whatever the client asks for (Moonlight
++   *        offers its display's rate, 180 Hz on a laptop, while the desk's games are limited to the profile's).
++   *        std::nullopt: the client's rate (upstream).
++   * @param value New value or std::nullopt.
++   */
++  void set_stream_fps(std::optional<int> value);
++
++  /**
++   * @brief The frame rate a stream the client asked `requested` for runs at: `requested`, at most the profile's fps.
++   */
++  int stream_fps(int requested);
++
+   /**
+    * @brief NVENC reference frames kept for reference frame invalidation, 1-16 (AV1 at most 8).
+    * 0 or std::nullopt: upstream's 5 (H.264, HEVC) and 8 (AV1). Opt-in: more references than the level allows for
+diff --git a/src/stream.cpp b/src/stream.cpp
+index 13ad7e1f1254b578d760629ee6a1558dec0b9245..987b85444d0622743ddb3fbe0de64ce6e4e86d4b 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -2394,6 +2394,9 @@ namespace stream {
+         info.width = config.monitor.width;
+         info.height = config.monitor.height;
+         info.fps_requested = config.monitor.framerate;
++        if (config.monitor.sp_fps_client > 0) {
++          info.fps_client = config.monitor.sp_fps_client;
++        }
+         info.codec = splitplay::live_stats::codec_name(config.monitor.videoFormat);
+         info.bitrate_kbps_requested = config.clientBitrateKbps;
+         info.hdr = config.monitor.dynamicRange > 0;
+diff --git a/src/video.h b/src/video.h
+index e4c5540d2d7e10e2559cab029b47507ec1ac1dff..05c697682bd9867b86a423c564a459378fbef366 100644
+--- a/src/video.h
++++ b/src/video.h
+@@ -41,6 +41,7 @@ namespace video {
+     int dynamicRange;  ///< Encoding color depth: 0 = 8-bit, 1 = 10-bit.
+     int chromaSamplingType;  ///< Chroma sampling type: 0 = 4:2:0, 1 = 4:4:4.
+     int enableIntraRefresh;  ///< Intra refresh setting: 0 = disabled, 1 = enabled.
++    int sp_fps_client = 0;  ///< SplitPlay: the rate the client asked for when the profile's fps capped `framerate`, else 0.
+   };
+ 
+   namespace amf {

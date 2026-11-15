@@ -530,7 +530,7 @@ public sealed class DeskSupervisor : IHostedService
     {
         var inv = System.Globalization.CultureInfo.InvariantCulture;
         var who = s.Client is { Length: > 0 } c ? $"{c} {s.Address}" : s.Address ?? "?";
-        return string.Create(inv, $"{who} {s.Width}x{s.Height}@{s.FpsRequested} {s.Codec} {s.BitrateKbpsRequested / 1000} Mbit/s{(s.Hdr ? " HDR" : "")}{(s.FecFeedback ? "" : " (no FEC reports)")}");
+        return string.Create(inv, $"{who} {s.Width}x{s.Height}@{s.FpsRequested}{(s.FpsClient is int asked ? $" (client asked {asked})" : "")} {s.Codec} {s.BitrateKbpsRequested / 1000} Mbit/s{(s.Hdr ? " HDR" : "")}{(s.FecFeedback ? "" : " (no FEC reports)")}");
     }
 
     // ------------------------------------------------------------------ composition interval

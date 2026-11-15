@@ -137,7 +137,8 @@ Stream object (`sessions[]` and the `data` of the client events):
 | `id` | RTSP launch-session id, unique while the worker runs |
 | `client`, `client_uuid` | name and uuid of the paired client (as `list_clients` reports them); `null` when unknown |
 | `address` | client IP address (IPv4-mapped IPv6 addresses are reported as plain IPv4) |
-| `width`, `height`, `fps_requested` | the mode the client launched with |
+| `width`, `height`, `fps_requested` | the mode the client launched with; since patch 0029 `fps_requested` is at most the profile's `fps` |
+| `fps_client` | the frame rate the client asked for when the profile's `fps` capped the stream, `null` otherwise (patch 0029) |
 | `codec` | `h264`, `hevc` or `av1` |
 | `bitrate_kbps_requested` | the client's bitrate setting |
 | `hdr` | the client asked for a 10-bit HDR stream |
@@ -270,6 +271,7 @@ What the worker applies (worker/README.md, *Stream profile*), from `welcome` and
 
 | Field | Range | Takes effect |
 |---|---|---|
+| `fps` | 1–1000: the most frames per second a stream runs at, whatever the client asks for (patch 0029) | next stream |
 | `fec_percent` | 0–255 | next frame (the encoder's bitrate allowance for FEC: next stream) |
 | `min_fps` | 1–1000, capped at the stream's fps | next frame |
 | `pacing_mbps` | 1–100000, send pacing of one stream | next frame |
@@ -278,13 +280,13 @@ What the worker applies (worker/README.md, *Stream profile*), from `welcome` and
 | `input` | `"windows"` (SendInput in the session) or `"rdp"` (keyboard and mouse into the seat's input ring, sent as RDP input PDUs; see *RDP input* below) | next event |
 | `bitrate_cap_kbps` | 0–1000000, 0 = no cap: the most video traffic one stream may send, FEC included; the encoder bitrate becomes `min(stream's own, min(stream's own traffic at its starting FEC share, cap) × 100 / (100 + fec_percent))`, at least 500, so a higher FEC share never adds traffic either (patch 0025). The service splits the desk's cap between its streams | next frame, native NVENC only |
 
-`null` restores the worker's default (Sunshine's: FEC 20 %, half the stream's fps, 800 Mbit/s, DPB 5 or 8). A value
+`null` restores the worker's default (Sunshine's: FEC 20 %, half the stream's fps, 800 Mbit/s, DPB 5 or 8; `fps`: the client's rate). A value
 of the wrong type or out of range fails `set_profile` with `bad_request` and nothing is applied. The other fields
-are accepted and ignored by the worker (the client picks mode, bitrate and codec). The service always sends these
-six fields, with its defaults where the desk sets none (config.md; `capture_mode` `slot`, `input` `windows`). With «Адаптивный поток»
+are accepted and ignored by the worker (the client picks size, bitrate and codec). The service always sends these
+fields and `fps` (null included), with its defaults where the desk sets none (config.md; `capture_mode` `slot`, `input` `windows`). With «Адаптивный поток»
 (config.md, `profile.adaptiveStream`) it sends a new `set_profile` whenever the adaptation changes `fec_percent` or
 `bitrate_cap_kbps`, at most once per heartbeat; otherwise `bitrate_cap_kbps` is 0. The answer lists what happened:
 
 ```json
-{"type":"result","id":5,"ok":true,"data":{"applied":["fec_percent","min_fps","pacing_mbps"],"next_stream":["dpb_frames"],"not_applied":["fps","width","height","bitrate_kbps","codec","gpu_priority"]}}
+{"type":"result","id":5,"ok":true,"data":{"applied":["fec_percent","min_fps","pacing_mbps"],"next_stream":["dpb_frames","fps"],"not_applied":["width","height","bitrate_kbps","codec","gpu_priority"]}}
 ```

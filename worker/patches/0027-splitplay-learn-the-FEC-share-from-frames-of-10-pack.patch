@@ -1,0 +1,68 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 10:00:00 +0000
+Subject: [PATCH] splitplay: learn the FEC share from frames of 10 packets or
+ more
+
+A first stream recording on the owner's Wi-Fi laptop showed adaptive FEC
+at 44-50 % for minutes with packet loss averaging 0.09 % (0.6 % at
+worst). The need came from small frames: a block of 5 data shards that
+lost its 2 packets reads as a 40 % need, so every frame, the 20-30
+packet ones included, was sent with nearly half its size again in
+parity. That airtime itself loads the Wi-Fi link, and blocks still
+failed (FEC failed 6 in 8 minutes), since bursts that hit small frames
+are beyond any share that can be sent on every frame.
+
+Blocks of fewer than 10 data shards no longer count towards
+burst_loss_pct. Their parity is the client's minimum for any share up to
+20 %, they are cheap to lose (reference frame invalidation repairs
+them), and the share is learned from the frames that carry the picture.
+Packet loss and the recovered/failed counts are unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm2JfgMZHfj9R2WKefE
+
+diff --git a/src/splitplay/live_stats.cpp b/src/splitplay/live_stats.cpp
+index 8ad5b922f390c9e3393c212efb4e61a3ca553d56..d97981eeda85cc0d19724c242d4338d76241ad39 100644
+--- a/src/splitplay/live_stats.cpp
++++ b/src/splitplay/live_stats.cpp
+@@ -88,6 +88,9 @@ namespace splitplay::live_stats {
+     std::uint64_t seen_composed = 0;
+     std::chrono::steady_clock::time_point seen_composed_at = std::chrono::steady_clock::now();
+ 
++    /// FEC blocks with fewer data shards do not count towards the FEC need (`burst_loss_pct`).
++    constexpr std::uint16_t min_need_data_packets = 10;
++
+     /// Key frame requests this long after a stream is reported are still the client's start-up.
+     constexpr std::int64_t idr_startup_ns = 3'000'000'000;
+ 
+@@ -362,6 +365,15 @@ namespace splitplay::live_stats {
+       return;
+     }
+ 
++    // A small block (a frame of a few packets: little changed on screen) says nothing about the share either. Its
++    // parity is the minimum for any share up to 20 %, and repairing two lost packets out of five would take a 40 %
++    // share on every frame, the big ones included: on a Wi-Fi link that drops a couple of packets now and then, that
++    // pinned FEC near 50 % and spent a third of the airtime on parity. Small frames are cheap to lose (reference frame
++    // invalidation repairs them); the share is learned from the frames that carry the picture.
++    if (status.data_packets < min_need_data_packets) {
++      return;
++    }
++
+     // The FEC share this block would have needed: lost packets per data shard (at most 65.535 times the data).
+     const auto permille = static_cast<std::uint32_t>(std::min<std::uint64_t>(std::uint64_t {missing} * 1000 / status.data_packets, 65535));
+     auto worst = stats->burst_permille.load(std::memory_order_relaxed);
+diff --git a/src/splitplay/live_stats.h b/src/splitplay/live_stats.h
+index f90e25fb77beb8a57a4053b2400aa2fc2c0d79ef..7a32e145721e742f4a1f2b9d99c7a1d4100a825a 100644
+--- a/src/splitplay/live_stats.h
++++ b/src/splitplay/live_stats.h
+@@ -130,7 +130,8 @@ namespace splitplay::live_stats {
+    *
+    *        The block's FEC need (the heartbeat's `burst_loss_pct`) is only taken from blocks that lost at least as
+    *        many packets as the minimum parity every block gets anyway (`session_info_t::min_fec_packets`): a small
+-   *        frame that lost one packet out of five needs no FEC share at all, not 20 %.
++   *        frame that lost one packet out of five needs no FEC share at all, not 20 %. Blocks of fewer than 10 data
++   *        shards do not count either: a share cannot be tuned to frames that small without wasting it on all others.
+    */
+   void fec_status(session_stats_t *stats, const fec_status_t &status) noexcept;
+ 

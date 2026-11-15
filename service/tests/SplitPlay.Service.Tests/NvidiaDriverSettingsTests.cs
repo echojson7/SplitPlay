@@ -85,11 +85,11 @@ public sealed class NvidiaDriverSettingsTests
     public void The_NvAPI_structures_have_the_sizes_of_nvapi_h()
     {
         // sizeof()/offsetof() of NVDRS_SETTING_V1, NVDRS_PROFILE_V1 and NVDRS_APPLICATION_V1 from nvapi.h on x64.
-        Assert.Equal(12328, NvApiDrs.SettingSize);
-        Assert.Equal(0x13028u, NvApiDrs.SettingVersion1);
+        Assert.Equal(12320, NvApiDrs.SettingSize);
+        Assert.Equal(0x13020u, NvApiDrs.SettingVersion1);
         Assert.Equal(4100, NvApiDrs.SettingIdOffset);
         Assert.Equal(4108, NvApiDrs.SettingLocationOffset);
-        Assert.Equal(8224, NvApiDrs.SettingCurrentValueOffset);
+        Assert.Equal(8220, NvApiDrs.SettingCurrentValueOffset);
         Assert.Equal(4116, NvApiDrs.ProfileSize);
         Assert.Equal(12296, NvApiDrs.ApplicationSize);
 

@@ -108,6 +108,52 @@ public sealed class DeskMetricsDto
     /// <summary>The longest pause between two video frames sent in the last interval, ms (patch 0026); null when unknown.</summary>
     public double? FrameGapMsMax { get; set; }
 
+    // Where a frame's time goes on the host (worker patch 0028), ms over the last interval; null from an older worker
+    // or in an interval without frames.
+
+    /// <summary>Present to encode start (Desktop Duplication, copy, capture queue), p50.</summary>
+    public double? CaptureMsP50 { get; set; }
+
+    public double? CaptureMsP99 { get; set; }
+
+    /// <summary>Encode start to bitstream ready (colour conversion on the GPU and the encoder), p50.</summary>
+    public double? EncoderMsP50 { get; set; }
+
+    public double? EncoderMsP99 { get; set; }
+
+    /// <summary>Bitstream ready to the sender taking it, p50.</summary>
+    public double? QueueMsP50 { get; set; }
+
+    public double? QueueMsP99 { get; set; }
+
+    /// <summary>Packetising, FEC, encryption and paced sending of a frame, p50.</summary>
+    public double? SendMsP50 { get; set; }
+
+    public double? SendMsP99 { get; set; }
+
+    /// <summary>Present to the last packet sent, p50.</summary>
+    public double? SentMsP50 { get; set; }
+
+    public double? SentMsP99 { get; set; }
+
+    public double? SentMsMax { get; set; }
+
+    /// <summary>Encoded frame size, KiB (average and largest of the interval).</summary>
+    public double? FrameKbAvg { get; set; }
+
+    public double? FrameKbMax { get; set; }
+
+    /// <summary>Key frames sent in the interval.</summary>
+    public double? KeyFrames { get; set; }
+
+    public double? KeyFrameKbMax { get; set; }
+
+    /// <summary>Frames sent without new content in the interval (the idle rate on a static picture).</summary>
+    public double? RepeatedFrames { get; set; }
+
+    /// <summary>Frames with new content per second (the fastest stream); null from an older worker.</summary>
+    public double? NewFps { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
 }

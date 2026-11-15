@@ -121,6 +121,8 @@ public sealed class DeskSupervisor : IHostedService
         _startedAt = time.GetUtcNow();
         _lastCpuAt = _startedAt;
         FindLink = new NetworkLinks(time).Find;
+        ReadCpu = CpuLoadSampler.ForThisHost(time).Sample;
+        ReadLink = LinkStatusReader.Read;
         _lastCpu = Process.GetCurrentProcess().TotalProcessorTime;
 
         foreach (var desk in config.Snapshot().Desks)
@@ -131,6 +133,12 @@ public sealed class DeskSupervisor : IHostedService
 
     /// <summary>The network adapter a client address is reached through (replaced by tests).</summary>
     internal Func<string?, NetworkLink?> FindLink { get; set; }
+
+    /// <summary>CPU load since the previous call, for the stream recording (replaced by tests).</summary>
+    internal Func<CpuLoad?> ReadCpu { get; set; }
+
+    /// <summary>The state of a network adapter by id, for the stream recording (replaced by tests).</summary>
+    internal Func<string, LinkStatus?> ReadLink { get; set; }
 
     /// <summary>Raised (synchronously, possibly under a desk lock) whenever a desk's state or config changes.</summary>
     public event Action<DeskDto>? DeskChanged;
@@ -262,7 +270,88 @@ public sealed class DeskSupervisor : IHostedService
         }
 
         _logger.LogInformation("Stream recording started for {Minutes} min", duration.TotalMinutes);
+        StartHostSampling(recording);
         return RecordingStatus();
+    }
+
+    /// <summary>What <see cref="HostSamplingAsync"/> read last: CPU load and the adapters towards the clients.</summary>
+    private sealed record HostSnapshot(CpuLoad? Cpu, IReadOnlyDictionary<string, LinkStatus> Links);
+
+    private volatile HostSnapshot _hostSnapshot = new(null, new Dictionary<string, LinkStatus>());
+
+    /// <summary>Adapters a streaming desk's client is reached through (ids), for <see cref="HostSamplingAsync"/>.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _recordingLinks = new(StringComparer.OrdinalIgnoreCase);
+
+    private int _hostSampling;
+
+    /// <summary>Starts the once-a-second host read for <paramref name="recording"/>, unless one already runs.</summary>
+    private void StartHostSampling(StreamRecording recording)
+    {
+        if (Interlocked.Exchange(ref _hostSampling, 1) == 1)
+        {
+            return;
+        }
+
+        _ = Task.Run(() => HostSamplingAsync(recording));
+    }
+
+    /// <summary>
+    /// Reads the CPU times, the adapters' counters and the WLAN state once a second while a recording runs, off the
+    /// worker pipes: those calls can stall (the WLAN service, IP Helper), and a heartbeat handler that waits on them
+    /// would look like a hung worker. <see cref="Record"/> only takes the last result.
+    /// </summary>
+    private async Task HostSamplingAsync(StreamRecording recording)
+    {
+        try
+        {
+            while (true)
+            {
+                StreamRecording? current;
+                lock (_recordingGate)
+                {
+                    current = _recording;
+                }
+
+                if (current is null || !current.IsRunning(_time.GetUtcNow()))
+                {
+                    break;
+                }
+
+                var cpu = ReadCpu();
+                var links = new Dictionary<string, LinkStatus>(StringComparer.OrdinalIgnoreCase);
+                foreach (var id in _recordingLinks.Keys)
+                {
+                    if (ReadLink(id) is { } status)
+                    {
+                        links[id] = status;
+                    }
+                }
+
+                _hostSnapshot = new HostSnapshot(cpu, links);
+                await Task.Delay(TimeSpan.FromSeconds(1), _time).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _logger.LogDebug("Stream recording host sampling: {Message}", ex.Message);
+        }
+        finally
+        {
+            _hostSnapshot = new HostSnapshot(null, new Dictionary<string, LinkStatus>());
+            _recordingLinks.Clear();
+            Volatile.Write(ref _hostSampling, 0);
+            // A recording started while this one was stopping gets its own loop.
+            StreamRecording? next;
+            lock (_recordingGate)
+            {
+                next = _recording;
+            }
+
+            if (next is not null && next != recording && next.IsRunning(_time.GetUtcNow()))
+            {
+                StartHostSampling(next);
+            }
+        }
     }
 
     /// <summary>Stops the running recording; its report stays until the next one starts.</summary>
@@ -332,6 +421,37 @@ public sealed class DeskSupervisor : IHostedService
         {
             var usage = _gpuUsage.Current();
             var console = _platform.ConsoleSessionId();
+            var host = _hostSnapshot;
+            var cpu = host.Cpu;
+            // The GPU with the most VRAM: the one the games and encoders share (an integrated GPU has little of its own).
+            var gpu = GpusWithUsage(usage).OrderByDescending(g => g.VramTotalMb ?? -1).FirstOrDefault();
+            IReadOnlyList<int>? deskCpus = null;
+            string? address;
+            lock (rt.Gate)
+            {
+                address = rt.Streams.FirstOrDefault()?.Address;
+            }
+
+            try
+            {
+                deskCpus = CpuPlan().GetValueOrDefault(rt.Id);
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+                // No plan: the desk's busiest processor is the host's.
+            }
+
+            // The adapter lookup reads the system's adapter list (cached for 30 s), outside the desk's gate; its counters
+            // and Wi-Fi state come from the background read, which starts reading an adapter once a desk needs it.
+            RecordingLink? link = null;
+            if (FindLink(address) is { } found)
+            {
+                _recordingLinks.TryAdd(found.Id, 0);
+                if (host.Links.TryGetValue(found.Id, out var status))
+                {
+                    link = new RecordingLink(found.Id, status.Describe(), status.OutDiscards, status.WifiSignalPercent, status.WifiRssiDbm, status.WifiTxMbps);
+                }
+            }
             RecordingSample sample;
             lock (rt.Gate)
             {
@@ -372,6 +492,26 @@ public sealed class DeskSupervisor : IHostedService
                     GpuPercent = session?.GpuPercent,
                     EncoderPercent = session?.EncoderPercent,
                     HostGpuPercent = usage is { Adapters.Count: > 0 } ? usage.Adapters.Values.Max(a => a.UtilizationPercent) : null,
+                    CaptureMsP99 = m.CaptureMsP99,
+                    EncoderMsP99 = m.EncoderMsP99,
+                    QueueMsP99 = m.QueueMsP99,
+                    SendMsP99 = m.SendMsP99,
+                    SentMsP50 = m.SentMsP50,
+                    SentMsP99 = m.SentMsP99,
+                    SentMsMax = m.SentMsMax,
+                    FrameKbAvg = m.FrameKbAvg,
+                    FrameKbMax = m.FrameKbMax,
+                    KeyFrames = m.KeyFrames,
+                    KeyFrameKbMax = m.KeyFrameKbMax,
+                    RepeatedFrames = m.RepeatedFrames,
+                    NewFps = m.NewFps,
+                    DeskVramMb = session?.VramMb,
+                    HostVramUsedMb = gpu?.VramUsedMb,
+                    HostVramTotalMb = gpu?.VramTotalMb,
+                    CpuPercent = cpu?.TotalPercent,
+                    CpuMaxCorePercent = cpu?.MaxOf(null),
+                    DeskCpuMaxPercent = cpu?.MaxOf(deskCpus),
+                    Link = link,
                 };
             }
 

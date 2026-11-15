@@ -1,0 +1,377 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: SplitPlay <splitplay@users.noreply.github.com>
+Date: Sun, 15 Nov 2026 12:00:00 +0000
+Subject: [PATCH] splitplay: where a frame's time goes (stage times, frame
+ sizes)
+
+The stream recording only had encode_ms (present to hand-off), so a slow
+or uneven stream could not be told apart: a busy GPU delaying capture,
+NVENC itself, a full send queue or a large frame paced out slowly all
+looked the same.
+
+Every packet now carries when the encoder was handed the frame and when
+its bitstream was ready (native NVENC and FFmpeg encoders); the video
+broadcast thread notes when it took the packet and when the last packet
+left. Heartbeats (metrics, and each stream in sessions) gain p50/p99 of
+each stage:
+
+- capture_ms: present to encode start (Desktop Duplication, copy,
+  capture queue, colour conversion submit)
+- encoder_ms: encode start to bitstream ready (conversion on the GPU and
+  the encoder; grows when the games keep the GPU busy)
+- queue_ms: bitstream ready to the broadcast thread taking it
+- send_ms: packetising, FEC, encryption and paced sending
+- sent_ms: present to the last packet sent (plus sent_ms_max)
+
+and frame_kb_avg, frame_kb_max, key_frames, key_frame_kb_max and
+repeated_frames (frames sent without new content), new_fps (frames with
+new content per second; in metrics the fastest stream). Stage values are null
+in an interval without samples.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01J21Rm5JX5ZLQfFmc8j2sUj
+
+diff --git a/src/splitplay/live_stats.cpp b/src/splitplay/live_stats.cpp
+index d97981eeda85cc0d19724c242d4338d76241ad39..b15a687a44d606df5039ec7111a9b938f1e2d9a0 100644
+--- a/src/splitplay/live_stats.cpp
++++ b/src/splitplay/live_stats.cpp
+@@ -33,6 +33,43 @@ namespace splitplay::live_stats {
+     constexpr std::size_t max_pending_events = 64;
+   }  // namespace
+ 
++  namespace {
++    /// Stages of frame_timing_t, in the order the heartbeat reports them.
++    enum stage_e : std::size_t {
++      stage_capture,
++      stage_encode,
++      stage_queue,
++      stage_send,
++      stage_total,
++      stage_count,
++    };
++
++    /// Heartbeat key prefix of each stage (`<prefix>_ms_p50`, `<prefix>_ms_p99`).
++    constexpr std::array<const char *, stage_count> stage_keys {"capture", "encoder", "queue", "send", "sent"};
++
++    /// Frame timing of one heartbeat interval (frame_timing()); samples beyond max_samples are dropped.
++    struct timing_window_t {
++      std::array<std::array<std::uint16_t, max_samples>, stage_count> stage {};  ///< 0.1 ms units.
++      std::array<std::size_t, stage_count> count {};
++      std::uint64_t frames = 0;
++      std::uint64_t bytes = 0;
++      std::uint64_t max_bytes = 0;
++      std::uint64_t key_frames = 0;
++      std::uint64_t key_max_bytes = 0;
++      std::uint64_t repeated = 0;
++
++      void add(stage_e s, std::optional<std::uint32_t> us) {
++        if (us && count[s] < max_samples) {
++          stage[s][count[s]++] = static_cast<std::uint16_t>(std::min<std::uint32_t>((*us + 50) / 100, std::numeric_limits<std::uint16_t>::max()));
++        }
++      }
++
++      std::vector<std::uint16_t> samples(stage_e s) const {
++        return {stage[s].begin(), stage[s].begin() + static_cast<std::ptrdiff_t>(count[s])};
++      }
++    };
++  }  // namespace
++
+   class session_stats_t {
+   public:
+     explicit session_stats_t(session_info_t i):
+@@ -59,6 +96,7 @@ namespace splitplay::live_stats {
+     std::mutex samples_mutex;
+     std::array<std::uint16_t, max_samples> samples {};  ///< Capture-to-send latencies, 0.1 ms units.
+     std::size_t sample_count = 0;
++    timing_window_t timing;  ///< Stage times and frame sizes of the interval; guarded by samples_mutex.
+ 
+     // Guarded by state_mutex.
+     bool running = false;  ///< started() was called.
+@@ -165,6 +203,58 @@ namespace splitplay::live_stats {
+       return static_cast<double>(v[rank - 1]) / 10.0;
+     }
+ 
++    /// Frame timing of several streams (the heartbeat's `metrics`): stage samples pooled, sizes summed.
++    struct timing_pool_t {
++      std::array<std::vector<std::uint16_t>, stage_count> stage;
++      std::uint64_t frames = 0;
++      std::uint64_t bytes = 0;
++      std::uint64_t max_bytes = 0;
++      std::uint64_t key_frames = 0;
++      std::uint64_t key_max_bytes = 0;
++      std::uint64_t repeated = 0;
++
++      timing_pool_t() = default;
++
++      explicit timing_pool_t(const timing_window_t &w) {
++        merge(w);
++      }
++
++      void merge(const timing_window_t &w) {
++        for (std::size_t i = 0; i < stage_count; ++i) {
++          const auto more = w.samples(static_cast<stage_e>(i));
++          stage[i].insert(stage[i].end(), more.begin(), more.end());
++        }
++        frames += w.frames;
++        bytes += w.bytes;
++        max_bytes = std::max(max_bytes, w.max_bytes);
++        key_frames += w.key_frames;
++        key_max_bytes = std::max(key_max_bytes, w.key_max_bytes);
++        repeated += w.repeated;
++      }
++    };
++
++    /// Stage percentiles (null without samples) and frame sizes of `pool`, added to a heartbeat object.
++    void add_timing(json &out, timing_pool_t pool) {
++      for (std::size_t i = 0; i < stage_count; ++i) {
++        auto &v = pool.stage[i];
++        const std::string key = stage_keys[i];
++        out[key + "_ms_p50"] = v.empty() ? json(nullptr) : json(percentile_ms(v, 0.50));
++        out[key + "_ms_p99"] = v.empty() ? json(nullptr) : json(percentile_ms(v, 0.99));
++      }
++      // The worst frame of the interval end to end (percentile_ms sorted the samples).
++      const auto &total = pool.stage[stage_total];
++      out["sent_ms_max"] = total.empty() ? json(nullptr) : json(static_cast<double>(total.back()) / 10.0);
++      out["frame_kb_avg"] = pool.frames > 0 ? json(round1(static_cast<double>(pool.bytes) / 1024.0 / static_cast<double>(pool.frames))) : json(nullptr);
++      out["frame_kb_max"] = pool.frames > 0 ? json(round1(static_cast<double>(pool.max_bytes) / 1024.0)) : json(nullptr);
++      out["key_frames"] = pool.key_frames;
++      out["key_frame_kb_max"] = pool.key_frames > 0 ? json(round1(static_cast<double>(pool.key_max_bytes) / 1024.0)) : json(nullptr);
++      out["repeated_frames"] = pool.repeated;
++    }
++
++    void add_timing(json &out, const timing_window_t &w) {
++      add_timing(out, timing_pool_t {w});
++    }
++
+     /// Caller holds state_mutex.
+     void queue_event(const char *name, json data) {
+       if (pending_events.size() >= max_pending_events) {
+@@ -197,6 +287,7 @@ namespace splitplay::live_stats {
+       {
+         std::lock_guard lg {stats->samples_mutex};
+         stats->sample_count = 0;
++        stats->timing = {};
+       }
+       stats->registered = true;
+       registry.push_back(stats);
+@@ -284,6 +375,29 @@ namespace splitplay::live_stats {
+     }
+   }
+ 
++  void frame_timing(session_stats_t *stats, const frame_timing_t &timing) noexcept {
++    if (!stats) {
++      return;
++    }
++    std::lock_guard lg {stats->samples_mutex};
++    auto &w = stats->timing;
++    w.add(stage_capture, timing.capture_us);
++    w.add(stage_encode, timing.encode_us);
++    w.add(stage_queue, timing.queue_us);
++    w.add(stage_send, timing.send_us);
++    w.add(stage_total, timing.total_us);
++    ++w.frames;
++    w.bytes += timing.frame_bytes;
++    w.max_bytes = std::max(w.max_bytes, timing.frame_bytes);
++    if (timing.key_frame) {
++      ++w.key_frames;
++      w.key_max_bytes = std::max(w.key_max_bytes, timing.frame_bytes);
++    }
++    if (timing.repeated) {
++      ++w.repeated;
++    }
++  }
++
+   void frames_lost(session_stats_t *stats, std::int64_t first, std::int64_t last) noexcept {
+     // Frame indices are 32-bit on the wire; anything else is a bogus report.
+     constexpr std::int64_t max_index = std::numeric_limits<std::uint32_t>::max();
+@@ -396,7 +510,9 @@ namespace splitplay::live_stats {
+ 
+     std::vector<std::pair<std::string, json>> events;
+     std::vector<std::uint16_t> pooled;
++    timing_pool_t pooled_timing;
+     double max_fps = 0;
++    double max_new_fps = 0;
+     std::uint64_t total_kbps = 0;
+     std::uint64_t total_frames = 0;
+     std::uint64_t total_lost = 0;
+@@ -420,10 +536,13 @@ namespace splitplay::live_stats {
+       const auto now = std::chrono::steady_clock::now();
+       for (const auto &s : registry) {
+         std::vector<std::uint16_t> mine;
++        timing_window_t timing;
+         {
+           std::lock_guard slg {s->samples_mutex};
+           mine.assign(s->samples.begin(), s->samples.begin() + static_cast<std::ptrdiff_t>(s->sample_count));
+           s->sample_count = 0;
++          timing = s->timing;
++          s->timing = {};
+         }
+ 
+         const auto frames = s->frames.load(std::memory_order_relaxed);
+@@ -473,6 +592,12 @@ namespace splitplay::live_stats {
+         pooled.insert(pooled.end(), mine.begin(), mine.end());
+         entry["encode_ms_p50"] = percentile_ms(mine, 0.50);
+         entry["encode_ms_p99"] = percentile_ms(mine, 0.99);
++        add_timing(entry, timing);
++        // Frames that carried new content per second (the rest repeated the previous picture).
++        const double new_fps = seconds > 0.05 ? static_cast<double>(timing.frames - std::min(timing.repeated, timing.frames)) / seconds : 0;
++        entry["new_fps"] = round1(new_fps);
++        max_new_fps = std::max(max_new_fps, new_fps);
++        pooled_timing.merge(timing);
+         sessions.push_back(std::move(entry));
+ 
+         max_fps = std::max(max_fps, fps);
+@@ -519,6 +644,8 @@ namespace splitplay::live_stats {
+       {"frame_gap_ms_max", round1(max_gap_us / 1000.0)},
+       {"encoder_kbps", sessions.empty() || splitplay::profile::encoder_kbps() == 0 ? json(nullptr) : json(splitplay::profile::encoder_kbps())},
+     };
++    add_timing(metrics, pooled_timing);
++    metrics["new_fps"] = round1(max_new_fps);
+ 
+     // Pipe I/O happens here, on the heartbeat thread, outside state_mutex: events first, then the heartbeat.
+     for (auto &[name, data] : events) {
+diff --git a/src/splitplay/live_stats.h b/src/splitplay/live_stats.h
+index 7a32e145721e742f4a1f2b9d99c7a1d4100a825a..0efdca58ba5ddab8609bb0b510d7797ba9348e98 100644
+--- a/src/splitplay/live_stats.h
++++ b/src/splitplay/live_stats.h
+@@ -99,6 +99,28 @@ namespace splitplay::live_stats {
+    */
+   void frame_sent(session_stats_t *stats, std::uint64_t wire_bytes, std::uint64_t packets, std::optional<std::uint16_t> latency_100us) noexcept;
+ 
++  /**
++   * @brief Where one frame's time went on the host, from the moment the game's picture was presented to the moment
++   *        its last packet left. Each stage is in microseconds; empty when a timestamp is missing (a repeated frame
++   *        has no present time, an encoder that does not stamp its packets has no encode times).
++   */
++  struct frame_timing_t {
++    std::optional<std::uint32_t> capture_us;  ///< Present to encode start: Desktop Duplication, copy, capture queue, colour conversion submit.
++    std::optional<std::uint32_t> encode_us;  ///< Encode start to the bitstream ready: conversion on the GPU and the encoder itself.
++    std::optional<std::uint32_t> queue_us;  ///< Bitstream ready to the video broadcast thread taking it.
++    std::uint32_t send_us = 0;  ///< Packetising, FEC, encryption and paced sending, up to the last packet handed to the socket.
++    std::optional<std::uint32_t> total_us;  ///< Present to the last packet sent.
++    std::uint64_t frame_bytes = 0;  ///< Encoded frame size (before packet headers and FEC).
++    bool key_frame = false;  ///< An IDR frame.
++    bool repeated = false;  ///< Sent without new content: the encoder stamped it but it has no capture timestamp (the idle rate, an IDR on a static picture).
++  };
++
++  /**
++   * @brief Timing and size of one frame sent (video broadcast thread, right after frame_sent()). One short
++   *        uncontended lock.
++   */
++  void frame_timing(session_stats_t *stats, const frame_timing_t &timing) noexcept;
++
+   /// Control message type of the client's per-frame FEC report (`SS_FRAME_FEC_PTYPE`, moonlight-common-c Video.h).
+   constexpr std::uint16_t fec_status_packet_type = 0x5502;
+ 
+@@ -184,7 +206,10 @@ namespace splitplay::live_stats {
+    *                       `rtt_ms` (null when no stream has one yet), `clients`, `capture_fps` (null without a
+    *                       stream), `packet_loss_pct`, `burst_loss_pct`, `fec_recovered`, `fec_failed`, `fec_percent`,
+    *                       `idr_requests` (since the streams started), `frame_gap_ms_max`, `encoder_kbps` (null
+-   *                       without a stream or a live-bitrate encoder)) and the `sessions` array.
++   *                       without a stream or a live-bitrate encoder), the stage times `capture_ms_*`,
++   *                       `encoder_ms_*`, `queue_ms_*`, `send_ms_*`, `sent_ms_*` (p50 and p99), `sent_ms_max`, `frame_kb_avg`,
++   *                       `frame_kb_max`, `key_frames`, `key_frame_kb_max`, `repeated_frames`, `new_fps`) and the `sessions`
++   *                       array.
+    */
+   void report_heartbeat(const event_sink_t &send_event, const heartbeat_sink_t &send_heartbeat);
+ }  // namespace splitplay::live_stats
+diff --git a/src/stream.cpp b/src/stream.cpp
+index a467baff914092941e21aa95ad480cf58b74788e..13ad7e1f1254b578d760629ee6a1558dec0b9245 100644
+--- a/src/stream.cpp
++++ b/src/stream.cpp
+@@ -1572,6 +1572,11 @@ namespace stream {
+       }
+ 
+       frame_network_latency_logger.first_point_now();
++      // SplitPlay live stats: where this frame's time goes. Taken before a repeated frame gets the rate control's
++      // timestamp below.
++      const auto sp_picked_at = std::chrono::steady_clock::now();
++      const auto sp_present = packet->frame_timestamp;
++      const auto sp_frame_bytes = packet->data_size();
+ 
+       auto session = (session_t *) packet->channel_data;
+       auto lowseq = session->video.lowseq;
+@@ -1865,6 +1870,30 @@ namespace stream {
+ 
+         session->video.lowseq = lowseq;
+         splitplay::live_stats::frame_sent(session->sp_stats.get(), sp_wire_bytes, sp_packets, sp_latency);
++        {
++          const auto sp_sent_at = std::chrono::steady_clock::now();
++          auto us = [](std::chrono::steady_clock::time_point from, std::chrono::steady_clock::time_point to) {
++            const auto d = std::chrono::duration_cast<std::chrono::microseconds>(to - from).count();
++            return static_cast<std::uint32_t>(std::clamp<decltype(d)>(d, 0, std::numeric_limits<std::uint32_t>::max()));
++          };
++          auto stage = [&](const std::optional<std::chrono::steady_clock::time_point> &from, const std::optional<std::chrono::steady_clock::time_point> &to) -> std::optional<std::uint32_t> {
++            if (!from || !to) {
++              return std::nullopt;
++            }
++            return us(*from, *to);
++          };
++          splitplay::live_stats::frame_timing_t timing;
++          timing.capture_us = stage(sp_present, packet->sp_encode_start);
++          timing.encode_us = stage(packet->sp_encode_start, packet->sp_encoded_at);
++          timing.queue_us = stage(packet->sp_encoded_at, sp_picked_at);
++          timing.send_us = us(sp_picked_at, sp_sent_at);
++          timing.total_us = stage(sp_present, sp_sent_at);
++          timing.frame_bytes = sp_frame_bytes;
++          timing.key_frame = packet->is_idr();
++          // A packet without encode times (FFmpeg output delayed past its frame) is not known to repeat anything.
++          timing.repeated = !sp_present && packet->sp_encode_start.has_value();
++          splitplay::live_stats::frame_timing(session->sp_stats.get(), timing);
++        }
+       } catch (const std::exception &e) {
+         BOOST_LOG(error) << "Broadcast video failed "sv << e.what();
+         std::this_thread::sleep_for(100ms);
+diff --git a/src/video.cpp b/src/video.cpp
+index 789f9ac974f6dcad1c50aa80479a70c775d002aa..0d92ade01de82740d668bc0e044be311d15f788a 100644
+--- a/src/video.cpp
++++ b/src/video.cpp
+@@ -1782,6 +1782,7 @@ namespace video {
+    * @return 0 when packets are queued; nonzero when encoding or packetization fails.
+    */
+   int encode_avcodec(int64_t frame_nr, avcodec_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
++    const auto sp_encode_start = std::chrono::steady_clock::now();  // SplitPlay live stats
+     auto &frame = session.device->frame;
+     frame->pts = frame_nr;
+ 
+@@ -1845,6 +1846,8 @@ namespace video {
+ 
+       if (av_packet && av_packet->pts == frame_nr) {
+         packet->frame_timestamp = frame_timestamp;
++        packet->sp_encode_start = sp_encode_start;
++        packet->sp_encoded_at = std::chrono::steady_clock::now();
+       }
+ 
+       packet->replacements = &session.replacements;
+@@ -1866,7 +1869,9 @@ namespace video {
+    * @return 0 when packets are queued; nonzero when NVENC encoding fails.
+    */
+   int encode_nvenc(int64_t frame_nr, nvenc_encode_session_t &session, safe::mail_raw_t::queue_t<packet_t> &packets, void *channel_data, std::optional<std::chrono::steady_clock::time_point> frame_timestamp) {
++    const auto sp_encode_start = std::chrono::steady_clock::now();  // SplitPlay live stats
+     auto encoded_frame = session.encode_frame(frame_nr);
++    const auto sp_encoded_at = std::chrono::steady_clock::now();
+     if (encoded_frame.data.empty()) {
+       BOOST_LOG(error) << "NvENC returned empty packet";
+       return -1;
+@@ -1880,6 +1885,8 @@ namespace video {
+     packet->channel_data = channel_data;
+     packet->after_ref_frame_invalidation = encoded_frame.after_ref_frame_invalidation;
+     packet->frame_timestamp = frame_timestamp;
++    packet->sp_encode_start = sp_encode_start;
++    packet->sp_encoded_at = sp_encoded_at;
+     packets->raise(std::move(packet));
+ 
+     return 0;
+diff --git a/src/video.h b/src/video.h
+index 4e05c302fdb24046c56c18a9e23a87b778bb7e2c..e4c5540d2d7e10e2559cab029b47507ec1ac1dff 100644
+--- a/src/video.h
++++ b/src/video.h
+@@ -465,6 +465,8 @@ namespace video {
+     void *channel_data = nullptr;  ///< Platform or protocol state carried with this packet.
+     bool after_ref_frame_invalidation = false;  ///< Whether the frame follows reference-frame invalidation.
+     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;  ///< Capture timestamp associated with the frame.
++    std::optional<std::chrono::steady_clock::time_point> sp_encode_start;  ///< SplitPlay live stats: the encoder was handed the frame.
++    std::optional<std::chrono::steady_clock::time_point> sp_encoded_at;  ///< SplitPlay live stats: the bitstream was ready.
+   };
+ 
+   /**

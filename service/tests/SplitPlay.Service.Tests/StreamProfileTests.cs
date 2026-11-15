@@ -5,6 +5,7 @@ using System.Text;
 using SplitPlay.Core.Configuration;
 using SplitPlay.Core.Ipc;
 using SplitPlay.Core.Lifecycle;
+using SplitPlay.Service.Platform;
 using SplitPlay.Service.Supervision;
 
 namespace SplitPlay.Service.Tests;
@@ -119,6 +120,67 @@ public sealed class StreamProfileTests
         Assert.Equal("rdp_mixed", dto.Input);
         Assert.True(dto.Extra!.ContainsKey("input_fallbacks"));
         Assert.Null(DeskRuntime.MapMetrics(new Dictionary<string, System.Text.Json.JsonElement>()).Input);
+    }
+
+    [Fact]
+    public void Stage_times_and_frame_sizes_are_desk_metrics()
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse("""
+            {"capture_ms_p50":1.1,"capture_ms_p99":2.2,"encoder_ms_p50":3.3,"encoder_ms_p99":4.4,"queue_ms_p50":0,"queue_ms_p99":0.1,
+             "send_ms_p50":0.8,"send_ms_p99":1.9,"sent_ms_p50":5.5,"sent_ms_p99":8.1,"sent_ms_max":12.5,"frame_kb_avg":40.2,
+             "frame_kb_max":310,"key_frames":1,"key_frame_kb_max":310,"repeated_frames":3}
+            """);
+        var metrics = doc.RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
+        var dto = DeskRuntime.MapMetrics(metrics);
+        Assert.Null(dto.Extra);
+        Assert.Equal(2.2, dto.CaptureMsP99);
+        Assert.Equal(4.4, dto.EncoderMsP99);
+        Assert.Equal(0.1, dto.QueueMsP99);
+        Assert.Equal(1.9, dto.SendMsP99);
+        Assert.Equal(8.1, dto.SentMsP99);
+        Assert.Equal(12.5, dto.SentMsMax);
+        Assert.Equal(310, dto.KeyFrameKbMax);
+        Assert.Equal(3, dto.RepeatedFrames);
+
+        using var nulls = System.Text.Json.JsonDocument.Parse("""{"capture_ms_p99":null}""");
+        Assert.Null(DeskRuntime.MapMetrics(nulls.RootElement.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone())).CaptureMsP99);
+    }
+
+    [Fact]
+    public void Cpu_load_comes_from_the_processor_time_deltas()
+    {
+        var before = new Dictionary<int, CpuTimes> { [0] = new(100, 200), [1] = new(50, 100), [64] = new(0, 0) };
+        var after = new Dictionary<int, CpuTimes> { [0] = new(150, 300), [1] = new(50, 200), [64] = new(0, 0) };
+        var load = CpuLoadSampler.Load(before, after)!;
+        Assert.Equal(50.0, load.PerCpu[0]);
+        Assert.Equal(100.0, load.PerCpu[1]);
+        Assert.Equal(0.0, load.PerCpu[64]);
+        Assert.Equal(75.0, load.TotalPercent);
+        Assert.Equal(100.0, load.MaxOf(null));
+        // Processors are keyed group * 64 + number, as the desk core plan numbers them.
+        Assert.Equal(50.0, load.MaxOf([0, 64, 9]));
+        Assert.Null(load.MaxOf([9]));
+        Assert.Null(CpuLoadSampler.Load(before, new Dictionary<int, CpuTimes> { [5] = new(1, 2) }));
+
+        var time = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        var reads = new Queue<IReadOnlyDictionary<int, CpuTimes>?>([before, after, before, after]);
+        var sampler = new CpuLoadSampler(() => reads.Dequeue(), time);
+        Assert.Null(sampler.Sample());
+        time.Advance(TimeSpan.FromSeconds(1));
+        Assert.Equal(75.0, sampler.Sample()!.TotalPercent);
+        // Long after the previous read (between two recordings): a new baseline, not an average over the gap.
+        time.Advance(TimeSpan.FromMinutes(30));
+        Assert.Null(sampler.Sample());
+        time.Advance(TimeSpan.FromSeconds(1));
+        Assert.NotNull(sampler.Sample());
+    }
+
+    [Fact]
+    public void A_link_describes_itself_in_one_line()
+    {
+        Assert.Equal("Ethernet Realtek 2500 Mbit/s", new LinkStatus("Realtek", "ethernet", 2500, 0, 0).Describe());
+        Assert.Equal("Wi-Fi Intel AX210 ch 36 ax",
+            new LinkStatus("Intel AX210", "wifi", 1201, 0, 0, 80, -55, 1201, 960, 36, "ax").Describe());
     }
 
     [Fact]
